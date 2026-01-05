@@ -96,7 +96,8 @@ class TestImprovementFeedback:
         assert feedback["has_suggestions"] is True
         prosody_suggestions = [s for s in feedback["suggestions"] if s["stage"] == "prosody"]
         assert len(prosody_suggestions) >= 1
-        assert "script_hints" in prosody_suggestions[0] or "action" in prosody_suggestions[0]
+        # Check for new structure: target and modification
+        assert "target" in prosody_suggestions[0] or "modification" in prosody_suggestions[0]
 
     def test_placeholder_detected_generates_feedback(self):
         """Placeholder names generate voice matching feedback."""
@@ -127,7 +128,8 @@ class TestImprovementFeedback:
         feedback = result.get_improvement_feedback()
 
         assert "improvement_prompt" in feedback
-        assert "# Podcast Quality Improvement Recommendations" in feedback["improvement_prompt"]
+        # New structure: targets system components for modification
+        assert "# System Component Modifications Required" in feedback["improvement_prompt"]
         assert "Create podcast about AI" in feedback["improvement_prompt"]
 
     def test_to_dict_includes_feedback(self):
@@ -188,4 +190,5 @@ class TestImprovementFeedback:
         feedback = result.get_improvement_feedback()
 
         assert "summary" in feedback
-        assert "improvement" in feedback["summary"].lower() or "suggestions" in feedback["summary"].lower()
+        # New summary format: "Modify {files}: {priorities}" or "All quality checks passed"
+        assert "modify" in feedback["summary"].lower() or "passed" in feedback["summary"].lower()
