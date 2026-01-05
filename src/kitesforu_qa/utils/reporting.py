@@ -64,6 +64,39 @@ def format_results(results: QAResult, verbose: bool = False) -> str:
 
     lines.append("=" * 60)
 
+    # Add improvement feedback for failed results
+    if not results.passed:
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("🔧 IMPROVEMENT RECOMMENDATIONS")
+        lines.append("=" * 60)
+
+        feedback = results.get_improvement_feedback()
+        lines.append(f"Priority: {feedback['priority'].upper()}")
+        lines.append(f"Summary: {feedback['summary']}")
+        lines.append("")
+
+        if feedback['suggestions']:
+            lines.append("Suggested Actions:")
+            for suggestion in feedback['suggestions']:
+                priority_emoji = {
+                    "critical": "🔴",
+                    "high": "🟠",
+                    "medium": "🟡",
+                    "low": "🟢"
+                }.get(suggestion.get("priority", "medium"), "⚪")
+                lines.append(f"  {priority_emoji} [{suggestion.get('stage', 'general').upper()}] {suggestion.get('issue', 'Issue detected')}")
+                lines.append(f"      Action: {suggestion.get('action', 'Review and fix')}")
+            lines.append("")
+
+        if verbose:
+            lines.append("Full Improvement Prompt (for LLM consumption):")
+            lines.append("-" * 40)
+            lines.append(feedback.get('improvement_prompt', 'No prompt generated'))
+            lines.append("-" * 40)
+
+        lines.append("=" * 60)
+
     return "\n".join(lines)
 
 

@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..utils.improvement_feedback import generate_improvement_feedback
 
 
 @dataclass
@@ -35,6 +38,7 @@ class QAResult:
     language: str = "en"
     stages: Dict[str, StageResult] = field(default_factory=dict)
     execution_time_seconds: float = 0.0
+    user_request: Optional[str] = None  # Store for improvement feedback
 
     @property
     def passed(self) -> bool:
@@ -58,9 +62,25 @@ class QAResult:
         """Add a stage result."""
         self.stages[result.stage_name] = result
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
+    def get_improvement_feedback(self) -> Dict[str, Any]:
+        """Generate improvement feedback based on QA results.
+
+        Returns a structured feedback object with:
+        - suggestions: List of specific improvements
+        - improvement_prompt: LLM-consumable prompt for regeneration
+        - priority: Overall priority level (critical/high/medium/low/none)
+        - summary: Brief text summary
+        """
+        from ..utils.improvement_feedback import generate_improvement_feedback
+        return generate_improvement_feedback(self, self.user_request)
+
+    def to_dict(self, include_feedback: bool = True) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization.
+
+        Args:
+            include_feedback: Whether to include improvement feedback
+        """
+        result = {
             "job_id": self.job_id,
             "timestamp": self.timestamp,
             "language": self.language,
@@ -77,3 +97,9 @@ class QAResult:
                 "issues": self.all_issues,
             }
         }
+
+        # Include improvement feedback for failed results
+        if include_feedback and not self.passed:
+            result["improvement_feedback"] = self.get_improvement_feedback()
+
+        return result

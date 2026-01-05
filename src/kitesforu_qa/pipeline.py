@@ -67,6 +67,7 @@ class QAPipeline:
         result = QAResult(
             job_id=job_id,
             language=self.language.value,
+            user_request=user_request,
         )
 
         # Normalize audio path (download from GCS if needed)
