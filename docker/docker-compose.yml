@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  kqa:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - GOOGLE_AI_API_KEY=${GOOGLE_AI_API_KEY}
+      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN}
+      - KITESFORU_API_KEY=${KITESFORU_API_KEY}
+      - KITESFORU_API_URL=${KITESFORU_API_URL:-https://api.kitesforu.com}
+      - GCP_PROJECT=${GCP_PROJECT:-kitesforu-dev}
+    volumes:
+      # Mount GCloud credentials for GCS access
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+      # Mount output directory
+      - ./output:/app/output
+      # Mount local audio files if needed
+      - ./audio:/app/audio:ro
+    working_dir: /app
+
+  # Run QA on a local file
+  kqa-local:
+    extends: kqa
+    command: >
+      run
+      --audio /app/audio/sample.mp3
+      --request "Sample podcast"
+      --verbose
+
+  # Run batch processing
+  kqa-batch:
+    extends: kqa
+    command: >
+      batch
+      --input /app/audio/jobs.csv
+      --output /app/output
+      --parallel 2
