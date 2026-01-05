@@ -353,8 +353,9 @@ def batch(
 @click.option('--script', required=True, help='Path to script file')
 @click.option('--request', required=True, help='Original user request')
 @click.option('--duration', default=10, type=int, help='Target duration in minutes')
+@click.option('--quick', is_flag=True, help='Run only quick checks (free, no LLM)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-def check_script(script: str, request: str, duration: int, verbose: bool):
+def check_script(script: str, request: str, duration: int, quick: bool, verbose: bool):
     """Check script quality before audio generation.
 
     This is a lightweight check that can be run before spending
@@ -373,6 +374,20 @@ def check_script(script: str, request: str, duration: int, verbose: bool):
 
     script_text = script_path.read_text()
 
+    if quick:
+        # Run only free quick checks
+        from .stages.content import quick_script_checks
+        issues = quick_script_checks(script_text, target_duration_min=duration)
+        if issues:
+            click.echo("\n❌ Script has issues:")
+            for issue in issues:
+                click.echo(f"  • {issue}")
+            sys.exit(1)
+        else:
+            click.echo("\n✅ Quick checks passed!")
+            click.echo("   (Run without --quick for full LLM evaluation)")
+            sys.exit(0)
+
     pipeline = QAPipeline(verbose=verbose)
     result = pipeline.run_content_only(
         script=script_text,
@@ -388,6 +403,10 @@ def check_script(script: str, request: str, duration: int, verbose: bool):
                 click.echo(f"  {dim}: {score}/10")
         sys.exit(0)
     else:
+        if result.error:
+            click.echo(f"\n⚠️  {result.error}")
+            click.echo("   (Quick checks passed, but LLM evaluation failed)")
+            sys.exit(1)
         click.echo("\n❌ Script has issues:")
         for issue in result.issues:
             click.echo(f"  • {issue}")
