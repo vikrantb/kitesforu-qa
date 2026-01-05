@@ -33,9 +33,15 @@ class QAConfig:
     )
 
     # Model Settings
-    whisper_model: str = "large-v3"
-    whisper_model_fast: str = "base"  # For quick checks like voice matching
-    llm_model: str = "gemini-2.0-flash"
+    whisper_model: str = field(
+        default_factory=lambda: os.environ.get("WHISPER_MODEL", "large-v3")
+    )
+    whisper_model_fast: str = field(
+        default_factory=lambda: os.environ.get("WHISPER_MODEL_FAST", "base")
+    )
+    llm_model: str = field(
+        default_factory=lambda: os.environ.get("LLM_MODEL", "gemini-2.0-flash")
+    )
 
     # Thresholds
     wer_threshold: float = 0.10  # 10% word error rate

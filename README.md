@@ -113,6 +113,18 @@ kqa check-script \
 | `HUGGINGFACE_TOKEN` | HuggingFace token for speaker diarization | Optional |
 | `KITESFORU_API_KEY` | KitesForU API key for e2e tests | For e2e |
 | `GCP_PROJECT` | GCP project for GCS access | For GCS |
+| `WHISPER_MODEL` | Whisper model for transcription (default: large-v3) | Optional |
+| `WHISPER_MODEL_FAST` | Whisper model for quick checks (default: base) | Optional |
+| `LLM_MODEL` | Gemini model for content eval (default: gemini-2.0-flash) | Optional |
+
+**Model Configuration Examples:**
+```bash
+# Use smaller Whisper model for faster local testing
+export WHISPER_MODEL=base
+
+# Use latest Gemini model
+export LLM_MODEL=gemini-2.5-flash
+```
 
 ### Thresholds
 
@@ -149,6 +161,71 @@ Currently optimized for:
 ```bash
 kqa run --audio audio.mp3 --request "..." --language es
 ```
+
+## Improvement Feedback (Beta)
+
+When QA stages fail, the system generates actionable improvement feedback that can be used to create a feedback loop for continuous improvement.
+
+### Feedback Structure
+
+```json
+{
+  "improvement_feedback": {
+    "has_suggestions": true,
+    "priority": "high",
+    "suggestion_count": 3,
+    "suggestions": [
+      {
+        "stage": "content",
+        "issue": "Script doesn't adequately cover the requested topic",
+        "action": "Revise script generation prompt to focus on topic adherence",
+        "component": "Script generation prompt",
+        "priority": "high"
+      }
+    ],
+    "improvement_prompt": "# Podcast Quality Improvement Recommendations...",
+    "summary": "Found 3 improvement suggestions: 2 high, 1 medium priority"
+  }
+}
+```
+
+### Priority Levels
+
+| Priority | Symbol | Description |
+|----------|--------|-------------|
+| Critical | 🔴 | Blocking issues - must fix immediately |
+| High | 🟠 | Major quality issues - fix before release |
+| Medium | 🟡 | Quality improvements - recommended |
+| Low | 🟢 | Minor enhancements - optional |
+
+### Using Feedback for Automation
+
+The `improvement_prompt` field contains LLM-consumable text that can be passed to Claude or other AI systems to automatically improve podcast generation:
+
+```python
+from kitesforu_qa import QAPipeline
+
+# Run QA
+result = pipeline.run(audio_path="audio.mp3", user_request="...")
+
+if not result.passed:
+    feedback = result.get_improvement_feedback()
+
+    # Pass to your improvement system
+    improvement_prompt = feedback["improvement_prompt"]
+    # Use this prompt with Claude/GPT to improve scripts, TTS settings, etc.
+```
+
+### Stage-Specific Improvements
+
+The feedback system provides targeted improvements for each stage:
+
+- **Format**: Sample rate, bitrate, duration issues
+- **Pronunciation**: Word error rate, TTS model quality
+- **Quality**: MOS score, audio clarity
+- **Prosody**: Monotone voice, pitch variation
+- **Content**: Topic coverage, structure, engagement
+- **Voice Matching**: Placeholder names, gender/age matching
 
 ## Sample Output
 
