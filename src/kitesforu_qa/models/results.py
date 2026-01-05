@@ -1,7 +1,7 @@
 """QA result models."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -31,7 +31,7 @@ class StageResult:
 class QAResult:
     """Complete QA pipeline result."""
     job_id: Optional[str] = None
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     language: str = "en"
     stages: Dict[str, StageResult] = field(default_factory=dict)
     execution_time_seconds: float = 0.0
