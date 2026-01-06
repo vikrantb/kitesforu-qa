@@ -36,7 +36,7 @@ class KitesForUClient:
         self,
         topic: str,
         duration_min: int = 10,
-        style: str = "conversational",
+        style: str = "Explainer",
         language: str = "en",
         **kwargs,
     ) -> dict:
@@ -46,21 +46,22 @@ class KitesForUClient:
         Args:
             topic: Podcast topic/request
             duration_min: Target duration in minutes
-            style: Podcast style
-            language: Language code
+            style: Podcast style (Explainer, Storytelling, Interview, Motivational)
+            language: Language code (not used by API, kept for CLI compatibility)
             **kwargs: Additional parameters
 
         Returns:
             Job data from API
         """
+        # API CreateJobRequest fields: topic, duration_min, style, audience
+        # Note: language is not supported by the API
         response = requests.post(
-            f"{self.base_url}/api/v1/jobs",
+            f"{self.base_url}/v1/podcasts",
             headers=self.headers,
             json={
                 "topic": topic,
                 "duration_min": duration_min,
                 "style": style,
-                "language": language,
                 **kwargs,
             },
             timeout=30,
@@ -79,7 +80,7 @@ class KitesForUClient:
             Job data from API
         """
         response = requests.get(
-            f"{self.base_url}/api/v1/jobs/{job_id}",
+            f"{self.base_url}/v1/podcasts/{job_id}/status",
             headers=self.headers,
             timeout=30,
         )
@@ -157,7 +158,7 @@ class KitesForUClient:
         """
         try:
             response = requests.get(
-                f"{self.base_url}/health",
+                f"{self.base_url}/v1/health",
                 timeout=5,
             )
             return response.status_code == 200
