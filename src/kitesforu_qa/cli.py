@@ -118,7 +118,7 @@ def run(
 @cli.command()
 @click.option('--topic', required=True, help='Podcast topic')
 @click.option('--duration', default=10, type=int, help='Duration in minutes')
-@click.option('--style', default='conversational', help='Podcast style')
+@click.option('--style', default='Explainer', help='Podcast style (Explainer, Storytelling, Interview, Motivational)')
 @click.option('--language', default='en', help='Language code')
 @click.option('--api-url', envvar='KITESFORU_API_URL', default='https://api.kitesforu.com', help='API URL')
 @click.option('--api-key', envvar='KITESFORU_API_KEY', help='API key')
