@@ -8,6 +8,7 @@ from .models.language import Language, LanguageConfig
 from .models.results import QAResult, StageResult
 from .stages.content import evaluate_script_quality, quick_script_checks
 from .stages.format import check_audio_format
+from .stages.language_verification import check_language_verification
 from .stages.pronunciation import check_pronunciation
 from .stages.prosody import check_naturalness
 from .stages.quality import check_audio_quality
@@ -95,6 +96,23 @@ class QAPipeline:
         if not format_result.passed:
             result.execution_time_seconds = time.time() - start_time
             return result
+
+        # Stage 1.5: Language Verification (for non-English)
+        if self.language != Language.ENGLISH:
+            if self.verbose:
+                print("  Running Stage 1.5: Language verification...")
+            lang_verify_result = check_language_verification(
+                audio_path=local_audio,
+                expected_language=self.language.value,
+                whisper_model=self.config.whisper_model_fast,
+            )
+            result.add_stage_result(lang_verify_result)
+        else:
+            result.add_stage_result(StageResult(
+                stage_name="language_verification",
+                passed=True,
+                data={"skipped": True, "reason": "English (default language)"},
+            ))
 
         # Stage 2: Pronunciation (if script provided)
         if script:

@@ -37,7 +37,7 @@ class KitesForUClient:
         topic: str,
         duration_min: int = 10,
         style: str = "Explainer",
-        language: str = "en",
+        language: str = "en-US",
         **kwargs,
     ) -> dict:
         """
@@ -47,14 +47,13 @@ class KitesForUClient:
             topic: Podcast topic/request
             duration_min: Target duration in minutes
             style: Podcast style (Explainer, Storytelling, Interview, Motivational)
-            language: Language code (not used by API, kept for CLI compatibility)
+            language: BCP 47 language code (e.g., "en-US", "hi-IN", "es-ES")
             **kwargs: Additional parameters
 
         Returns:
             Job data from API
         """
-        # API CreateJobRequest fields: topic, duration_min, style, audience
-        # Note: language is not supported by the API
+        # API CreateJobRequest supports: topic, duration_min, style, audience, language
         response = requests.post(
             f"{self.base_url}/v1/podcasts",
             headers=self.headers,
@@ -62,6 +61,7 @@ class KitesForUClient:
                 "topic": topic,
                 "duration_min": duration_min,
                 "style": style,
+                "language": language,
                 **kwargs,
             },
             timeout=30,

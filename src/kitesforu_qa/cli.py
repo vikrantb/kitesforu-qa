@@ -70,11 +70,25 @@ def run(
             sys.exit(1)
         script_text = script_path.read_text()
 
+    # Parse language from request JSON if present
+    effective_language = language
+    try:
+        request_data = json.loads(request)
+        if isinstance(request_data, dict):
+            # Extract language from request JSON (supports BCP-47 codes like "hi-IN")
+            req_lang = request_data.get("language", "")
+            if req_lang:
+                # Normalize BCP-47 to short code (e.g., "hi-IN" -> "hi")
+                effective_language = req_lang.split("-")[0] if "-" in req_lang else req_lang
+    except (json.JSONDecodeError, TypeError):
+        # Request is plain text, use language option
+        pass
+
     # Get language enum
     try:
-        lang = Language(language)
+        lang = Language(effective_language)
     except ValueError:
-        click.echo(f"❌ Unsupported language: {language}", err=True)
+        click.echo(f"❌ Unsupported language: {effective_language}", err=True)
         click.echo(f"   Supported: {', '.join(l.value for l in Language)}")
         sys.exit(1)
 
@@ -119,7 +133,7 @@ def run(
 @click.option('--topic', required=True, help='Podcast topic')
 @click.option('--duration', default=10, type=int, help='Duration in minutes')
 @click.option('--style', default='Explainer', help='Podcast style (Explainer, Storytelling, Interview, Motivational)')
-@click.option('--language', default='en', help='Language code')
+@click.option('--language', default='en-US', help='BCP 47 language code (e.g., en-US, hi-IN, es-ES)')
 @click.option('--api-url', envvar='KITESFORU_API_URL', default='https://api.kitesforu.com', help='API URL')
 @click.option('--api-key', envvar='KITESFORU_API_KEY', help='API key')
 @click.option('--wait-timeout', default=600, type=int, help='Max wait time in seconds')
@@ -145,7 +159,7 @@ def e2e(
 
         kqa e2e --topic "The future of AI" --duration 10
 
-        kqa e2e --topic "Tech news" --api-url https://api.example.com
+        kqa e2e --topic "Tech news" --language hi-IN --api-url https://api.example.com
     """
     click.echo(f"🚀 Starting E2E test for: {topic}")
 
