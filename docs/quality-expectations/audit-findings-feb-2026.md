@@ -7,18 +7,18 @@ and all pipeline stages (intake, research, syllabus, script, audio, writeup gene
 
 ## Consolidated Issue Tracker
 
-| # | Title | Severity | Repo | Status |
-|---|-------|----------|------|--------|
-| 1 | Research planner has no content-type awareness | CRITICAL | kitesforu-workers | Open |
-| 2 | Class orchestrator hardcodes style="Explainer" | CRITICAL | kitesforu-course-workers | Open |
-| 3 | Speaker system rigid Host1/Host2 hierarchy | HIGH | kitesforu-workers | Open |
-| 4 | Emotion guidance is genre-blind | HIGH | kitesforu-workers | Open |
-| 5 | Smart Create missing content category signal | HIGH | kitesforu-api | Open |
-| 6 | Writeup research worker hallucinates sources | HIGH | kitesforu-course-workers | Open |
-| 7 | Writeup format instructions are shallow | HIGH | kitesforu-course-workers | Open |
-| 8 | Writeup voice calibration missing | MEDIUM | kitesforu-course-workers | Open |
-| 9 | Class curriculum lacks emotional guardrails | MEDIUM | kitesforu-course-workers | Open |
-| 10 | Batch vs Chat mode inconsistent | MEDIUM | kitesforu-api | Open |
+| # | Title | Severity | Repo | Status | PR |
+|---|-------|----------|------|--------|-----|
+| 1 | Research planner has no content-type awareness | CRITICAL | kitesforu-workers | FIXED | PR #136 |
+| 2 | Class orchestrator hardcodes style="Explainer" | CRITICAL | kitesforu-course-workers | FIXED | PR #36 |
+| 3 | Speaker system rigid Host1/Host2 hierarchy | HIGH | kitesforu-workers | FIXED | PR #138 |
+| 4 | Emotion guidance is genre-blind | HIGH | kitesforu-workers | FIXED | PR #137 |
+| 5 | Smart Create missing content category signal | HIGH | kitesforu-api | FIXED | PR #138 |
+| 6 | Writeup research worker hallucinates sources | HIGH | kitesforu-course-workers | FIXED | PR #38 |
+| 7 | Writeup format instructions are shallow | HIGH | kitesforu-course-workers | FIXED | PR #37 |
+| 8 | Writeup voice calibration missing | MEDIUM | kitesforu-course-workers | FIXED | PR #38 |
+| 9 | Class curriculum lacks emotional guardrails | MEDIUM | kitesforu-course-workers | FIXED | PR #38 |
+| 10 | Batch vs Chat mode inconsistent | MEDIUM | kitesforu-api | FIXED | PR #139 |
 
 ---
 
