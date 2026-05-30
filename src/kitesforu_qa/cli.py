@@ -487,5 +487,59 @@ def verify_live(
             sys.exit(1)
 
 
+@cli.command("verify-pr-ladder")
+@click.option("--pr-id", required=True, help="PR number (e.g. 13)")
+@click.option(
+    "--pr-kind", required=True,
+    type=click.Choice([
+        "sfx_palette", "music_density", "intensity_gain",
+        "mastering_compression", "ducking", "other",
+    ]),
+    help="PR kind — drives the rung-5 A/B contract",
+)
+@click.option("--baseline-job-id", required=True,
+              help="Job ID created BEFORE the PR deployed")
+@click.option("--post-deploy-job-id", required=True,
+              help="Job ID created AFTER the PR deployed")
+@click.option("--strict/--no-strict", default=False,
+              help="Strict mode (rung 5 must improve, not just stay flat)")
+def verify_pr_ladder(
+    pr_id: str,
+    pr_kind: str,
+    baseline_job_id: str,
+    post_deploy_job_id: str,
+    strict: bool,
+):
+    """D22 L6 — operator wrapper for the 5-rung verification ladder.
+
+    Dispatches to scripts/verify_pr_against_live.py with the same
+    arguments the GH Actions workflow uses. Useful when an operator
+    has a baseline + post-deploy job pair handy and wants to verify
+    locally without the GitHub UI round-trip.
+
+    Exit codes mirror the underlying script:
+      0  All 5 rungs PASS (PR may be marked verified)
+      1  One or more rungs FAIL
+      2  Insufficient data
+    """
+    import subprocess as _sp
+    script = Path(__file__).resolve().parents[2] / "scripts" / "verify_pr_against_live.py"
+    if not script.exists():
+        click.echo(f"❌ verify_pr_against_live.py not found at {script}", err=True)
+        sys.exit(2)
+    cmd = [
+        sys.executable, str(script),
+        "--pr-id", pr_id,
+        "--pr-kind", pr_kind,
+        "--baseline-job-id", baseline_job_id,
+        "--post-deploy-job-id", post_deploy_job_id,
+    ]
+    if strict:
+        cmd.append("--strict")
+    click.echo(f"$ {' '.join(cmd)}")
+    rc = _sp.call(cmd)
+    sys.exit(rc)
+
+
 if __name__ == '__main__':
     cli()
