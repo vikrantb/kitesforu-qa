@@ -77,6 +77,14 @@ def measure_music_presence(
     if m.ndim == 2:
         m = m.mean(axis=1)
 
+    # L5.5 — time-align via cross-correlation so the diff signal
+    # represents (mixed - aligned_speech) rather than (mixed - shifted_
+    # speech). On a 2s intro pad the un-aligned diff dominates the
+    # spectrum + the per-second LUFS test reports pct_active=1.0 even
+    # when music is barely present.
+    from ._alignment import align_mono_signals
+    s, m, _lag = align_mono_signals(s, m, int(sr_s))
+
     n = int(min(len(s), len(m)))
     if n < int(0.5 * sr_s):  # less than 0.5s of audio
         return None

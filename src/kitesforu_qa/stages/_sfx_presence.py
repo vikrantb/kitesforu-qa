@@ -72,6 +72,12 @@ def detect_sfx_transients(
     if m.ndim == 2:
         m = m.mean(axis=1)
 
+    # L5.5 — time-align so the diff signal isolates SFX/music transients
+    # rather than the speech-onset misalignment artifact (which would
+    # otherwise inflate sfx_event_count to 700+ on a normal job).
+    from ._alignment import align_mono_signals
+    s, m, _lag = align_mono_signals(s, m, int(sr_s))
+
     n = int(min(len(s), len(m)))
     if n < int(0.5 * sr_s):
         return None
