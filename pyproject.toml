@@ -33,6 +33,14 @@ dependencies = [
     "requests>=2.31.0",
     "pyyaml>=6.0",
     "rich>=13.0.0",
+    # D21 L5.2 (audio-overhaul, 2026-05-29): listen_test verifier needs
+    # loudness (pyloudnorm) + STOI (pystoi) + numpy/scipy primitives
+    # for music-presence + SFX-transient detection on the final mp3.
+    # All four are pure-python wheels; collective <8 MB install.
+    "pyloudnorm>=0.1.1",
+    "pystoi>=0.4.0",
+    "scipy>=1.10.0",
+    "soundfile>=0.12.0",
 ]
 
 [project.optional-dependencies]
