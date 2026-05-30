@@ -1,0 +1,94 @@
+name: Verify PR against live (5-rung ladder)
+
+# L6 D22 — operator-triggered verification ladder.
+#
+# This workflow is INTENTIONALLY manual (workflow_dispatch only). The
+# 5-rung script costs real LLM + TTS credits per run (~$0.50/job) and
+# requires both a baseline + post-deploy job id to compare. It is NOT
+# fire-on-every-push: that would burn credits on every commit.
+#
+# Usage: GitHub UI → Actions → "Verify PR against live (5-rung ladder)"
+# → Run workflow → fill in inputs → Run.
+#
+# Exit codes (from scripts/verify_pr_against_live.py):
+#   0  All 5 rungs PASS (PR may be marked verified)
+#   1  One or more rungs FAIL (PR is NOT verified)
+#   2  Insufficient data (cannot run; do not claim verified)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_id:
+        description: "PR number (e.g. 13)"
+        required: true
+        type: string
+      pr_kind:
+        description: "PR kind — drives the rung-5 A/B contract"
+        required: true
+        type: choice
+        default: sfx_palette
+        options:
+          - sfx_palette
+          - music_density
+          - intensity_gain
+          - mastering_compression
+          - ducking
+          - other
+      baseline_job_id:
+        description: "Job ID created BEFORE the PR deployed"
+        required: true
+        type: string
+      post_deploy_job_id:
+        description: "Job ID created AFTER the PR deployed"
+        required: true
+        type: string
+      strict:
+        description: "Strict mode (rung 5 must improve, not just stay flat)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # for google-auth-action OIDC if used
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install kqa (incl. listen-test deps)
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Install ffmpeg (needed by listen-test)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Run 5-rung verification
+        run: |
+          STRICT_FLAG=""
+          if [ "${{ github.event.inputs.strict }}" = "true" ]; then
+            STRICT_FLAG="--strict"
+          fi
+          python3 scripts/verify_pr_against_live.py \
+            --pr-id "${{ github.event.inputs.pr_id }}" \
+            --pr-kind "${{ github.event.inputs.pr_kind }}" \
+            --baseline-job-id "${{ github.event.inputs.baseline_job_id }}" \
+            --post-deploy-job-id "${{ github.event.inputs.post_deploy_job_id }}" \
+            $STRICT_FLAG
