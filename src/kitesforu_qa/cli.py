@@ -427,5 +427,65 @@ def check_script(script: str, request: str, duration: int, quick: bool, verbose:
         sys.exit(1)
 
 
+@cli.command("verify-live")
+@click.option("--job-id", required=True, help="Job id to verify (Firestore key)")
+@click.option(
+    "--genre-override", default=None,
+    help="Override the architect-committed genre (e.g. 'horror' / 'bedtime')",
+)
+@click.option(
+    "--output", "-o", default=None,
+    help="Write the full JSON report to this path (otherwise stdout)",
+)
+@click.option(
+    "--exit-on-fail/--no-exit-on-fail", default=True,
+    help="Exit non-zero when verdict=FAIL (useful for CI / cron alerting)",
+)
+def verify_live(
+    job_id: str,
+    genre_override: Optional[str],
+    output: Optional[str],
+    exit_on_fail: bool,
+):
+    """D21 L5.4 — download a live job's mp3 + speech_only and grade
+    it against the per-genre listen-test profile.
+
+    Closes the verifier loop the way L5.2 + L5.3 intended:
+      1. pull (genre, duration, GCS paths) from Firestore
+      2. download audio.mp3 + speech_only.mp3 to a tempdir
+      3. run verify_audio_quality(genre=<architect-committed>)
+      4. print the verdict (PASS / WARN / FAIL)
+      5. exit non-zero on FAIL (so a Cloud Scheduler cron alerts)
+    """
+    # Imports kept lazy — the live module pulls google-cloud-firestore
+    # which the non-live CLI commands shouldn't need to load.
+    from .profiles import get_profile
+    from .verify_live import verify_job_live
+
+    profile_override = (
+        get_profile(genre_override) if genre_override else None
+    )
+    result = verify_job_live(job_id, profile_override=profile_override)
+    payload = result.to_dict()
+
+    if output:
+        Path(output).write_text(
+            json.dumps(payload, indent=2), encoding="utf-8",
+        )
+        click.echo(f"Wrote report to {output}")
+    else:
+        click.echo(json.dumps(payload, indent=2))
+
+    verdict = payload.get("verdict", "ERROR")
+    if verdict == "PASS":
+        click.echo(f"\n✅ {job_id}: PASS")
+    elif verdict == "WARN":
+        click.echo(f"\n⚠️  {job_id}: WARN")
+    else:
+        click.echo(f"\n❌ {job_id}: {verdict}")
+        if exit_on_fail:
+            sys.exit(1)
+
+
 if __name__ == '__main__':
     cli()
