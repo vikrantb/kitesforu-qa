@@ -319,10 +319,21 @@ def _measure_stoi_and_smr(
     if n < int(sr_s):
         return result
 
+    # L5.5 — time-align via cross-correlation before STOI/SMR math.
+    # Without this, a 2 s music_renderer intro pad on `mixed.mp3`
+    # collapses STOI to ~0 even on identical-content signals. See
+    # ``stages/_alignment.py`` for the algorithm + the live evidence
+    # (jobs 0ff85d79 / 23a5f5c6, 2026-05-29).
+    from ._alignment import align_mono_signals
+    s_aligned, m_aligned, _lag = align_mono_signals(s, m, int(sr_s))
+    n = int(min(len(s_aligned), len(m_aligned)))
+    if n < int(sr_s):
+        return result
+
     # STOI (extended version handles modulated maskers better — D12)
     try:
         result["stoi"] = round(
-            float(stoi_fn(s[:n], m[:n], sr_s, extended=True)), 3
+            float(stoi_fn(s_aligned[:n], m_aligned[:n], sr_s, extended=True)), 3
         )
     except Exception:
         pass
@@ -331,8 +342,8 @@ def _measure_stoi_and_smr(
     # renderer's ducking contract.
     try:
         meter = pyln.Meter(sr_s)
-        speech_lufs = float(meter.integrated_loudness(s[:n]))
-        diff = m[:n] - s[:n]
+        speech_lufs = float(meter.integrated_loudness(s_aligned[:n]))
+        diff = m_aligned[:n] - s_aligned[:n]
         diff_lufs = float(meter.integrated_loudness(diff))
         smr = speech_lufs - diff_lufs
         if -30.0 < smr < 80.0:
