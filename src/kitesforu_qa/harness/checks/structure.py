@@ -53,8 +53,11 @@ def duration_adherence(art):
 
 @check("structure.no_empty_segments", dimension="structure", severity="medium")
 def no_empty_segments(art):
-    "No segment should be empty text."
-    empties = sum(1 for s in art.segments if isinstance(s, dict) and not str(s.get("text") or "").strip())
+    "No rendered segment should be empty (real segments_ready store text under text_preview)."
+    empties = sum(
+        1 for s in art.segments
+        if isinstance(s, dict) and not str(s.get("text") or s.get("text_preview") or "").strip()
+    )
     return empties == 0, f"{empties} empty segments"
 
 

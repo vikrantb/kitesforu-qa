@@ -97,6 +97,27 @@ class Check:
 # ── registry ────────────────────────────────────────────────────────────────
 _REGISTRY: list[Check] = []
 
+# Genre aliases — checks registered for a canonical genre also run on its synonyms (real jobs use
+# episode_profile.genre="educational" for explainer content; "how-to" for tutorial, etc.).
+_GENRE_ALIASES = {
+    "educational": "explainer",
+    "explainer": "explainer",
+    "tech_review": "explainer",
+    "audio_overview": "explainer",
+    "how-to": "tutorial",
+    "howto": "tutorial",
+    "true_crime": "true_crime",
+    "sci-fi": "scifi",
+    "science_fiction": "scifi",
+}
+
+
+def _norm_genre(g: str | None) -> str | None:
+    if not g:
+        return None
+    gl = g.strip().lower()
+    return _GENRE_ALIASES.get(gl, gl)
+
 
 def check(
     id: str,
@@ -134,13 +155,15 @@ def checks_for(
 ) -> list[Check]:
     """Select the check-set: every genre-agnostic check (genre is None) PLUS the given genre's own.
     Optionally filter by dimension and/or kind."""
+    ng = _norm_genre(genre)
     out: list[Check] = []
     for c in _REGISTRY:
         if dimension is not None and c.dimension != dimension:
             continue
         if kind is not None and c.kind != kind:
             continue
-        if c.genre is not None and genre is not None and c.genre != genre:
+        # genre match via aliases — a check for "explainer" runs on an "educational" artifact
+        if c.genre is not None and ng is not None and _norm_genre(c.genre) != ng:
             continue
         out.append(c)
     return out

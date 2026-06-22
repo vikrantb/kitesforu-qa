@@ -57,8 +57,13 @@ class Artifact:
     # ── script ──
     @property
     def script(self) -> dict[str, Any]:
-        s = self.doc.get("script")
-        return s if isinstance(s, dict) else {}
+        # Real completed jobs store the canonical full script under outputs.script
+        # ({metadata, dialogue: [{text, speaker, emotion, ...}]}); the top-level "script" is
+        # usually absent. Prefer whichever is a dict (verified on real jobs 64b5df17/695dee1e).
+        for s in (self.doc.get("script"), _g(self.doc, "outputs", "script")):
+            if isinstance(s, dict):
+                return s
+        return {}
 
     @property
     def dialogue(self) -> list[dict[str, Any]]:
@@ -83,9 +88,10 @@ class Artifact:
             if isinstance(d, dict):
                 parts.append(str(d.get("text") or d.get("line") or ""))
         if not parts:
+            # Segment fallback: real segments_ready store the (truncated) text under text_preview.
             for s in self.segments:
                 if isinstance(s, dict):
-                    parts.append(str(s.get("text") or ""))
+                    parts.append(str(s.get("text") or s.get("text_preview") or ""))
         return "\n".join(p for p in parts if p)
 
     @property
