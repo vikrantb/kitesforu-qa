@@ -35,9 +35,16 @@ def test_educational_genre_gets_explainer_checks():
     assert "explainer.has_example" in ids, "educational must alias to explainer"
 
 
-def test_generic_host_names_fires_on_real_shape():
-    sr = run_dimension(Artifact.from_doc(REAL_SHAPE), "structure")
-    assert any("no_generic_host_names" in i for i in sr.issues), sr.issues
+def test_silent_host_labels_pass_spoken_leak_fails():
+    # Host1/Host2 as SILENT speaker labels (REAL_SHAPE) must NOT fire — they are intentional TTS
+    # voice-mapping ids, never heard. Only a label LEAKING into spoken text is the real robotic bug.
+    sr_ok = run_dimension(Artifact.from_doc(REAL_SHAPE), "structure")
+    assert not any("no_spoken_host_labels" in i for i in sr_ok.issues), sr_ok.issues
+    leak = {**REAL_SHAPE, "outputs": {"script": {"dialogue": [
+        {"text": "Host2, what do you think about B-trees?", "speaker": "Host1"},
+    ]}}}
+    sr_bad = run_dimension(Artifact.from_doc(leak), "structure")
+    assert any("no_spoken_host_labels" in i for i in sr_bad.issues), sr_bad.issues
 
 
 def test_visuals_read_nested_compartment():

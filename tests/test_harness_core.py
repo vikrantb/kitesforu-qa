@@ -52,7 +52,7 @@ BAD_DOC = {
     "status": "completed",
     "episode_profile": {"genre": "explainer"},
     "script": {"dialogue": [
-        {"speaker": "Host1", "text": "Yeah totally, haha, you know, exactly, so true, love it, great question, for sure, absolutely."},
+        {"speaker": "Host1", "text": "Host2, yeah totally, haha, you know, exactly, so true, love it, great question, for sure."},
         {"speaker": "Host2", "text": "Right? I mean absolutely, lol, you know, totally."},
     ]},
     "segments_ready": [{"text": ""}],
@@ -70,8 +70,8 @@ def test_bad_fixture_fails_gating():
     art = Artifact.from_doc(BAD_DOC)
     summary = scorecard_summary(run_scorecard(art))
     assert not summary["passed"]
-    # the generic-host-names high-severity check must be among the failures
-    assert any("no_generic_host_names" in i for i in summary["all_issues"]), summary["all_issues"]
+    # the spoken-host-label leak (a real robotic bug) must be among the failures
+    assert any("no_spoken_host_labels" in i for i in summary["all_issues"]), summary["all_issues"]
 
 
 def test_check_primitive_coerce_and_never_raises():
