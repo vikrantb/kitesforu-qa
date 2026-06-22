@@ -135,3 +135,15 @@ def stays_on_topic(art):
     hits = sum(1 for w in words if w in t)
     ratio = hits / len(words)
     return ratio >= 0.4, f"{hits}/{len(words)} topic content-words present ({ratio:.0%})"
+
+
+
+@check("explainer.grounded_research_or_brief", dimension="content", genre="explainer", severity="medium")
+def grounded_research_or_brief(art):
+    "A foundational explainer should be GROUNDED — have web research_results OR an LLM knowledge "
+    "brief, not improvise from raw model weights (verifiable via stages.llm_brief)."
+    if not _is_explainer(art):
+        skip("not an explainer/educational piece")
+    has_research = bool(art.doc.get("research_results"))
+    chars = (art.llm_brief or {}).get("brief_chars") or 0
+    return (has_research or chars > 0), f"research_results={has_research}, llm_brief_chars={chars}"
