@@ -88,10 +88,16 @@ def _low_sample_rate_audio(path: str, *, seconds: float = 20.0) -> str:
 
 
 def _video(path: str, *, seconds: float) -> str:
-    """A solid-color test video of the given length (duration is all video_sync probes)."""
+    """A real-render-quality test video: 1920×1080 H.264/yuv420p @30fps + an AAC audio stream, muxed
+    with +faststart (moov before mdat). The long-tail video_sync battery probes resolution, fps,
+    pix_fmt, codec, stream count, faststart, and the >10KB byte floor — so the GOOD fixture must
+    model an actual hero render, not a 320×180 stub. Duration is the only var across calls."""
     _ffmpeg(
-        "-f", "lavfi", "-i", f"color=c=navy:s=320x180:d={seconds}",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "12", path,
+        "-f", "lavfi", "-i", f"color=c=navy:s=1920x1080:d={seconds}",
+        "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000",
+        "-shortest", "-movflags", "+faststart", path,
     )
     return path
 
