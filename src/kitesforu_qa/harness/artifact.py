@@ -128,6 +128,69 @@ class Artifact:
     def audio_duration_s(self) -> float:
         return float(self.audio_info.get("duration") or 0.0)
 
+    @cached_property
+    def _volumedetect(self) -> dict[str, float]:
+        """ffmpeg volumedetect — peak + mean dBFS (for clipping/loudness checks). Cached, $0."""
+        if not self.audio_path:
+            return {}
+        import re
+        import subprocess
+        try:
+            err = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-i", self.audio_path, "-af", "volumedetect",
+                 "-f", "null", "-"],
+                capture_output=True, text=True, timeout=120,
+            ).stderr
+            out: dict[str, float] = {}
+            for key in ("max_volume", "mean_volume"):
+                m = re.search(rf"{key}:\s*(-?[\d.]+) dB", err)
+                if m:
+                    out[key] = float(m.group(1))
+            return out
+        except Exception:
+            return {}
+
+    @property
+    def audio_peak_dbfs(self) -> float | None:
+        """Peak level in dBFS (>= -0.1 ≈ clipping). None if no audio."""
+        return self._volumedetect.get("max_volume")
+
+    @property
+    def audio_mean_dbfs(self) -> float | None:
+        """Mean level in dBFS (a rough loudness proxy). None if no audio."""
+        return self._volumedetect.get("mean_volume")
+
+    @cached_property
+    def video_info(self) -> dict[str, Any]:
+        """ffprobe the video_path → {duration, width, height, fps, codec}. Cached, $0."""
+        if not self.video_path:
+            return {}
+        import json
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format",
+                 "-show_streams", self.video_path],
+                capture_output=True, text=True, timeout=120,
+            ).stdout
+            data = json.loads(out or "{}")
+            vs = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+            fmt = data.get("format", {})
+            fps = 0.0
+            rfr = str(vs.get("r_frame_rate") or "")
+            if "/" in rfr:
+                n, d = rfr.split("/")
+                fps = float(n) / float(d) if float(d or 0) else 0.0
+            return {
+                "duration": float(fmt.get("duration") or 0),
+                "width": int(vs.get("width") or 0),
+                "height": int(vs.get("height") or 0),
+                "fps": round(fps, 2),
+                "codec": vs.get("codec_name"),
+            }
+        except Exception:
+            return {}
+
     @property
     def has_audio(self) -> bool:
         return bool(self.audio_path)
