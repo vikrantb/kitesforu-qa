@@ -88,9 +88,10 @@ def _low_sample_rate_audio(path: str, *, seconds: float = 20.0) -> str:
 
 
 def _video(path: str, *, seconds: float) -> str:
-    """A solid-color test video of the given length (duration is all video_sync probes)."""
+    """A solid-color test video of the given length. Rendered at the platform's real 1920x1080 hero
+    resolution so visual.video_dims_1080p models a true render (video_sync probes only duration)."""
     _ffmpeg(
-        "-f", "lavfi", "-i", f"color=c=navy:s=320x180:d={seconds}",
+        "-f", "lavfi", "-i", f"color=c=navy:s=1920x1080:d={seconds}",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "12", path,
     )
     return path
