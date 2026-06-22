@@ -121,20 +121,26 @@ def example_has_numbers(art):
     return has_num, "example carries numbers" if has_num else "example stays abstract (no numbers)"
 
 
-@check("explainer.stays_on_topic", dimension="content", genre="explainer", severity="critical")
+@check("explainer.stays_on_topic", dimension="content", genre="explainer", severity="high")
 def stays_on_topic(art):
-    "The script must actually be about the requested topic (catalog exp-c-topic / outline_relevance)."
+    "Coarse OFF-TOPIC pre-filter via literal topic-word overlap. Literal overlap is synonym-blind "
+    "('latest AI breakthroughs' vs a script that says 'advances' scores 0), so this only flags the "
+    "EGREGIOUS case — a multi-word topic the script barely touches — and defers real semantic "
+    "relevance to the judge layer. (Was severity=critical at a 40%-ratio bar → false-positive on "
+    "synonym-paraphrased on-topic scripts + long topics; fidelity audit / broad sweep caught it.)"
     topic = (art.topic or "").lower()
     if not topic:
         skip("no topic recorded")
-    stop = {"how", "a", "an", "the", "of", "to", "is", "are", "what", "why", "does", "work", "works", "and", "in", "for"}
+    stop = {"how", "a", "an", "the", "of", "to", "is", "are", "what", "why", "does", "work", "works",
+            "and", "in", "for", "with", "from", "into", "your", "this", "that", "simple", "high",
+            "level", "overview", "understanding", "building", "guide", "latest", "introduction"}
     words = [w for w in re.findall(r"[a-z]{4,}", topic) if w not in stop]
-    if not words:
-        skip("topic has no content words")
+    if len(words) < 3:
+        skip("topic too short for a reliable literal-overlap check (judge owns semantic relevance)")
     t = art.script_text.lower()
     hits = sum(1 for w in words if w in t)
-    ratio = hits / len(words)
-    return ratio >= 0.4, f"{hits}/{len(words)} topic content-words present ({ratio:.0%})"
+    # fire ONLY when the script shares almost nothing with a specific multi-word topic
+    return hits >= 2, f"{hits}/{len(words)} topic content-words present"
 
 
 
