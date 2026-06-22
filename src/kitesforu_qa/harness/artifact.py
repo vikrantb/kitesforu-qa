@@ -129,6 +129,20 @@ class Artifact:
     def tts_segment_logs(self) -> list[dict[str, Any]]:
         return self.doc.get("tts_segment_logs") or []
 
+    # ── research grounding (the llm angle-research brief) ──
+    @property
+    def research_mode(self):
+        """research_mode {none|llm|web} the route resolver chose (stages.job-research-planner.route)."""
+        rp = _g(self.doc, "stages", "job-research-planner") or {}
+        return (rp.get("route") or {}).get("research_mode")
+
+    @property
+    def llm_brief(self) -> dict[str, Any]:
+        """The LLM angle-research brief metadata {angles, brief_chars} (stages, not research_results)."""
+        rp = _g(self.doc, "stages", "job-research-planner") or {}
+        b = rp.get("llm_brief")
+        return b if isinstance(b, dict) else {}
+
     # ── audio (lazy ffprobe) ──
     @cached_property
     def audio_info(self) -> dict[str, Any]:
