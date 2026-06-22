@@ -1,0 +1,188 @@
+"""Artifact — a typed local view of a COMPLETED job for the check battery.
+
+Built from the job document (the dict ``KitesForUClient.get_job`` returns, or a Firestore export)
+plus optionally-downloaded local audio/images. Checks read typed accessors (``art.script_text``,
+``art.genre``, ``art.segments``, ``art.beat_map``, ``art.audio_info``, ``art.costs``) instead of
+digging through the raw doc, so a doc-shape change touches ONE place.
+
+Primary path is ``from_doc`` — fully offline, $0, no network (the path for fixtures + CI). ``load``
+fetches a live job + downloads its audio for ad-hoc local verification.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from functools import cached_property
+from typing import Any
+
+
+def _g(d: Any, *path: str, default: Any = None) -> Any:
+    """Safe nested get: ``_g(doc, 'episode_profile', 'genre')``."""
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(k)
+        if cur is None:
+            return default
+    return cur
+
+
+@dataclass
+class Artifact:
+    job_id: str
+    doc: dict[str, Any]
+    audio_path: str | None = None
+    image_paths: list[str] = field(default_factory=list)
+    video_path: str | None = None
+
+    # ── identity ──
+    @property
+    def genre(self) -> str:
+        return (_g(self.doc, "episode_profile", "genre")
+                or _g(self.doc, "inputs", "genre")
+                or self.content_type or "general")
+
+    @property
+    def content_type(self) -> str | None:
+        return _g(self.doc, "audio_config", "content_type") or _g(self.doc, "inputs", "content_type")
+
+    @property
+    def status(self) -> str | None:
+        return self.doc.get("status")
+
+    @property
+    def topic(self) -> str:
+        return _g(self.doc, "episode_profile", "topic") or _g(self.doc, "inputs", "topic") or ""
+
+    # ── script ──
+    @property
+    def script(self) -> dict[str, Any]:
+        s = self.doc.get("script")
+        return s if isinstance(s, dict) else {}
+
+    @property
+    def dialogue(self) -> list[dict[str, Any]]:
+        return self.script.get("dialogue") or self.doc.get("dialogue") or []
+
+    @property
+    def speakers(self) -> list[str]:
+        """The speaker/character names from the dialogue (for the generic-host-name check)."""
+        out: list[str] = []
+        for d in self.dialogue:
+            if isinstance(d, dict):
+                sp = d.get("speaker") or d.get("name") or d.get("role")
+                if sp:
+                    out.append(str(sp))
+        return out
+
+    @cached_property
+    def script_text(self) -> str:
+        """All spoken text joined — the substrate for content/structure checks."""
+        parts: list[str] = []
+        for d in self.dialogue:
+            if isinstance(d, dict):
+                parts.append(str(d.get("text") or d.get("line") or ""))
+        if not parts:
+            for s in self.segments:
+                if isinstance(s, dict):
+                    parts.append(str(s.get("text") or ""))
+        return "\n".join(p for p in parts if p)
+
+    @property
+    def word_count(self) -> int:
+        return len(self.script_text.split())
+
+    @property
+    def segments(self) -> list[dict[str, Any]]:
+        return self.doc.get("segments_ready") or []
+
+    @property
+    def beat_map(self) -> list[dict[str, Any]]:
+        return self.doc.get("segment_beat_map") or []
+
+    # ── telemetry ──
+    @property
+    def costs(self) -> dict[str, Any]:
+        return self.doc.get("costs") or {}
+
+    @property
+    def stages(self) -> dict[str, Any]:
+        return self.doc.get("stages") or {}
+
+    @property
+    def tts_segment_logs(self) -> list[dict[str, Any]]:
+        return self.doc.get("tts_segment_logs") or []
+
+    # ── audio (lazy ffprobe) ──
+    @cached_property
+    def audio_info(self) -> dict[str, Any]:
+        if not self.audio_path:
+            return {}
+        try:
+            from ..utils.audio import get_audio_info
+            return get_audio_info(self.audio_path)
+        except Exception:
+            return {}
+
+    @property
+    def audio_duration_s(self) -> float:
+        return float(self.audio_info.get("duration") or 0.0)
+
+    @property
+    def has_audio(self) -> bool:
+        return bool(self.audio_path)
+
+    @property
+    def has_visuals(self) -> bool:
+        return bool(self.image_paths) or bool(self.doc.get("visual_clips"))
+
+    # ── loaders ──
+    @classmethod
+    def from_doc(
+        cls,
+        doc: dict[str, Any],
+        *,
+        audio_path: str | None = None,
+        image_paths: list[str] | None = None,
+        video_path: str | None = None,
+    ) -> Artifact:
+        """Build directly from a job-doc dict + local asset paths — offline, $0, no network."""
+        return cls(
+            job_id=str(doc.get("job_id") or doc.get("id") or "local"),
+            doc=doc,
+            audio_path=audio_path,
+            image_paths=image_paths or [],
+            video_path=video_path,
+        )
+
+    @classmethod
+    def load(cls, job_id: str, client: Any, *, download: bool = True,
+             temp_dir: str = "/tmp/kitesforu-qa") -> Artifact:
+        """Fetch a live job doc (+ optionally download its audio) via the kqa client."""
+        doc = client.get_job(job_id)
+        art = cls.from_doc(doc if isinstance(doc, dict) else {"job_id": job_id})
+        art.job_id = job_id
+        if download:
+            audio_url = None
+            try:
+                audio_url = client.get_job_audio(job_id)
+            except Exception:
+                pass
+            audio_url = audio_url or _g(doc, "outputs", "audio_url")
+            if audio_url:
+                art.audio_path = _download(audio_url, f"{temp_dir}/{job_id}.audio")
+        return art
+
+
+def _download(url: str, local_path: str) -> str | None:
+    import os
+    try:
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        if url.startswith("gs://"):
+            from ..integrations.gcs import download_from_gcs
+            return download_from_gcs(url, local_path)
+        import urllib.request
+        urllib.request.urlretrieve(url, local_path)
+        return local_path
+    except Exception:
+        return None
