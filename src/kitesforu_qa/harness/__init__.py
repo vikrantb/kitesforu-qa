@@ -38,7 +38,17 @@ __all__ = [
     "run_scorecard",
     "scorecard_summary",
     "to_stage_result",
+    "JudgePrompt",
+    "judge_check",
+    "judge_checks_for",
+    "run_judges",
 ]
 
-# Importing the harness registers the built-in check batteries.
+# Importing the harness registers the built-in check batteries + the judge checks.
 from . import checks  # noqa: E402,F401
+from .judge import (  # noqa: E402
+    JudgePrompt,
+    judge_check,
+    judge_checks_for,
+    run_judges,
+)
