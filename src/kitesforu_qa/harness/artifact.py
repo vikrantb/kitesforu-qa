@@ -201,9 +201,37 @@ class Artifact:
     def has_audio(self) -> bool:
         return bool(self.audio_path)
 
+    # ── visuals (nested under doc['visual'] on real jobs) ──
+    @property
+    def visual(self) -> dict[str, Any]:
+        """The visual compartment — real jobs nest it under doc['visual']
+        ({clips, captions_vtt, video_url, video_burned_url, chapters, ...})."""
+        v = self.doc.get("visual")
+        return v if isinstance(v, dict) else {}
+
+    @property
+    def visual_clips(self) -> list[dict[str, Any]]:
+        """VisualClip list — doc['visual']['clips'] (real), top-level visual_clips as fallback."""
+        return self.visual.get("clips") or self.doc.get("visual_clips") or []
+
+    @property
+    def captions_vtt(self) -> str | None:
+        """Burned/sidecar captions VTT — doc['visual']['captions_vtt'] (real) or top-level."""
+        return self.visual.get("captions_vtt") or self.doc.get("captions_vtt")
+
+    @property
+    def chapters(self) -> list[dict[str, Any]]:
+        return self.visual.get("chapters") or self.doc.get("chapters") or []
+
+    @property
+    def video_url(self) -> str | None:
+        """GCS URL of the assembled episode video (burned-caption export preferred)."""
+        return (self.visual.get("video_burned_url") or self.visual.get("video_url")
+                or _g(self.doc, "outputs", "video_url"))
+
     @property
     def has_visuals(self) -> bool:
-        return bool(self.image_paths) or bool(self.doc.get("visual_clips"))
+        return bool(self.image_paths) or bool(self.visual_clips)
 
     # ── loaders ──
     @classmethod

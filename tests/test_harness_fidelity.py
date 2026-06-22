@@ -38,3 +38,27 @@ def test_educational_genre_gets_explainer_checks():
 def test_generic_host_names_fires_on_real_shape():
     sr = run_dimension(Artifact.from_doc(REAL_SHAPE), "structure")
     assert any("no_generic_host_names" in i for i in sr.issues), sr.issues
+
+
+def test_visuals_read_nested_compartment():
+    # Real jobs nest visuals under doc['visual'] — has_visuals reading top-level visual_clips made
+    # the ENTIRE visual battery skip on every real job (false confidence). Found by parallel's loop.
+    doc = {"job_id": "v", "visual": {
+        "clips": [{"beat_index": 0}, {"beat_index": 1}],
+        "captions_vtt": "WEBVTT\n...",
+        "video_url": "gs://x.mp4",
+        "video_burned_url": "gs://burned.mp4",
+    }}
+    art = Artifact.from_doc(doc)
+    assert art.has_visuals
+    assert len(art.visual_clips) == 2
+    assert art.captions_vtt.startswith("WEBVTT")
+    assert art.video_url == "gs://burned.mp4"  # burned-caption export preferred
+
+
+def test_no_visuals_when_visual_none():
+    # audio-only jobs have doc['visual'] = None — must not crash, has_visuals False
+    art = Artifact.from_doc({"job_id": "a", "visual": None})
+    assert not art.has_visuals
+    assert art.visual_clips == []
+    assert art.captions_vtt is None
