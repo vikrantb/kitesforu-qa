@@ -41,6 +41,9 @@ dependencies = [
     "pystoi>=0.4.0",
     "scipy>=1.10.0",
     "soundfile>=0.12.0",
+    # quality-harness visual battery (qh-check-batteries) reads art.image_paths with Pillow for
+    # dimension/blank/text analysis; importable in dev but undeclared = clean-CI import failure.
+    "Pillow>=10",
 ]
 
 [project.optional-dependencies]
