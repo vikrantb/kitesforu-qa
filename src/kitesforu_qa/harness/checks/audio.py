@@ -68,10 +68,14 @@ LRA_GENRE_SLACK_LU = 1.0             # extra slack added on top of the profile's
 SEGMENT_MIN_DURATION_MS = 400.0
 SEGMENT_MIN_TEXT_CHARS = 8           # a segment with >= this many text chars must have real duration
 
-# Master-vs-segment-sum: the hard, drift-free WAV/PCM-as-MP3 decode-collapse invariant. The final
-# master duration must equal the sum of the rendered segment durations within this fraction. (This is
-# stronger than the script-word proxy in not_truncated — it compares ACTUAL rendered segment ms.)
-MASTER_SEGMENT_SUM_TOLERANCE = 0.05  # |master - Σ segments| / Σ segments must be <= this
+# Master-vs-segment-sum: the hard, drift-free WAV/PCM-as-MP3 decode-collapse invariant. This is a
+# ONE-SIDED FLOOR, not a symmetric tolerance: a HEALTHY master is legitimately LONGER than the sum of
+# the bare-speech segment duration_ms, because the assembler inserts real ~1s inter-segment pause
+# padding (the breaths) that the segment durations don't count — so master >= Σsegments (and well
+# above, +10-20%) is normal and must PASS. The bug this guards is the WAV-as-MP3 COLLAPSE, where the
+# master comes out far SHORTER than Σsegments (the 2026-06-19 incident: 10.5s vs 292s). So we fail
+# only when master drops below this fraction of Σsegments; anything at-or-above Σsegments is good.
+MASTER_SEGMENT_SUM_MIN_RATIO = 0.85  # master / Σ segments must be >= this (below = decode collapse)
 
 # Duration-vs-requested undershoot (the 5-min-request-ships-91s class). The rendered master must be
 # at least this fraction of the user-requested (or architect-sized) duration.
@@ -469,12 +473,17 @@ def no_degenerate_segment(art):
 
 @check("audio.master_matches_segment_sum", "audio-mix", severity="critical")
 def master_matches_segment_sum(art):
-    """Master duration must equal the SUM of rendered segment durations (WAV/PCM-as-MP3 decode class).
+    """Master duration must not collapse BELOW the sum of rendered segment durations (WAV/PCM-as-MP3
+    decode class).
 
     The highest-value, drift-free decode-collapse guard: when a premium WAV is mis-decoded as MP3 the
-    master collapses (10.5s vs 292s) while the segment durations on the doc stay correct — so master
-    vs Σ-segments diverges hard. Compares ACTUAL rendered segment ms (not the soft word proxy in
-    not_truncated). skip() if no segment durations recorded or no master duration."""
+    master collapses (10.5s vs 292s) while the segment durations on the doc stay correct — so the
+    master drops far below Σ-segments. This is a ONE-SIDED FLOOR, not a symmetric tolerance: a healthy
+    master is legitimately +10-20% LONGER than Σsegments because the assembler inserts real
+    inter-segment pause padding (the breaths) that the bare-speech segment duration_ms never counts.
+    So master >= Σsegments (and well above) PASSES; only master < MIN_RATIO * Σsegments fails as a
+    collapse. Compares ACTUAL rendered segment ms (not the soft word proxy in not_truncated). skip()
+    if no segment durations recorded or no master duration."""
     seg_s = _segment_durations_s(art)
     if not seg_s:
         skip("no segment durations on the doc")
@@ -484,12 +493,15 @@ def master_matches_segment_sum(art):
     master = art.audio_duration_s
     if master <= 0:
         skip("no master audio duration (ffprobe gave 0)")
-    rel = abs(master - total) / total
-    ok = rel <= MASTER_SEGMENT_SUM_TOLERANCE
-    score = max(0.0, min(1.0, 1.0 - rel))
+    ratio = master / total
+    ok = ratio >= MASTER_SEGMENT_SUM_MIN_RATIO
+    # score saturates at 1.0 once at/above Σsegments (padding is healthy, not penalized); below the
+    # floor it falls toward 0 as the collapse deepens.
+    score = max(0.0, min(1.0, ratio))
     return (ok, score,
             f"master {master:.1f}s vs Σ{len(seg_s)} segments {total:.1f}s "
-            f"(|Δ|/Σ={rel:.2%}, tol {MASTER_SEGMENT_SUM_TOLERANCE:.0%})")
+            f"(master/Σ={ratio:.2f}, floor {MASTER_SEGMENT_SUM_MIN_RATIO:.2f}; "
+            f"longer-than-Σ is healthy pause padding)")
 
 
 @check("audio.duration_vs_requested", "audio-mix", severity="medium")
