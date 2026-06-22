@@ -70,3 +70,17 @@ def test_stays_on_topic_skips_short_topic():
     sr = run_dimension(Artifact.from_doc(_doc(
         "totally unrelated content here about cooking dinner", topic="latest AI news")), "content")
     assert not any("stays_on_topic" in i for i in sr.issues), sr.issues
+
+
+def test_misconception_catches_get_wrong_phrasing():
+    # e2e verify (ce110970): "most people get wrong... but that's not how it works" is a real
+    # misconception the regex previously missed (only matched "most people think")
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "Here's something most people get wrong about hash tables — they think each slot holds one item. But that's not how it works at all. So collisions are guaranteed.")), "content")
+    assert not any("surfaces_misconception" in i for i in sr.issues), sr.issues
+
+
+def test_takeaway_catches_thats_it_synthesis():
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "blah blah about chaining and probing. That's it. Two strategies for the same problem. The right choice depends entirely on your use case and load.")), "content")
+    assert not any("lands_takeaway" in i for i in sr.issues), sr.issues

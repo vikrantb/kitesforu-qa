@@ -47,7 +47,7 @@ def opening_hooks(art):
 def surfaces_misconception(art):
     "A good explainer surfaces a WRONG model before correcting it (catalog exp-c-misconception)."
     t = _text(art).lower()
-    ok = bool(re.search(r"most people (think|assume|believe)|you might (think|assume)|common misconception|it'?s tempting to|turns out|but actually|here'?s the (catch|twist)", t))
+    ok = bool(re.search(r"most people (think|assume|believe)|most people get\b.{0,25}\bwrong|(people|folks) (get|have) [\w\s]{0,20}wrong|you might (think|assume)|common misconception|it'?s tempting to|turns out|but actually|but that'?s not how it (works|happens)|the (common|biggest) (myth|mistake|misconception)|here'?s the (catch|twist)", t))
     return ok, "surfaces a misconception" if ok else "no wrong-model-before-correction"
 
 
@@ -56,7 +56,7 @@ def lands_takeaway(art):
     "Lands a carry-away handle near the close (catalog exp-c-takeaway)."
     t = _text(art)
     close = " ".join(t.split()[-80:]).lower()
-    ok = bool(re.search(r"takeaway|next time (you|a|your|that|when|someone|it)\b|you can now|rule of thumb|remember this|if you remember nothing else|the one thing|that'?s it[.,]? not magic|now you know|the (whole|entire) (point|trick)|the key (idea|insight)", close))
+    ok = bool(re.search(r"takeaway|next time (you|a|your|that|when|someone|it)\b|you can now|rule of thumb|remember this|if you remember nothing else|the one thing|that'?s it[.,]|now you know|the (whole|entire) (point|trick)|the key (idea|insight)|depends (entirely )?on|comes down to|the (right )?choice .{0,40}(shape|depend|matter)", close))
     return ok, "lands a takeaway" if ok else "no carry-away handle near the close"
 
 
