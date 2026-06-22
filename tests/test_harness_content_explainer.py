@@ -38,7 +38,7 @@ def test_condescension_fails():
 def test_off_topic_fails_critical():
     sr = run_dimension(Artifact.from_doc(_doc(
         "Let me tell you about my favorite recipes for pasta and pizza we are cooking tonight.",
-        topic="How public key cryptography works",
+        topic="How distributed consensus algorithms achieve agreement",
     )), "content")
     assert not sr.passed
     assert any("stays_on_topic" in i for i in sr.issues), sr.issues
