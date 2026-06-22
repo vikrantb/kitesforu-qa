@@ -7,10 +7,25 @@ the persisted tts_segment_logs and compare to what was reported — so the fix c
 regress (the harness is the discovery engine: a future change that re-introduces the over-report
 fails here).
 """
+# per-M-char USD rates — mirror kitesforu-workers cost_calculator._TTS_USD_PER_M_CHARS.
+from datetime import datetime, timezone
+
 from ..check import check, skip
 
-# per-M-char USD rates — mirror kitesforu-workers cost_calculator._TTS_USD_PER_M_CHARS.
 _TTS_RATE = {"inworld": 10.0, "gemini": 8.0, "openai": 13.0, "google": 16.0, "elevenlabs": 183.30}
+
+# The reconcile path began writing costs.tts_usd_actual ~2026-06-22 03:37 UTC. Jobs created before
+# that legitimately lack the field — the cost checks must NOT fire on the historical backlog (the
+# fidelity audit found this is the single largest false-positive source).
+TTS_RECONCILE_DEPLOY_TS = datetime(2026, 6, 22, 3, 37, tzinfo=timezone.utc)
+
+
+def _predates_reconcile(art) -> bool:
+    ca = art.created_at
+    try:
+        return ca is not None and ca < TTS_RECONCILE_DEPLOY_TS
+    except TypeError:
+        return False
 
 
 def _expected_tts_from_logs(art):
@@ -34,6 +49,8 @@ def tts_actual_present(art):
     "costs.tts_usd_actual must be written — its ABSENCE on a rendered job is the streaming-path regression."
     if not art.tts_segment_logs:
         skip("no tts_segment_logs to expect a cost from")
+    if _predates_reconcile(art):
+        skip("job predates the costs.tts_usd_actual reconcile fix (2026-06-22)")
     val = art.costs.get("tts_usd_actual")
     return val is not None, f"tts_usd_actual={val}"
 
@@ -41,6 +58,8 @@ def tts_actual_present(art):
 @check("cost.tts_actual_matches_logs", dimension="cost-correctness", severity="high")
 def tts_actual_matches_logs(art):
     "costs.tts_usd_actual must equal the real provider x chars from the logs (the reconciliation)."
+    if _predates_reconcile(art):
+        skip("job predates the costs.tts_usd_actual reconcile fix (2026-06-22)")
     expected = _expected_tts_from_logs(art)
     if expected is None:
         skip("no priceable tts_segment_logs")

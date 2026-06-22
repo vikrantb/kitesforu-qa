@@ -106,9 +106,12 @@ def drama_conflict(art):
     "Drama needs emotional conflict / stakes."
     if not _genre_is(art, "drama"):
         skip("not drama")
-    n = _count(art.script_text, ("but", "however", "afraid", "wanted", "couldn't", "secret",
-                                 "betray", "lost", "fight", "tears", "heart"))
-    return n >= 3, f"{n} conflict/emotion markers"
+    markers = ("but", "however", "afraid", "wanted", "couldn't", "won't", "can't", "secret",
+               "betray", "lost", "fight", "tears", "gun", "kill", "dead", "arrest", "threat",
+               "blood", "bury", "burn", "weapon", "desperate", "danger", "trapped", "lie")
+    t = art.script_text.lower()
+    hit = {m for m in markers if re.search(rf"\b{re.escape(m)}\b", t)}
+    return len(hit) >= 2, f"{len(hit)} distinct conflict/stakes markers"
 
 
 # ── shared: AI-tells (every genre) ───────────────────────────────────────────
