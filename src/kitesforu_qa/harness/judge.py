@@ -150,3 +150,66 @@ def practical_examples(art):
         excerpt=art.script_text,
         rubric="pass ONLY if at least one example is specific + relatable.",
     )
+
+
+# ── FILE-BASED judge path (founder's "local cloud code" preference — no metered cloud API) ─────────
+
+
+def export_judge_prompts(art: Any, out_path: str, checks: list[Check] | None = None) -> int:
+    """Write each applicable judge check's prompt to a JSONL file for a LOCAL agent to score.
+
+    The founder's preference: judge via a local agent (Claude Code / codex / gemini-cli reading the
+    file), NOT a metered product cloud API. Flow: export_judge_prompts -> a local agent reads the
+    JSONL, appends {check_id, passed, score, reason} per line to a verdicts file -> load_judge_verdicts
+    reads it back as CheckResults. Decouples the judge layer from the (depleted) Gemini key. Returns
+    the number of prompts written.
+    """
+    import json
+    import pathlib
+
+    rows = []
+    for c in (checks if checks is not None else judge_checks_for(art)):
+        if c.kind != "judge":
+            continue
+        try:
+            jp = c.fn(art)
+        except Exception:  # noqa: BLE001 — a broken judge prompt just drops that line
+            continue
+        if not isinstance(jp, JudgePrompt) or not jp.excerpt.strip():
+            continue
+        rows.append({
+            "check_id": c.id, "dimension": c.dimension, "genre": c.genre, "severity": c.severity,
+            "instruction": _JUDGE_INSTRUCTION, "question": jp.question, "rubric": jp.rubric,
+            "excerpt": jp.excerpt[:6000],
+        })
+    pathlib.Path(out_path).write_text("\n".join(json.dumps(r) for r in rows))
+    return len(rows)
+
+
+def load_judge_verdicts(verdicts_path: str, checks_by_id: dict[str, Check] | None = None) -> list[CheckResult]:
+    """Read a verdicts JSONL ({check_id, passed, score, reason}) a local agent wrote -> CheckResults.
+
+    Pairs with export_judge_prompts for the no-metered-API judge flow. Unknown/blank lines are
+    skipped; a malformed line drops that verdict rather than failing the load.
+    """
+    import json
+    import pathlib
+
+    by_id = checks_by_id or {c.id: c for c in _REGISTRY if c.kind == "judge"}
+    results: list[CheckResult] = []
+    for line in pathlib.Path(verdicts_path).read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            v = json.loads(line)
+            c = by_id.get(v["check_id"])
+        except Exception:  # noqa: BLE001
+            continue
+        if not c:
+            continue
+        results.append(CheckResult(
+            c.id, bool(v.get("passed", False)), float(v.get("score", 0.0) or 0.0),
+            c.severity, c.dimension, c.genre, str(v.get("reason", ""))[:200],
+        ))
+    return results
