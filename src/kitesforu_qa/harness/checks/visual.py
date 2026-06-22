@@ -140,16 +140,62 @@ def _field_present(clips: list[dict[str, Any]], key: str) -> bool:
     return any(str(c.get(key) or "").strip() for c in clips)
 
 
+def _basename(s: str) -> str:
+    """The last path segment of a uri/path, lowercased (the clip↔file correlation key)."""
+    return s.rsplit("/", 1)[-1].strip().lower()
+
+
 def _diagram_image_paths(art) -> list[str]:
-    """Local image files that look like diagram/card renders (the catalog's fill/blank/pad targets).
-    Without a per-clip→file mapping on the Artifact, infer from the filename — diagram/card renders
-    are named with those tokens by the renderer. Falls back to empty (→ skip) when none match."""
+    """Local image files that are diagram/card renders (the catalog's fill/blank/pad targets).
+
+    PREFERRED mapping (modality, drift-free): correlate each structural clip
+    (``modality in {'diagram','chart'}``) to its downloaded file by ``asset_uri`` basename — real
+    renders are content-hash-named (``d97b2026.png``), so a filename-token heuristic never matches
+    them and these four pixel checks would silently skip on every real job. When the operator's
+    ``image_paths`` basenames line up with the clips' asset_uri basenames, this finds the real diagram
+    files regardless of naming.
+
+    FALLBACK (filename tokens): if no structural clip's basename maps onto a downloaded file (e.g. the
+    operator named the files differently and didn't tag them, or the doc carries no clips), fall back
+    to the legacy token heuristic (``diagram``/``card``/``chart``/``btree`` in the filename) so a
+    modality-tagged operator path still works. When neither yields anything the consuming check skips
+    with a clear note rather than treating the diagram dimension as silently N/A."""
+    # PREFERRED: modality → asset_uri basename → matching downloaded file.
+    diagram_basenames = {
+        _basename(_uri(c)) for c in _clips(art) if _is_structural(c) and _uri(c)
+    }
+    if diagram_basenames:
+        by_modality = [p for p in art.image_paths if _basename(p) in diagram_basenames]
+        if by_modality:
+            return by_modality
+    # FALLBACK: legacy filename-token heuristic (modality-tagged operator paths / no correlatable uri).
     out = []
     for p in art.image_paths:
-        name = p.rsplit("/", 1)[-1].lower()
+        name = _basename(p)
         if "diagram" in name or "card" in name or "chart" in name or "btree" in name:
             out.append(p)
     return out
+
+
+def _require_diagram_paths(art) -> list[str]:
+    """The diagram/card image files for the pixel fill/blank/pad/dims checks, or a CLEAR skip.
+
+    F3 fidelity: real renders are content-hash-named, so ``_diagram_image_paths`` maps them by clip
+    MODALITY (``diagram``/``chart``) → ``asset_uri`` basename, falling back to the filename-token
+    heuristic. When neither correlates a downloaded file we skip with an explicit note — NOT the old
+    "identifiable by name" wording, which read like the dimension was N/A and let these four checks
+    (incl. the critical fill/blank guards) silently no-op on every real job.
+
+    LOADER CONTRACT: the operator/loader that populates ``art.image_paths`` should download each
+    structural clip's asset under its ``asset_uri`` basename (so the modality mapping correlates) OR
+    name diagram files with a diagram/card/chart/btree token (so the fallback matches). Untagged,
+    non-correlatable diagram images cannot be pixel-checked and will surface this skip."""
+    paths = _diagram_image_paths(art)
+    if not paths:
+        skip("no modality-tagged diagram image available "
+             "(no structural clip's asset_uri basename matched a downloaded file, and no "
+             "diagram/card/chart/btree filename token — loader should tag diagram images)")
+    return paths
 
 
 def _require_visuals(art) -> None:
@@ -176,16 +222,17 @@ def _expected_image_count(art) -> int:
 
     Prefer the VisualClip records that actually carry an asset (asset_uri set), since stub/diagram
     clips legitimately have no AI image. Fall back to the count of visual beats in the beat_map.
-    """
-    clips = art.doc.get("visual_clips") or []
-    with_asset = sum(
-        1 for c in clips
-        if isinstance(c, dict) and str(c.get("asset_uri") or "").strip()
-    )
+
+    Reads clips through the SAME ``_clips()`` helper every other visual check uses (which resolves the
+    nested ``doc['visual']['clips']`` shape real jobs use, not only the top-level ``visual_clips`` that
+    is None on real jobs) — otherwise this always fell through to ``len(beat_map)`` and never saw the
+    real rendered-clip count."""
+    clips = _clips(art)
+    with_asset = sum(1 for c in clips if str(c.get("asset_uri") or "").strip())
     if with_asset:
         return with_asset
     if clips:
-        return len([c for c in clips if isinstance(c, dict)])
+        return len(clips)
     return len(art.beat_map)
 
 
@@ -559,9 +606,7 @@ def video_dims_1080p(art):
 def png_min_dims(art):
     "Diagram/card PNGs must be at least 1600x900 (a tiny render is an unreadable strip)."
     _require_visuals(art)
-    paths = _diagram_image_paths(art)
-    if not paths:
-        skip("no diagram/card image files identifiable by name")
+    paths = _require_diagram_paths(art)
     from PIL import Image
     small = []
     for p in paths:
@@ -595,9 +640,7 @@ def _non_bg_fraction(img) -> float:
 def diagram_fills_frame(art):
     "Diagrams must FILL the frame (>20% painted) — catches the inline-block 'tiny strip' regression."
     _require_visuals(art)
-    paths = _diagram_image_paths(art)
-    if not paths:
-        skip("no diagram/card image files identifiable by name")
+    paths = _require_diagram_paths(art)
     from PIL import Image
     thin = []
     worst = 1.0
@@ -617,9 +660,7 @@ def diagram_fills_frame(art):
 def diagram_not_blank(art):
     "Every diagram/card must paint at least ~1.2% non-background (near-empty-on-navy floor)."
     _require_visuals(art)
-    paths = _diagram_image_paths(art)
-    if not paths:
-        skip("no diagram/card image files identifiable by name")
+    paths = _require_diagram_paths(art)
     from PIL import Image
     blank = []
     worst = 1.0
@@ -639,9 +680,7 @@ def diagram_not_blank(art):
 def diagram_padded_not_cropped(art):
     "A tall diagram forced to 16:9 must be pillarboxed (navy side borders), never cropped."
     _require_visuals(art)
-    paths = _diagram_image_paths(art)
-    if not paths:
-        skip("no diagram/card image files identifiable by name")
+    paths = _require_diagram_paths(art)
     from PIL import Image
     br, bg, bb = _BG_RGB
     cropped = []

@@ -124,6 +124,19 @@ def _blank_image(path: str, *, w: int = 1280, h: int = 720) -> str:
     return path
 
 
+def _diagram_card_image(path: str, *, w: int = 1920, h: int = 1080) -> str:
+    """A diagram/card render: a navy (11,16,32) background that FILLS the frame with a large bright
+    painted region (>20% non-background) -> diagram_fills_frame + diagram_not_blank PASS. Named only
+    by the caller (content-hash basename in the F3 test) so it carries no filename token."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (w, h), (11, 16, 32))  # navy diagram background
+    draw = ImageDraw.Draw(img)
+    # paint a centered light panel covering ~36% of the frame (well over the 20% fill floor)
+    draw.rectangle([w * 0.2, h * 0.2, w * 0.8, h * 0.8], fill=(230, 235, 245))
+    img.save(path)
+    return path
+
+
 # ── synthetic docs ───────────────────────────────────────────────────────────
 
 
@@ -253,6 +266,32 @@ def test_audio_low_sample_rate_fails(tmp_path):
     assert not by["audio.sample_rate_ok"]["passed"], by["audio.sample_rate_ok"]["evidence"]
 
 
+def test_audio_master_padded_passes(tmp_path):
+    """F1 fidelity: a HEALTHY master is legitimately LONGER than Σ(segment duration_ms) because the
+    assembler inserts real inter-segment pause padding (the breaths). The one-sided floor must PASS
+    this — a symmetric ~5% tolerance falsely failed every healthy episode (btree 160 vs 145, etc.).
+
+    Σsegments = 4x5s = 20s; render a 24s master (+20% padding) -> master/Σ=1.20 must pass."""
+    doc = _base_doc()
+    art = Artifact.from_doc(doc, audio_path=_good_audio(str(tmp_path / "padded.wav"), seconds=24.0))
+    _sr, by = _gating_results(art, "audio-mix")
+    c = by["audio.master_matches_segment_sum"]
+    assert c["passed"], f"padded master (+20%) must pass the one-sided floor: {c['evidence']}"
+    assert not c["skipped"], c["evidence"]
+
+
+def test_audio_master_collapsed_fails(tmp_path):
+    """F1: the real bug this guards — a WAV mis-decoded as MP3 collapses the master far BELOW
+    Σsegments (the 2026-06-19 incident: ~10s master vs ~290s of segments). master/Σ << floor -> fail.
+
+    Σsegments = 4x5s = 20s; render a 2s master -> master/Σ=0.10, well under the 0.85 floor."""
+    doc = _base_doc()
+    art = Artifact.from_doc(doc, audio_path=_truncated_audio(str(tmp_path / "collapse.wav"), seconds=2.0))
+    _sr, by = _gating_results(art, "audio-mix")
+    c = by["audio.master_matches_segment_sum"]
+    assert not c["passed"], f"collapsed master (master/Σ≈0.10) must fail the floor: {c['evidence']}"
+
+
 def test_audio_na_when_no_audio():
     """No audio file -> every audio-mix check skips (a podcast doc with no downloaded master)."""
     _assert_all_skipped(Artifact.from_doc(_base_doc()), "audio-mix")
@@ -292,6 +331,67 @@ def test_visual_missing_images_fails(tmp_path):
     art = Artifact.from_doc(doc, image_paths=[])
     _sr, by = _gating_results(art, "visual-images")
     assert not by["visual.images_present"]["passed"], by["visual.images_present"]["evidence"]
+
+
+def test_visual_count_reasonable_uses_nested_clips(tmp_path):
+    """F2 fidelity: real jobs nest clips at doc['visual']['clips'] (top-level visual_clips is None),
+    so _expected_image_count must read through _clips() (nested fallback) — not fall back to
+    len(beat_map). Here beat_map has only 2 beats but there are 4 asset-carrying clips; 4 images
+    must count as a MATCH (got==expected==4), which fails iff the old top-level-only read regressed."""
+    doc = _base_doc()
+    doc["visual"] = {"clips": _visual_clips()}  # nested (real) shape; no top-level visual_clips
+    imgs = [_good_image(str(tmp_path / f"n{i}.png")) for i in range(4)]
+    art = Artifact.from_doc(doc, image_paths=imgs)
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.count_reasonable"]
+    assert not c["skipped"], c["evidence"]
+    assert c["passed"], (
+        f"4 images vs 4 nested asset-clips must match; a beat_map fallback (2) would mis-expect: "
+        f"{c['evidence']}"
+    )
+    assert "4 expected" in c["evidence"], c["evidence"]
+
+
+def test_visual_diagram_checks_run_on_content_hash_names(tmp_path):
+    """F3 fidelity: real diagram renders are content-hash-named (d97b2026.png), so the old
+    filename-token heuristic ('diagram'/'card'/...) never matched them and the 4 pixel checks
+    (incl. critical fill/blank) silently skipped on every real job. The modality mapping must
+    correlate a structural clip's asset_uri basename to the downloaded file so the checks RUN."""
+    doc = _base_doc()
+    # one scene clip + one diagram clip, both asset_uri'd with content-hash basenames (no tokens)
+    doc["visual"] = {"clips": [
+        {"beat_index": 0, "modality": "scene", "render_mode": "image",
+         "aspect_ratio": "16:9", "asset_uri": "gs://x/a1b2c3d4e5f6a7b8.png"},
+        {"beat_index": 1, "modality": "diagram", "render_mode": "image",
+         "aspect_ratio": "16:9", "asset_uri": "gs://x/d97b2026deadbeef.png"},
+    ]}
+    # the diagram file is a real navy-bg card that FILLS the frame; named by content hash only.
+    diagram = _diagram_card_image(str(tmp_path / "d97b2026deadbeef.png"))
+    scene = _good_image(str(tmp_path / "a1b2c3d4e5f6a7b8.png"))
+    art = Artifact.from_doc(doc, image_paths=[scene, diagram])
+    _sr, by = _gating_results(art, "visual-images")
+    fills = by["visual.diagram_fills_frame"]
+    blank = by["visual.diagram_not_blank"]
+    assert not fills["skipped"], f"diagram_fills_frame must RUN via modality mapping: {fills['evidence']}"
+    assert not blank["skipped"], f"diagram_not_blank must RUN via modality mapping: {blank['evidence']}"
+    assert fills["passed"], fills["evidence"]
+    assert blank["passed"], blank["evidence"]
+
+
+def test_visual_diagram_checks_skip_clearly_when_uncorrelatable(tmp_path):
+    """F3: when a diagram clip's asset can't be correlated to any downloaded file and no filename
+    token matches, the pixel checks must skip with the CLEAR note (not the old N/A-looking wording)."""
+    doc = _base_doc()
+    doc["visual"] = {"clips": [
+        {"beat_index": 1, "modality": "diagram", "render_mode": "image",
+         "aspect_ratio": "16:9", "asset_uri": "gs://x/uncorrelated_hash.png"},
+    ]}
+    # a downloaded scene image whose basename matches NO clip and carries no diagram token
+    art = Artifact.from_doc(doc, image_paths=[_good_image(str(tmp_path / "scene_only.png"))])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.diagram_fills_frame"]
+    assert c["skipped"], c["evidence"]
+    assert "no modality-tagged diagram image available" in c["evidence"], c["evidence"]
 
 
 def test_visual_na_when_no_visuals():
