@@ -305,6 +305,85 @@ def _clips_with_spans(art: Any) -> list[tuple[int | None, float, float]]:
     return rows
 
 
+# ── DELIVERED-MASTER timeline reference (the intro-offset fix) ─────────────────
+# WHY: visual clips are stamped on the DELIVERED master axis — their start_ms is
+# ``intro_offset_ms + placed_start_ms`` (audio stage's master_segment_timeline →
+# visuals/worker._stamp_beat_timing). Rebuilding the reference window by walking
+# ``segments_ready[].duration_ms`` from 0 puts the reference on the PRE-intro 0-based
+# axis, so a healthy intro-offset job reads a false +intro_offset lag on EVERY clip
+# (the +12s false-positive). The reference MUST be on the same post-intro axis as the
+# clips: prefer the persisted master_segment_timeline; else detect the front offset the
+# clips share and shift the gapless walk by it.
+
+
+def _master_timeline_windows(art: Any) -> dict[int, tuple[float, float]]:
+    """``{segment_index: (start_s, end_s)}`` from the persisted ``master_segment_timeline``
+    (delivered-master coords, intro offset already baked in). ``{}`` when absent/legacy."""
+    out: dict[int, tuple[float, float]] = {}
+    for r in getattr(art, "master_segment_timeline", []) or []:
+        idx = r.get("index")
+        st = r.get("start_ms")
+        en = r.get("end_ms")
+        if idx is None or st is None or en is None:
+            continue
+        try:
+            i, s, e = int(idx), float(st) / 1000.0, float(en) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if e < s:
+            e = s
+        out[i] = (s, e)
+    return out
+
+
+def _detect_intro_offset_s(art: Any, segment_windows: dict[int, tuple[float, float]]) -> float:
+    """Front offset (seconds) between the clip axis (delivered master) and a 0-based gapless
+    segment walk — the intro-music prepend the gapless walk omits. Used ONLY on legacy jobs that
+    have no ``master_segment_timeline``: the earliest clip start should align to its segment's
+    0-based start, so the residual is the shared front offset. Clamped to >= 0 (a clip starting
+    before its 0-based segment is a real lead, not an intro offset, so never shift negative)."""
+    clips = _clips(art)
+    if not clips or not segment_windows:
+        return 0.0
+    # earliest clip start across all clips (every clip carries the same front offset).
+    starts = [s for s in (_clip_start_s(c) for c in clips) if s is not None]
+    earliest_seg = min((lo for lo, _ in segment_windows.values()), default=0.0)
+    if not starts:
+        return 0.0
+    return max(0.0, min(starts) - earliest_seg)
+
+
+def _segment_windows_delivered(art: Any) -> dict[int, tuple[float, float]]:
+    """``{segment_index: (start_s, end_s)}`` on the SAME delivered-master axis the clips are
+    stamped on. Resolution order:
+      1. the persisted ``master_segment_timeline`` (authoritative — intro offset already baked in);
+      2. else the gapless ``segments_ready[].duration_ms`` walk from 0, SHIFTED by the detected
+         intro offset so the reference and the clips share the front offset (the +12s fix);
+      3. ``{}`` when there are no usable segment durations.
+    Fail-open: a legacy job with no intro prepend detects offset 0 → identical to the old 0-based
+    walk, so non-intro jobs are unchanged."""
+    real = _master_timeline_windows(art)
+    if real:
+        return real
+    segs = getattr(art, "segments", None) or []
+    seg_by_index: dict[int, dict[str, Any]] = {}
+    for i, s in enumerate(segs):
+        if isinstance(s, dict):
+            seg_by_index[int(s.get("index", i))] = s
+    if not seg_by_index:
+        return {}
+    base: dict[int, tuple[float, float]] = {}
+    acc = 0.0
+    for si in sorted(seg_by_index.keys()):
+        dur = float(seg_by_index[si].get("duration_ms") or 0) / 1000.0
+        base[si] = (acc, acc + dur)
+        acc += dur
+    off = _detect_intro_offset_s(art, base)
+    if off <= 0.0:
+        return base
+    return {si: (lo + off, hi + off) for si, (lo, hi) in base.items()}
+
+
 # ── checks ───────────────────────────────────────────────────────────────────
 
 
@@ -369,27 +448,19 @@ def clips_beat_aligned(art):
     if not beat_map or not segs:
         skip("no segment_beat_map or segments to derive beat windows")
 
-    # Build each beat's narration window [start_s, end_s) from the segments anchored to it.
-    # Segments are clocked gaplessly by duration_ms in index order (the canonical timeline).
-    seg_by_index: dict[int, dict[str, Any]] = {}
-    for i, s in enumerate(segs):
-        if isinstance(s, dict):
-            seg_by_index[int(s.get("index", i))] = s
-    order = sorted(seg_by_index.keys())
-    start_s_by_index: dict[int, float] = {}
-    end_s_by_index: dict[int, float] = {}
-    acc = 0.0
-    for si in order:
-        dur = float(seg_by_index[si].get("duration_ms") or 0) / 1000.0
-        start_s_by_index[si] = acc
-        acc += dur
-        end_s_by_index[si] = acc
+    # Build each beat's narration window [start_s, end_s) from the segments anchored to it, on the
+    # SAME delivered-master axis the clips are stamped on (master_segment_timeline when present, else
+    # the gapless walk shifted by the detected intro offset). Walking from 0 would put the window on
+    # the pre-intro axis and read a false +intro_offset lag on every clip (the +12s false-positive).
+    seg_windows = _segment_windows_delivered(art)
+    if not seg_windows:
+        skip("no usable segment durations to derive beat windows")
 
     beat_window: dict[int, list[float]] = {}
     for si, bi in beat_map.items():
-        if si not in start_s_by_index:
+        if si not in seg_windows:
             continue
-        lo, hi = start_s_by_index[si], end_s_by_index[si]
+        lo, hi = seg_windows[si]
         if bi not in beat_window:
             beat_window[bi] = [lo, hi]
         else:
@@ -471,6 +542,16 @@ def no_gap_or_overrun(art):
         skip("clips have no usable start/end timing")
     spans.sort()
 
+    # The clips live on the DELIVERED-master axis: the first spoken segment begins at the intro-music
+    # offset, so the visuals legitimately start ~intro_offset in, not at 0. Coverage is measured
+    # against the SPOKEN span (intro_start → audio end), and the leading gap is measured from where
+    # speech begins — NOT from 0, which would read the entire intro as a 12s leading "black hole"
+    # gap and the intro fraction as missing coverage (the +12s false-positive).
+    seg_windows = _segment_windows_delivered(art)
+    speech_start = min((lo for lo, _ in seg_windows.values()), default=0.0) if seg_windows else 0.0
+    spoken_span = max(0.0, audio_s - speech_start)
+    cover_ref = spoken_span or audio_s
+
     # merge overlapping spans, measure covered length + the largest interior gap
     covered = 0.0
     max_gap = 0.0
@@ -485,10 +566,11 @@ def no_gap_or_overrun(art):
             cur_hi = max(cur_hi, hi)
         prev_hi = max(prev_hi, hi)
     covered += cur_hi - cur_lo
-    # leading gap (first clip should start near 0; treat a big lead as an interior gap too)
-    max_gap = max(max_gap, spans[0][0])
+    # leading gap: the first clip should start near where SPEECH starts (the intro offset), not 0.
+    # A clip that trails the speech start by more than the cap is a real leading black hole.
+    max_gap = max(max_gap, max(0.0, spans[0][0] - speech_start))
 
-    coverage = min(1.0, covered / audio_s) if audio_s else 1.0
+    coverage = min(1.0, covered / cover_ref) if cover_ref else 1.0
     overrun = max(0.0, prev_hi - audio_s)
     overrun_pct = overrun / audio_s if audio_s else 0.0
 
@@ -498,8 +580,9 @@ def no_gap_or_overrun(art):
     passed = cov_ok and gap_ok and overrun_ok
     score = min(coverage, max(0.0, 1.0 - overrun_pct))
     return passed, score, (
-        f"coverage {coverage:.0%} (need {_COVERAGE_MIN:.0%}), max gap {max_gap:.1f}s "
-        f"(≤{_MAX_INTERIOR_GAP_S}s), overrun {overrun:.1f}s ({overrun_pct:.0%}, ≤{_OVERRUN_MAX_PCT:.0%})"
+        f"coverage {coverage:.0%} of spoken span {cover_ref:.1f}s (need {_COVERAGE_MIN:.0%}), "
+        f"max gap {max_gap:.1f}s (≤{_MAX_INTERIOR_GAP_S}s), overrun {overrun:.1f}s "
+        f"({overrun_pct:.0%}, ≤{_OVERRUN_MAX_PCT:.0%})"
     )
 
 # ── long-tail: duration / container / codec invariants (catalog vs-dur-*) ─────
@@ -792,21 +875,29 @@ def beat_map_covers_all_segments(art):
          if isinstance(c.get("beat_index"), int) and c["beat_index"] not in beats_in_map}
     )
 
-    # 3) stamped clip windows sum to within the DRIFT_BAND of the master (no lead/lag accumulation
-    #    from a proportional guess) — vs-stamp-009.
+    # 3) the LAST stamped clip end must reach where SPEECH ends — not where the full master ends.
+    #    Clips are stamped on the delivered axis (intro offset baked in); the reference is the
+    #    speech-span end (master_segment_timeline's last end when present, else the full master).
+    #    Using the full master as the reference would charge the intro-music lead / a legit
+    #    music-outro TAIL as drift on every healthy job (the +12s false-positive). This mirrors the
+    #    worker's own evaluate_delivered_master_drift, which measures against the speech span.
     rows = _clips_with_spans(art)
     audio_s = art.audio_duration_s
+    seg_windows = _segment_windows_delivered(art)
+    speech_end = max((hi for _, hi in seg_windows.values()), default=0.0) if seg_windows else 0.0
+    ref_end = speech_end or audio_s
     drift_ok = True
     drift_s = 0.0
-    if rows and audio_s:
+    if rows and ref_end:
         last_end = max(r[2] for r in rows)
-        drift_s = abs(last_end - audio_s)
+        drift_s = abs(last_end - ref_end)
         drift_ok = drift_s <= _STALE_MAP_DRIFT_S
 
     passed = not unmapped and not orphan_clips and drift_ok
     return passed, (
         f"{len(unmapped)} unmapped segment(s) {unmapped[:5]}, {len(orphan_clips)} orphan-beat "
-        f"clip(s) {orphan_clips[:5]}, stamp drift {drift_s:.2f}s (≤{_STALE_MAP_DRIFT_S}s)"
+        f"clip(s) {orphan_clips[:5]}, stamp drift {drift_s:.2f}s vs speech end {ref_end:.1f}s "
+        f"(≤{_STALE_MAP_DRIFT_S}s)"
     )
 
 
