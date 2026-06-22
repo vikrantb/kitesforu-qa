@@ -175,14 +175,28 @@ def present_when_expected(art):
     if not m.get("expected"):
         skip("music not expected for this job (music disabled / empty cue sheet)")
     detected = m.get("detected")
-    # The certain failure: byte-identical to speech_only => no bed reached the mix (job 6e507451).
-    if m.get("fail") or detected is False:
-        return False, 0.0, f"music expected but absent (method={m.get('method')}, detected={detected})"
+    method = str(m.get("method") or "")
+    # method='not_expected' is a self-skip the workers emit when they decided no bed was due.
+    if method == "not_expected":
+        skip("workers' verdict method=not_expected (no bed due)")
+    # The CERTAIN failure: the workers themselves failed the gate (fail=True) — the byte-identical
+    # silent-drop (job 6e507451). Honor the workers' OWN enforcement contract; do NOT override it.
+    if m.get("fail"):
+        return False, 0.0, f"music expected but absent (method={method}, fail=True, detected={detected})"
+    if detected is False:
+        # detected=False from the UN-ENFORCED quiet_floor placeholder (enforced=False, fail=False) is
+        # NOT a certain drop — the bytes differ so a bed WAS mixed; it just didn't clear the
+        # uncalibrated 6.0 dB floor (job c21da616). The margin band is owned by music.below_speech;
+        # here it is a reduced-confidence pass, not a hard fail. A real drop trips fail=True above.
+        if not m.get("enforced"):
+            return True, 0.5, (f"music expected; quiet-floor detected=False but un-enforced "
+                               f"(method={method}, enforced=False) — margin owned by music.below_speech")
+        return False, 0.0, f"music expected but absent (method={method}, enforced, detected=False)"
     if detected is None:
         # Inconclusive (couldn't decode) but the byte-identity check already cleared the certain
         # failure — pass with reduced confidence rather than false-fail a missing-codec environment.
-        return True, 0.7, f"music expected; detection inconclusive (method={m.get('method')})"
-    return True, 1.0, f"music expected and detected (method={m.get('method')})"
+        return True, 0.7, f"music expected; detection inconclusive (method={method})"
+    return True, 1.0, f"music expected and detected (method={method})"
 
 
 @check("music.below_speech", dimension="music-sfx", severity="medium")
@@ -236,12 +250,16 @@ def not_byte_identical_speech_only(art):
     if not m:
         skip("no listening-QA music verdict on this job (cannot read byte-identity signal)")
     method = str(m.get("method") or "")
+    # ONLY the CERTAIN byte-identical signal is this check's purpose. The `quiet_floor` method's
+    # `detected is False` is an UN-ENFORCED, uncalibrated placeholder (workers deliberately set
+    # fail=False there; the 6.0 dB floor is a documented un-calibrated default) — escalating it to
+    # CRITICAL here was the false positive (job c21da616: method=quiet_floor, bytes DIFFER → a bed WAS
+    # mixed). The quiet-floor margin band is owned by music.below_speech, not this byte-identity gate.
     byte_identical = (
         method == "byte_identical_to_speech_only"
         or bool(m.get("byte_identical_to_speech_only"))
     )
-    failed = bool(m.get("fail")) or m.get("detected") is False
-    ok = not (byte_identical or failed)
+    ok = not (byte_identical or bool(m.get("fail")))
     return ok, f"method={method!r}, fail={m.get('fail')}, detected={m.get('detected')}"
 
 
