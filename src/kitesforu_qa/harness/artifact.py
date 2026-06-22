@@ -51,6 +51,11 @@ class Artifact:
         return self.doc.get("status")
 
     @property
+    def created_at(self):
+        """Job creation timestamp — for created_at-aware checks that must not fire on pre-fix jobs."""
+        return self.doc.get("created_at")
+
+    @property
     def topic(self) -> str:
         return _g(self.doc, "episode_profile", "topic") or _g(self.doc, "inputs", "topic") or ""
 

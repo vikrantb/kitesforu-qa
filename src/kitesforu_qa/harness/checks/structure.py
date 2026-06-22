@@ -26,7 +26,10 @@ def has_script(art):
 
 @check("structure.segments_present", dimension="structure", severity="high")
 def segments_present(art):
-    "A rendered job should have at least one ready segment."
+    "A rendered job should have ready segments (streaming path). Skip when the script is present "
+    "but segments_ready is absent — older/non-streaming jobs render without that intermediate array."
+    if not art.segments and art.word_count > 0:
+        skip("script present but no segments_ready (non-streaming/older job)")
     return len(art.segments) > 0, f"{len(art.segments)} segments"
 
 

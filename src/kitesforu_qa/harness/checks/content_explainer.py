@@ -56,7 +56,7 @@ def lands_takeaway(art):
     "Lands a carry-away handle near the close (catalog exp-c-takeaway)."
     t = _text(art)
     close = " ".join(t.split()[-80:]).lower()
-    ok = bool(re.search(r"takeaway|next time you|you can now|rule of thumb|remember this|if you remember nothing else|the one thing", close))
+    ok = bool(re.search(r"takeaway|next time (you|a|your|that|when|someone|it)\b|you can now|rule of thumb|remember this|if you remember nothing else|the one thing|that'?s it[.,]? not magic|now you know|the (whole|entire) (point|trick)|the key (idea|insight)", close))
     return ok, "lands a takeaway" if ok else "no carry-away handle near the close"
 
 
@@ -117,7 +117,7 @@ def example_has_numbers(art):
     # only meaningful if an example marker is present
     if not re.search(r"for example|for instance|imagine|suppose|let'?s say|say you", t, re.I):
         skip("no worked-example marker to check for numbers")
-    has_num = bool(re.search(r"\d[\d,\.]*\s*(%|percent|ms|seconds?|minutes?|hours?|x|times|million|billion|thousand|gb|mb|kb)?", t))
+    has_num = bool(re.search(r"\d[\d,\.]*\s*(%|percent|ms|seconds?|minutes?|hours?|x|times|million|billion|thousand|gb|mb|kb)?|\b(one|two|three|four|five|six|seven|eight|nine|ten|twenty|fifty|hundred|thousand|million|billion|dozens?|half|double|triple)\b", t, re.I))
     return has_num, "example carries numbers" if has_num else "example stays abstract (no numbers)"
 
 
