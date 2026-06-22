@@ -49,3 +49,24 @@ def test_today_we_discuss_opening_fails():
         "Today we'll discuss how B-trees work in databases and indexes and why they matter."
     )), "content")
     assert any("no_today_we_discuss_opening" in i for i in sr.issues), sr.issues
+
+
+def test_stays_on_topic_passes_on_topic():
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "A B-tree is a database index. It keeps keys sorted so the index finds rows fast.",
+        topic="How a B-tree database index finds rows")), "content")
+    assert not any("stays_on_topic" in i for i in sr.issues), sr.issues
+
+
+def test_stays_on_topic_fires_egregious_offtopic():
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "Let me share my favorite pasta recipes and pizza toppings for tonight's dinner party.",
+        topic="How public key cryptography encryption works")), "content")
+    assert any("stays_on_topic" in i for i in sr.issues), sr.issues
+
+
+def test_stays_on_topic_skips_short_topic():
+    # short/generic topics are unreliable for literal overlap → skip (judge owns it)
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "totally unrelated content here about cooking dinner", topic="latest AI news")), "content")
+    assert not any("stays_on_topic" in i for i in sr.issues), sr.issues
