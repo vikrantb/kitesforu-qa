@@ -301,8 +301,9 @@ def director_winner_present(art):
     winner = t.get("winner_id")
     comparisons = t.get("comparisons")
     if comparisons is None:
-        grader = t.get("grader") if isinstance(t.get("grader"), dict) else {}
-        comparisons = grader.get("comparisons")
+        grader = t.get("grader")
+        if isinstance(grader, dict):
+            comparisons = grader.get("comparisons")
     ncomp = int(comparisons or 0)
     ok = winner is not None and ncomp > 0
     return ok, f"winner_id={winner!r}, grader comparisons={ncomp}"

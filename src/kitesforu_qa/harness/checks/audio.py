@@ -349,8 +349,8 @@ def _requested_duration_min(art) -> float | None:
         cur: object = art.doc
         for key in path:
             cur = cur.get(key) if isinstance(cur, dict) else None
-        if cur is None:
-            continue
+        if not isinstance(cur, (int, float, str)):
+            continue  # missing, None, or a non-scalar shape — not a duration
         try:
             val = float(cur)
         except (TypeError, ValueError):

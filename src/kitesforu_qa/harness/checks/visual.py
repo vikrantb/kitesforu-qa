@@ -656,8 +656,10 @@ def diagram_padded_not_cropped(art):
                 # only meaningful for frames that ARE 16:9 (the forced-aspect output)
                 if abs((w / h) - _ASPECT_TARGET) / _ASPECT_TARGET > _ASPECT_TOLERANCE:
                     continue
-                assessed += 1
                 px = rgb.load()
+                if px is None:
+                    continue  # no pixel access (decode quirk) — can't sample borders, skip frame
+                assessed += 1
                 ys = range(0, h, max(1, h // 30))
                 left_bg = sum(1 for y in ys
                               if abs(px[0, y][0] - br) <= _BG_TOL
@@ -717,6 +719,8 @@ def video_no_black_bars(art):
     if w < 4 or h < 4:
         skip("frame too small to sample border")
     px = rgb.load()
+    if px is None:
+        skip("could not access frame pixels to sample border")
     def _row_black(y):
         s = range(0, w, max(1, w // 60))
         return all(max(px[x, y]) < 8 for x in s)

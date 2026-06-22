@@ -98,13 +98,86 @@ def _require_video(art: Any) -> None:
 
 
 def _clips(art: Any) -> list[dict[str, Any]]:
-    raw = art.doc.get("visual_clips") or []
-    return [c for c in raw if isinstance(c, dict)]
+    """VisualClip dicts. The worker persists the compartment at ``doc['visual']['clips']``
+    (visuals/worker.py writes ``{"visual": compartment}``); older/synthetic docs put them at the
+    top-level ``doc['visual_clips']``. Read top-level first, else fall back to the nested shape —
+    mirrors visual.py._clips so the video-sync battery actually RUNS on real jobs instead of
+    skipping (the fidelity gap: real clips live nested, so every vs check skipped)."""
+    raw = art.doc.get("visual_clips")
+    if not raw:
+        v = art.doc.get("visual")
+        if isinstance(v, dict):
+            raw = v.get("clips")
+    return [c for c in (raw or []) if isinstance(c, dict)]
 
 
 def _captions(art: Any) -> list[dict[str, Any]]:
-    raw = art.doc.get("captions") or art.doc.get("caption_cues") or []
-    return [c for c in raw if isinstance(c, dict)]
+    """Caption cue dicts ``[{start_ms, end_ms, text}]``. Real jobs carry a WebVTT STRING at
+    ``doc['visual']['captions_vtt']`` (visuals/worker.py); older/synthetic docs carry a top-level
+    list at ``doc['captions']`` / ``doc['caption_cues']``. Prefer an existing cue list (top-level or
+    nested), else parse the nested VTT string into cue dicts so the downstream checks (which iterate
+    ``start_ms``/``end_ms``) run unchanged instead of skipping on every real job."""
+    raw = art.doc.get("captions") or art.doc.get("caption_cues")
+    v = art.doc.get("visual")
+    if not raw and isinstance(v, dict):
+        raw = v.get("captions") or v.get("caption_cues")
+    cues = [c for c in (raw or []) if isinstance(c, dict)]
+    if cues:
+        return cues
+    if isinstance(v, dict):
+        vtt = v.get("captions_vtt")
+        if isinstance(vtt, str) and vtt.strip():
+            return _parse_vtt_cues(vtt)
+    return []
+
+
+def _parse_vtt_cues(vtt: str) -> list[dict[str, Any]]:
+    """Parse a WebVTT string into ``[{start_ms, end_ms, text}]`` cue dicts. Reads the
+    ``HH:MM:SS.mmm --> HH:MM:SS.mmm`` timing lines (the worker's ``build_captions_vtt`` format);
+    any cue text follows on the next line(s). Malformed lines are skipped, never raised."""
+    cues: list[dict[str, Any]] = []
+    lines = vtt.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if "-->" in line:
+            head, _, tail = line.partition("-->")
+            start = _vtt_ts_to_ms(head)
+            end = _vtt_ts_to_ms(tail.split()[0] if tail.split() else "")
+            text_lines: list[str] = []
+            j = i + 1
+            while j < len(lines) and lines[j].strip():
+                text_lines.append(lines[j].strip())
+                j += 1
+            if start is not None and end is not None:
+                cues.append({"start_ms": start, "end_ms": end, "text": " ".join(text_lines)})
+            i = j
+        else:
+            i += 1
+    return cues
+
+
+def _vtt_ts_to_ms(ts: str) -> int | None:
+    """``HH:MM:SS.mmm`` (or ``MM:SS.mmm``) → milliseconds; None when unparseable."""
+    ts = ts.strip()
+    if not ts:
+        return None
+    try:
+        hh = "0"
+        parts = ts.split(":")
+        if len(parts) == 3:
+            hh, mm, rest = parts
+        elif len(parts) == 2:
+            mm, rest = parts
+        else:
+            return None
+        sec, _, frac = rest.partition(".")
+        ms = int(hh) * 3_600_000 + int(mm) * 60_000 + int(sec) * 1000
+        if frac:
+            ms += int((frac + "000")[:3])
+        return ms
+    except (TypeError, ValueError):
+        return None
 
 
 def _beat_map_dict(art: Any) -> dict[int, int]:
