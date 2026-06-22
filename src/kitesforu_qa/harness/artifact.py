@@ -106,6 +106,16 @@ class Artifact:
     def beat_map(self) -> list[dict[str, Any]]:
         return self.doc.get("segment_beat_map") or []
 
+    @property
+    def master_segment_timeline(self) -> list[dict[str, Any]]:
+        """The canonical per-segment offsets in the DELIVERED (post-intro, muxed) master —
+        ``[{index, start_ms, end_ms}]`` in delivered-master coordinates. The audio stage writes it
+        (``master_segment_timeline.build_master_segment_timeline``) as ``intro_offset_ms +
+        placed_start_ms``: the REAL spoken offset the visual clips are stamped against. Empty list on
+        legacy jobs that predate it (then consumers detect the intro offset another way)."""
+        tl = self.doc.get("master_segment_timeline")
+        return [r for r in tl if isinstance(r, dict)] if isinstance(tl, list) else []
+
     # ── telemetry ──
     @property
     def costs(self) -> dict[str, Any]:

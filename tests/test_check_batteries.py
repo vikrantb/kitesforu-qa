@@ -437,6 +437,114 @@ def test_video_na_when_no_video(tmp_path):
     _assert_all_skipped(art, "video-sync")
 
 
+# ── intro-offset (the +12s false-positive) ────────────────────────────────────
+# The delivered master prepends ~12s of intro music, so the REAL spoken offsets (and the visual
+# clips stamped against them) sit +12s into the master while segments_ready clocks 0-based. The
+# checks must compare clips to the SAME post-intro axis (master_segment_timeline) — a healthy
+# intro-offset job must PASS, a genuinely mis-beated clip must still FAIL.
+
+_INTRO_MS = 12000  # intro-music prepend (matches the ec1620a1 +12s class)
+
+
+def _intro_offset_clips() -> list[dict]:
+    """The _visual_clips beats SHIFTED onto the delivered (post-intro) axis: beat 0 starts at the
+    intro offset, beat 1's 3 reveal sub-clips clock across its 10s span (seg2+seg3) right after."""
+    b0 = _INTRO_MS               # 12000 — beat 0 (segs 0,1 → 0..10s of speech) starts here
+    b1 = _INTRO_MS + 10000       # 22000 — beat 1 (segs 2,3 → 10..20s of speech) starts here
+    return [
+        {"beat_index": 0, "start_ms": b0, "duration_ms": 10000, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "asset_uri": "gs://x/0.png"},
+        {"beat_index": 1, "start_ms": b1, "duration_ms": 3333, "modality": "diagram",
+         "render_mode": "image", "_reveal_index": 0, "_reveal_total": 3, "asset_uri": "gs://x/1a.png"},
+        {"beat_index": 1, "start_ms": b1 + 3333, "duration_ms": 3333, "modality": "diagram",
+         "render_mode": "image", "_reveal_index": 1, "_reveal_total": 3, "asset_uri": "gs://x/1b.png"},
+        {"beat_index": 1, "start_ms": b1 + 6666, "duration_ms": 3334, "modality": "diagram",
+         "render_mode": "image", "_reveal_index": 2, "_reveal_total": 3, "asset_uri": "gs://x/1c.png"},
+    ]
+
+
+def _master_segment_timeline(intro_ms: int = _INTRO_MS) -> list[dict]:
+    """The audio stage's canonical delivered-master timeline: each 5s segment shifted +intro_ms
+    ({index, start_ms, end_ms}), so the reference window lands on the SAME axis as the clips."""
+    return [
+        {"index": i, "start_ms": intro_ms + i * 5000, "end_ms": intro_ms + (i + 1) * 5000}
+        for i in range(4)
+    ]
+
+
+def _intro_offset_doc() -> dict:
+    """A healthy intro-offset doc: segments_ready 0-based (as always), clips on the +12s delivered
+    axis, and the master_segment_timeline that anchors them there."""
+    doc = _base_doc()
+    doc["visual_clips"] = _intro_offset_clips()
+    doc["master_segment_timeline"] = _master_segment_timeline()
+    return doc
+
+
+def test_video_intro_offset_passes(tmp_path):
+    """A healthy job whose visuals sit +12s in (intro-music prepend) must PASS — clips compared on
+    the SAME post-intro axis (master_segment_timeline), no false +12s lag / leading gap."""
+    audio_s = (_INTRO_MS + 20000) / 1000.0  # 12s intro + 20s speech = 32s delivered master
+    doc = _intro_offset_doc()
+    doc["captions"] = [
+        {"start_ms": _INTRO_MS + i * 4000, "end_ms": _INTRO_MS + (i + 1) * 4000, "text": f"cue {i}"}
+        for i in range(5)
+    ]
+    art = Artifact.from_doc(
+        doc,
+        audio_path=_good_audio(str(tmp_path / "intro.wav"), seconds=audio_s),
+        video_path=_video(str(tmp_path / "intro.mp4"), seconds=audio_s),
+    )
+    by = _assert_gating_pass(art, "video-sync")
+    for cid in (
+        "video_sync.clips_beat_aligned",
+        "video_sync.no_gap_or_overrun",
+        "video_sync.beat_map_covers_all_segments",
+    ):
+        assert by[cid]["passed"], (cid, by[cid]["evidence"])
+        assert not by[cid]["skipped"], (cid, by[cid]["evidence"])
+
+
+def test_video_intro_offset_passes_legacy_no_timeline(tmp_path):
+    """Same +12s job but a LEGACY doc with NO master_segment_timeline: the intro offset is DETECTED
+    from the clips' shared front offset and the 0-based segment walk is shifted by it — still PASS."""
+    audio_s = (_INTRO_MS + 20000) / 1000.0
+    doc = _intro_offset_doc()
+    doc.pop("master_segment_timeline", None)  # legacy: no canonical timeline persisted
+    art = Artifact.from_doc(
+        doc,
+        audio_path=_good_audio(str(tmp_path / "legacy.wav"), seconds=audio_s),
+        video_path=_video(str(tmp_path / "legacy.mp4"), seconds=audio_s),
+    )
+    _sr, by = _gating_results(art, "video-sync")
+    for cid in ("video_sync.clips_beat_aligned", "video_sync.no_gap_or_overrun"):
+        assert by[cid]["passed"], (cid, by[cid]["evidence"])
+        assert not by[cid]["skipped"], (cid, by[cid]["evidence"])
+
+
+def test_video_intro_offset_misaligned_clip_still_fails(tmp_path):
+    """The fix must NOT blind the check: a clip claiming beat_index 1 but stamped deep in beat 0's
+    window (a genuine off-beat stamp, NOT the intro offset) must still FAIL clips_beat_aligned."""
+    audio_s = (_INTRO_MS + 20000) / 1000.0
+    doc = _intro_offset_doc()
+    clips = _intro_offset_clips()
+    # Mis-stamp ALL of beat 1's clips back into beat 0's narration window (12-22s) while they still
+    # CLAIM beat_index 1 (whose real window is 22-32s) — a real talks-one/shows-other desync.
+    for c in clips:
+        if c["beat_index"] == 1:
+            c["start_ms"] = _INTRO_MS  # 12000: inside beat 0, far outside beat 1 ±slack
+    doc["visual_clips"] = clips
+    art = Artifact.from_doc(
+        doc,
+        audio_path=_good_audio(str(tmp_path / "bad.wav"), seconds=audio_s),
+        video_path=_video(str(tmp_path / "bad.mp4"), seconds=audio_s),
+    )
+    _sr, by = _gating_results(art, "video-sync")
+    c = by["video_sync.clips_beat_aligned"]
+    assert not c["passed"], f"genuinely off-beat clip must fail: {c['evidence']}"
+    assert not c["skipped"], c["evidence"]
+
+
 # ════════════════════════════════ MUSIC-SFX ══════════════════════════════════
 
 
