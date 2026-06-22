@@ -324,13 +324,18 @@ def test_visual_blank_fails(tmp_path):
     assert not by["visual.not_blank"]["passed"], by["visual.not_blank"]["evidence"]
 
 
-def test_visual_missing_images_fails(tmp_path):
-    """visual_clips declare assets but none were downloaded -> images_present fails (silent drop)."""
+def test_visual_missing_images_skips_offline(tmp_path):
+    """FP-FIX (harness_asset_artifact): visual_clips declare assets but NONE were downloaded — the
+    offline scorecard NEVER fills image_paths from asset_uri, so this is NOT a silent drop. The check
+    must SKIP cleanly (doc-side coverage asserted, real drop owned by visual.clip_per_beat), not
+    false-fail. Was the 4d1700ee false positive: "0 image files (visual_clips=0)"."""
     doc = _base_doc()
     doc["visual_clips"] = _visual_clips()
     art = Artifact.from_doc(doc, image_paths=[])
     _sr, by = _gating_results(art, "visual-images")
-    assert not by["visual.images_present"]["passed"], by["visual.images_present"]["evidence"]
+    c = by["visual.images_present"]
+    assert c["skipped"], f"offline (no images downloaded) must SKIP, not fail: {c['evidence']}"
+    assert "doc-side coverage" in c["evidence"], c["evidence"]
 
 
 def test_visual_count_reasonable_uses_nested_clips(tmp_path):
@@ -397,6 +402,150 @@ def test_visual_diagram_checks_skip_clearly_when_uncorrelatable(tmp_path):
 def test_visual_na_when_no_visuals():
     """A doc with no visual_clips and no images -> the whole visual battery skips."""
     _assert_all_skipped(Artifact.from_doc(_base_doc()), "visual-images")
+
+
+# ── REGRESSION PINS: the 4d1700ee false-positive fires (FIDELITY-AUDIT 2026-06-22) ───────────────
+# Job 4d1700ee (educational, created 2026-06-22) ran the offline scorecard with NO downloaded images
+# (image_paths empty) over a HEALTHY doc: 18 nested clips at doc['visual']['clips'], every clip a real
+# gs:// asset_uri + status=done. Three visual checks contradicted each other on these same 18 clips:
+#   images_present  -> FALSE-FAILED "0 image files (visual_clips=0)"   (wrong field path + offline)
+#   count_reasonable-> FALSE-FAILED "0 images vs 18 expected"          (mixed local-file vs doc plane)
+#   no_adjacent_diagrams -> FALSE-FAILED on beats 4-5 (a 2-long run that is ON-SPEC for educational)
+# The pins below prove all three now AGREE (the 18 clips exist) and stop false-firing, while a
+# genuinely-bad doc still FAILS so the fixes didn't gut the checks.
+
+
+def _job_4d1700ee_clips() -> list[dict]:
+    """Exactly 18 nested clips like the real 4d1700ee: 8 distinct beats (0-7); structural diagram
+    beats at 4 and 5 (adjacent run of 2 — the on-spec educational weave the old check false-failed)
+    plus an isolated diagram at 7. Scene beats are 1 clip; the 3 diagram beats build over reveal
+    sub-clips. 5 scene beats (1 each) + diagram beats of 6+4+3 reveals = 5 + 13 = 18 clips total."""
+    diagram_reveals = {4: 6, 5: 4, 7: 3}  # beats 4,5 adjacent + isolated 7; 6+4+3 = 13 sub-clips
+    clips: list[dict] = []
+    for beat in range(8):
+        is_diag = beat in diagram_reveals
+        modality = "diagram" if is_diag else "scene"
+        reveals = diagram_reveals.get(beat, 1)  # scene beats = a single clip
+        for r in range(reveals):
+            clips.append({
+                "beat_index": beat, "modality": modality, "render_mode": "image",
+                "aspect_ratio": "16:9", "status": "done",
+                "asset_uri": f"gs://kfu/4d1700ee/{beat}_{r}.png",
+                # diagrams are authored (no model_id); scenes are AI (record the model)
+                **({} if is_diag else {"model_id": "gemini-2.5-flash-image"}),
+                "content_hash": f"{beat:02x}{r:02x}deadbeefcafe00",
+            })
+    return clips  # 5 scene + 13 diagram-reveal = 18 clips
+
+
+def _job_4d1700ee_doc() -> dict:
+    """The 4d1700ee educational doc shape: nested clips, segment_beat_map planning 13 beats (0-12)
+    but clips only covering beats 0-7 (the REAL tail-drop visual.clip_per_beat must still catch)."""
+    doc = _base_doc()
+    doc["job_id"] = "4d1700ee-00f8-467b-ba46-413550b9c743"
+    doc["episode_profile"] = {"genre": "educational", "topic": "How a B-tree database index works"}
+    doc["inputs"] = {"duration_min": 3, "genre": "educational"}
+    doc["visual"] = {"clips": _job_4d1700ee_clips(), "status": "done"}
+    # 21 segments -> 13 distinct planned beats (0-12). Clips cover only 0-7 (beats 8-12 dropped).
+    doc["segment_beat_map"] = {str(i): min(i * 13 // 21, 12) for i in range(21)}
+    return doc
+
+
+def test_pin_4d1700ee_images_present_skips_offline():
+    """PIN (fix 1): images_present must SKIP on the 4d1700ee offline run (18 doc clips with assets,
+    no downloaded files) — not false-fail "0 image files (visual_clips=0)"."""
+    art = Artifact.from_doc(_job_4d1700ee_doc(), image_paths=[])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.images_present"]
+    assert c["skipped"], f"4d1700ee images_present must skip offline, not fail: {c['evidence']}"
+    # evidence must report the REAL nested clip count, not the old top-level visual_clips=0
+    assert "18 clips" in c["evidence"], f"evidence must report 18 nested clips: {c['evidence']}"
+
+
+def test_pin_4d1700ee_count_reasonable_skips_offline():
+    """PIN (fix 2): count_reasonable must SKIP on the 4d1700ee offline run — not false-fail
+    "0 images vs 18 expected" (mixing local-file plane vs doc-clip plane)."""
+    art = Artifact.from_doc(_job_4d1700ee_doc(), image_paths=[])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.count_reasonable"]
+    assert c["skipped"], f"4d1700ee count_reasonable must skip offline, not fail: {c['evidence']}"
+    assert "18 clips carry assets" in c["evidence"], c["evidence"]
+
+
+def test_pin_4d1700ee_no_adjacent_diagrams_passes_educational():
+    """PIN (fix 3): the educational run-of-2 diagram beats (4,5) is ON-SPEC (workers allow ≤2 for
+    non-fiction). no_adjacent_diagrams must PASS, not false-fail."""
+    art = Artifact.from_doc(_job_4d1700ee_doc(), image_paths=[])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.no_adjacent_diagrams"]
+    assert not c["skipped"], c["evidence"]
+    assert c["passed"], f"educational run-of-2 diagrams is on-spec (cap 2); must pass: {c['evidence']}"
+    assert "longest structural-diagram run 2 beats" in c["evidence"], c["evidence"]
+
+
+def test_pin_4d1700ee_three_visual_checks_agree():
+    """PIN (the 4d1700ee contradiction smoking-gun): images_present + count_reasonable must no longer
+    CONTRADICT clip_per_beat. The two asset-plane checks skip; clip_per_beat is the ONLY one that
+    fires — and it fires for the REAL reason (beats 8-12 uncovered tail-drop). All three now agree the
+    18 clips exist."""
+    art = Artifact.from_doc(_job_4d1700ee_doc(), image_paths=[])
+    _sr, by = _gating_results(art, "visual-images")
+    assert by["visual.images_present"]["skipped"], by["visual.images_present"]["evidence"]
+    assert by["visual.count_reasonable"]["skipped"], by["visual.count_reasonable"]["evidence"]
+    # clip_per_beat is the KEEP check — it must STILL FAIL on the genuine tail-drop (beats 8-12).
+    cpb = by["visual.clip_per_beat"]
+    assert not cpb["skipped"], cpb["evidence"]
+    assert not cpb["passed"], f"clip_per_beat must still catch the real beats 8-12 drop: {cpb['evidence']}"
+    assert "missing beats" in cpb["evidence"], cpb["evidence"]
+
+
+def test_pin_no_adjacent_diagrams_still_fails_wall_of_charts(tmp_path):
+    """GENUINELY-BAD pin (fix 3 didn't gut the check): 3 consecutive diagram beats (a real wall of
+    charts) must STILL FAIL even for non-fiction (run 3 > cap 2)."""
+    doc = _base_doc()
+    doc["episode_profile"] = {"genre": "educational", "topic": "x"}
+    doc["visual"] = {"clips": [
+        {"beat_index": 0, "modality": "diagram", "render_mode": "image", "asset_uri": "gs://x/0.png"},
+        {"beat_index": 1, "modality": "diagram", "render_mode": "image", "asset_uri": "gs://x/1.png"},
+        {"beat_index": 2, "modality": "diagram", "render_mode": "image", "asset_uri": "gs://x/2.png"},
+        {"beat_index": 3, "modality": "scene", "render_mode": "image", "asset_uri": "gs://x/3.png"},
+    ]}
+    art = Artifact.from_doc(doc, image_paths=[])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.no_adjacent_diagrams"]
+    assert not c["passed"], f"3-long diagram run must fail even non-fiction (cap 2): {c['evidence']}"
+
+
+def test_pin_no_adjacent_diagrams_fiction_fails_run_of_2(tmp_path):
+    """GENUINELY-BAD pin (fix 3, fiction side): for fiction the cap is 1, so even a run of 2 diagram
+    beats must FAIL (narrative scenes carry the story)."""
+    doc = _base_doc()
+    doc["episode_profile"] = {"genre": "thriller", "topic": "x"}
+    doc["visual"] = {"clips": [
+        {"beat_index": 0, "modality": "diagram", "render_mode": "image", "asset_uri": "gs://x/0.png"},
+        {"beat_index": 1, "modality": "diagram", "render_mode": "image", "asset_uri": "gs://x/1.png"},
+        {"beat_index": 2, "modality": "scene", "render_mode": "image", "asset_uri": "gs://x/2.png"},
+    ]}
+    art = Artifact.from_doc(doc, image_paths=[])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.no_adjacent_diagrams"]
+    assert not c["passed"], f"fiction run-of-2 diagrams must fail (cap 1): {c['evidence']}"
+
+
+def test_pin_images_present_still_fails_done_clip_no_asset(tmp_path):
+    """GENUINELY-BAD pin (fix 1 didn't gut the check): when images ARE downloaded but NOT ONE clip
+    carries an asset_uri (a real all-empty render), images_present must still FAIL."""
+    doc = _base_doc()
+    doc["visual"] = {"clips": [
+        {"beat_index": 0, "modality": "scene", "render_mode": "image", "status": "done", "asset_uri": ""},
+        {"beat_index": 1, "modality": "scene", "render_mode": "image", "status": "done", "asset_uri": ""},
+    ]}
+    # an image WAS downloaded (so we don't take the offline skip) but no clip declares an asset
+    art = Artifact.from_doc(doc, image_paths=[_good_image(str(tmp_path / "orphan.png"))])
+    _sr, by = _gating_results(art, "visual-images")
+    c = by["visual.images_present"]
+    assert not c["skipped"], c["evidence"]
+    assert not c["passed"], f"no clip carries an asset_uri -> must fail: {c['evidence']}"
 
 
 # ════════════════════════════════ VIDEO-SYNC ═════════════════════════════════
@@ -574,6 +723,97 @@ def test_music_na_when_not_expected():
 def test_music_na_when_no_verdict():
     """No listening-QA stage at all -> the music battery skips (nothing to pin)."""
     _assert_all_skipped(Artifact.from_doc(_base_doc()), "music-sfx")
+
+
+# ── REGRESSION PINS: the c21da616 quiet_floor false-positive fires (FIDELITY-AUDIT 2026-06-22) ────
+# Job c21da616 (interview, 2026-06-15): the workers' listening verdict is method=quiet_floor,
+# detected=False, observed_margin_db=0.71, floor_margin_db=6.0, fail=FALSE, enforced=FALSE,
+# expected=True. The bytes DIFFER from speech-only (a bed WAS mixed); it just didn't clear the
+# UN-CALIBRATED, NON-ENFORCED 6.0 dB floor (workers deliberately set fail=False). Two checks wrongly
+# escalated that placeholder to CRITICAL/HIGH hard failures:
+#   not_byte_identical_speech_only -> over-reached via `or detected is False`
+#   present_when_expected          -> over-reached via `or detected is False`
+# The pins prove both now respect the workers' enforcement contract (skip/reduced-pass), while
+# music.below_speech (the KEEP check) STILL fires on the real 0.71 dB margin.
+
+
+def _quiet_floor_verdict(*, expected=True, detected=False, margin=0.71, fail=False,
+                         enforced=False) -> dict:
+    """The c21da616 listening-QA shape: an UN-ENFORCED quiet_floor verdict (bytes differ, a bed was
+    mixed, but the margin didn't clear the uncalibrated 6.0 dB floor)."""
+    return {
+        "job-audio": {"qa": {"listening": {"music": {
+            "expected": expected, "detected": detected, "method": "quiet_floor",
+            "observed_margin_db": margin, "floor_margin_db": 6.0, "fail": fail,
+            "enforced": enforced,
+        }}}, "result": {"intro_duration_ms": 12000}},
+    }
+
+
+def _c21da616_doc() -> dict:
+    """The c21da616 interview doc: music expected (inputs._music_enabled) + the un-enforced
+    quiet_floor verdict that false-fired two music checks."""
+    doc = _base_doc()
+    doc["job_id"] = "c21da616-8ed9-4ead-a3e8-7e5bb160753c"
+    doc["episode_profile"] = {"genre": "interview", "topic": "x"}
+    doc["inputs"] = {"genre": "interview", "_music_enabled": True}
+    doc["stages"] = _quiet_floor_verdict()
+    return doc
+
+
+def test_pin_c21da616_not_byte_identical_passes():
+    """PIN (fix 5): not_byte_identical_speech_only must NOT fire on the un-enforced quiet_floor
+    detected=False (bytes differ → a bed was mixed). It only fails the CERTAIN byte-identical drop."""
+    _sr, by = _gating_results(Artifact.from_doc(_c21da616_doc()), "music-sfx")
+    c = by["music.not_byte_identical_speech_only"]
+    assert not c["skipped"], c["evidence"]
+    assert c["passed"], f"quiet_floor (bytes differ) must NOT trip the byte-identity gate: {c['evidence']}"
+
+
+def test_pin_c21da616_present_when_expected_reduced_pass():
+    """PIN (fix 4): present_when_expected must honor enforced=False — a reduced-confidence PASS on the
+    un-enforced quiet_floor detected=False, NOT a hard HIGH failure."""
+    _sr, by = _gating_results(Artifact.from_doc(_c21da616_doc()), "music-sfx")
+    c = by["music.present_when_expected"]
+    assert c["passed"], f"un-enforced quiet_floor detected=False must be a reduced-pass: {c['evidence']}"
+    assert c["score"] == 0.5, c
+    assert "un-enforced" in c["evidence"], c["evidence"]
+
+
+def test_pin_c21da616_below_speech_still_fires():
+    """KEEP pin (the fixes did NOT gut the real signal): music.below_speech must STILL FAIL on the
+    real 0.71 dB margin (well under the 6.0 dB floor) — the genuine inaudible-bed weakness."""
+    _sr, by = _gating_results(Artifact.from_doc(_c21da616_doc()), "music-sfx")
+    c = by["music.below_speech"]
+    assert not c["skipped"], c["evidence"]
+    assert not c["passed"], f"0.71 dB margin must still fail below_speech: {c['evidence']}"
+    assert "0.7 dB" in c["evidence"], c["evidence"]
+
+
+def test_pin_byte_identical_still_fails():
+    """GENUINELY-BAD pin: the CERTAIN byte-identical drop (method=byte_identical, detected=False,
+    fail=True — job 6e507451) must STILL FAIL both fixed checks (the fix didn't blind them)."""
+    doc = _base_doc()
+    doc["inputs"] = {"_music_enabled": True}
+    doc["stages"] = {"job-audio": {"qa": {"listening": {"music": {
+        "expected": True, "detected": False, "method": "byte_identical", "fail": True,
+    }}}, "result": {"intro_duration_ms": 12000}}}
+    _sr, by = _gating_results(Artifact.from_doc(doc), "music-sfx")
+    nbi = by["music.not_byte_identical_speech_only"]
+    pwe = by["music.present_when_expected"]
+    assert not nbi["passed"], f"byte_identical drop must fail not_byte_identical: {nbi['evidence']}"
+    assert not pwe["passed"], f"byte_identical drop must fail present_when_expected: {pwe['evidence']}"
+
+
+def test_pin_enforced_quiet_floor_still_fails():
+    """GENUINELY-BAD pin (fix 4): when the workers DID enforce the floor (enforced=True, fail=True),
+    present_when_expected must hard-fail — honoring enforcement cuts both ways."""
+    doc = _base_doc()
+    doc["inputs"] = {"_music_enabled": True}
+    doc["stages"] = _quiet_floor_verdict(detected=False, fail=True, enforced=True, margin=0.71)
+    _sr, by = _gating_results(Artifact.from_doc(doc), "music-sfx")
+    c = by["music.present_when_expected"]
+    assert not c["passed"], f"enforced+fail quiet_floor drop must hard-fail: {c['evidence']}"
 
 
 # ════════════════════════════════ SCORECARD ══════════════════════════════════

@@ -68,6 +68,29 @@ _DIAGRAM_DENSITY_CAP = 0.40    # at most 40% of clips may be structural diagrams
 _VIDEO_W = 1920
 _VIDEO_H = 1080
 
+# Diagram-weave adjacency caps — MIRROR the workers' modality_selector.weave() invariant
+# (stages/visuals/modality_selector.py: _MAX_ADJACENT=1 fiction, _MAX_ADJACENT_NONFICTION=2). The
+# producer deliberately allows a 2-long diagram run for non-fiction/educational ("a short diagram run
+# reads fine"), so the check must allow the same longest-run length instead of forbidding any pair.
+_MAX_ADJACENT_FICTION = 1
+_MAX_ADJACENT_NONFICTION = 2
+# The genres the workers treat as fiction (RESEARCH_FICTION_GENRES, prompt_generator/service.py) —
+# everything else (educational/explainer/tech_review/news/...) is non-fiction. Normalized lower, no
+# separators, so "science_fiction"/"sci-fi" all collapse to a member.
+_FICTION_GENRES = frozenset({
+    "romance", "thriller", "horror", "comedy", "storytelling", "fantasy", "scifi",
+    "sciencefiction", "mystery", "bedtime", "bedtimestory", "adventure", "drama",
+    "fairytale", "fable", "mythology", "suspense", "paranormal", "fiction",
+    "truecrime", "noir",
+})
+
+
+def _is_fiction_genre(art) -> bool:
+    """True if this job's genre is one the producer weaves as fiction (tight ≤1 adjacency).
+    Non-fiction/educational (the default) gets the looser ≤2 run the producer allows."""
+    g = "".join(ch for ch in (art.genre or "").strip().lower() if ch.isalnum())
+    return g in _FICTION_GENRES
+
 
 # ── doc-side (VisualClip) helpers — read art.doc, no PIL/network ──────────────
 
@@ -241,10 +264,28 @@ def _expected_image_count(art) -> int:
 
 @check("visual.images_present", dimension="visual-images", severity="high")
 def images_present(art):
-    "A job that opted into visuals must have at least one rendered image downloaded."
+    "A job that opted into visuals must have at least one rendered image (doc-side, asset-aware)."
     _require_visuals(art)
-    n = len(art.image_paths)
-    return n > 0, f"{n} image files (visual_clips={len(art.doc.get('visual_clips') or [])})"
+    # DOC-SIDE coverage via the nested-aware _clips() helper (the same one clip_per_beat uses → real
+    # jobs nest clips at doc['visual']['clips'], NOT the top-level doc['visual_clips']=0 that the old
+    # evidence mis-reported). This is the load-bearing assertion: at least one clip carries a real
+    # asset, regardless of whether the offline scorecard downloaded the pixels.
+    clips = _clips(art)
+    with_asset = sum(1 for c in clips if _uri(c) and _status(c) in _STATUS_DONE) or \
+        sum(1 for c in clips if _uri(c))
+    # Offline runs never download images (image_paths is structurally empty — no loader fills it from
+    # asset_uri). Skip cleanly rather than false-fail: pixel presence is owned by not_corrupt/not_blank
+    # when images ARE downloaded; doc-side coverage is asserted here + by visual.clip_per_beat.
+    if not art.image_paths:
+        skip(f"no images downloaded (offline scorecard); doc-side coverage asserted "
+             f"({with_asset} clip(s) with asset_uri of {len(clips)} clips; "
+             f"doc-side coverage owned by visual.clip_per_beat)")
+    if not clips:
+        # Operator passed raw images with no doc clips to assert against → fall back to the original
+        # image-presence signal (the images themselves are the evidence).
+        return len(art.image_paths) > 0, f"{len(art.image_paths)} image files (no doc clips)"
+    return with_asset > 0, (f"{len(art.image_paths)} image files; "
+                            f"{with_asset}/{len(clips)} clips carry an asset_uri")
 
 
 @check("visual.not_corrupt", dimension="visual-images", severity="high")
@@ -308,14 +349,24 @@ def aspect_16_9(art):
 def count_reasonable(art):
     "Rendered image count should match the visual beats/clips (a renderer that drops images is a bug)."
     _require_visuals(art)
+    # ``expected`` reads clips through _clips() (nested-aware → the real 18 on doc['visual']['clips'],
+    # not the top-level doc['visual_clips']=0 that mis-reported the 4d1700ee contradiction).
     expected = _expected_image_count(art)
     if expected <= 0:
         skip("no expected visual count derivable (no visual_clips / beat_map)")
     got = len(art.image_paths)
+    # Asset-absent guard: offline scorecards never download images (image_paths structurally empty),
+    # so a "0 got vs N expected" comparison here is comparing two DIFFERENT planes (local files vs doc
+    # clips) and false-fails. Skip cleanly — doc-side completeness is owned by visual.clip_per_beat;
+    # this check's got-vs-expected only catches a "downloaded-but-renderer-dropped" gap, which needs
+    # the pixels present.
+    if got == 0:
+        skip(f"no images downloaded (offline run); {expected} clips carry assets doc-side "
+             f"(coverage owned by visual.clip_per_beat)")
     # tolerate ±1 (diagram/stub clips, a single redelivery in flight); a >1 gap is a real drop.
     ok = abs(got - expected) <= 1
     score = min(1.0, got / expected) if expected else 1.0
-    return ok, score, f"{got} images vs {expected} expected (visual_clips/beats)"
+    return ok, score, f"{got} images vs {expected} expected (visual clips)"
 
 
 @check("visual.text_free_heuristic", dimension="visual-images", severity="low")
@@ -510,7 +561,8 @@ def modality_valid(art):
 
 @check("visual.no_adjacent_diagrams", dimension=_DIMENSION, severity="medium")
 def no_adjacent_diagrams(art):
-    "Visuals must weave: no two consecutive beats are both structural diagrams/charts (wall of charts)."
+    "Visuals must weave: structural-diagram beats may not run longer than the genre's cap (a wall "
+    "of charts). Mirrors the producer's modality_selector.weave() — fiction ≤1, non-fiction ≤2."
     _require_visuals(art)
     clips = _require_clips(art)
     # one representative modality per beat, in beat order
@@ -522,8 +574,17 @@ def no_adjacent_diagrams(art):
     if len(by_beat) < 2:
         skip("fewer than 2 distinct beats to assess adjacency")
     order = [by_beat[b] for b in sorted(by_beat)]
-    runs = sum(1 for a, b in zip(order, order[1:], strict=False) if a and b)
-    return runs == 0, f"{runs} adjacent diagram/diagram beat pair(s) over {len(order)} beats"
+    # longest run of consecutive structural beats (NOT a count of adjacent pairs) — this is the
+    # quantity the producer caps. A 2-long run for educational is on-spec; a 3-long run is a wall.
+    longest = cur = 0
+    for v in order:
+        cur = cur + 1 if v else 0
+        longest = max(longest, cur)
+    max_adjacent = _MAX_ADJACENT_FICTION if _is_fiction_genre(art) else _MAX_ADJACENT_NONFICTION
+    kind = "fiction" if _is_fiction_genre(art) else "non-fiction"
+    return longest <= max_adjacent, (
+        f"longest structural-diagram run {longest} beats over {len(order)} beats "
+        f"(cap {max_adjacent} for {kind})")
 
 
 @check("visual.diagram_density_cap", dimension=_DIMENSION, severity="low")
