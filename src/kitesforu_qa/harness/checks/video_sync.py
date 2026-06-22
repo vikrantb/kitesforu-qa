@@ -103,6 +103,13 @@ def _beat_map_dict(art: Any) -> dict[int, int]:
     return out
 
 
+def _num(d: dict[str, Any], key: str) -> float | None:
+    """A numeric field as ``float``, or ``None`` if missing/non-numeric. Filtering the result keeps
+    timing lists typed ``list[float]`` so comparisons/``max()`` are never run over ``None``."""
+    v = d.get(key)
+    return float(v) if isinstance(v, (int, float)) else None
+
+
 def _clip_start_s(c: dict[str, Any]) -> float | None:
     v = c.get("start_ms")
     return v / 1000.0 if isinstance(v, (int, float)) else None
@@ -160,7 +167,10 @@ def captions_align(art):
     cues = _captions(art)
     if not cues:
         skip("no caption cues")
-    starts = [c.get("start_ms") for c in cues if isinstance(c.get("start_ms"), (int, float))]
+    # None-safe timing extraction: filter to numeric values so the lists are ``list[float]`` and the
+    # comparison / max() below can never run over None (a cue may carry a null/absent start_ms|end_ms).
+    starts: list[float] = [v for v in (_num(c, "start_ms") for c in cues) if v is not None]
+    ends: list[float] = [v for v in (_num(c, "end_ms") for c in cues) if v is not None]
     if len(starts) < 2:
         skip("too few cues with timing to assess alignment")
 
@@ -170,10 +180,7 @@ def captions_align(art):
 
     # 2) coverage of the audio span by the cue track
     audio_s = art.audio_duration_s
-    last_end = max(
-        (c.get("end_ms") for c in cues if isinstance(c.get("end_ms"), (int, float))),
-        default=max(starts),
-    )
+    last_end = max(ends, default=max(starts))
     coverage = (last_end / 1000.0) / audio_s if audio_s else 1.0
 
     mono_ok = mono_frac >= _CAPTION_MONOTONIC_MIN_FRAC
