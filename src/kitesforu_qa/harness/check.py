@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 Severity = str  # critical | high | medium | low
 Kind = str      # deterministic | judge
@@ -48,8 +48,11 @@ class _Skip(Exception):  # noqa: N818 — a control-flow signal (like StopIterat
     """Raised inside a check to mark it not-applicable for this artifact."""
 
 
-def skip(reason: str = "") -> None:
-    """Call inside a check to mark it not-applicable (records a skip, not a failure)."""
+def skip(reason: str = "") -> NoReturn:
+    """Call inside a check to mark it not-applicable (records a skip, not a failure).
+
+    Typed ``NoReturn`` so type-checkers narrow values after a ``skip()`` guard (the code below a
+    ``if x is None: skip(...)`` is unreachable, so x is non-None there)."""
     raise _Skip(reason)
 
 
