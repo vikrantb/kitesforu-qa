@@ -131,7 +131,7 @@ def run(
 
 @cli.command()
 @click.option('--topic', required=True, help='Podcast topic')
-@click.option('--duration', default=10, type=int, help='Duration in minutes')
+@click.option('--duration', default=0.167, type=float, help='Duration in minutes (default 0.167 = 10s, the cheap T3 verification size; see .claude/rules/test-cost-ladder.md)')
 @click.option('--style', default='Explainer', help='Podcast style (Explainer, Storytelling, Interview, Motivational)')
 @click.option('--language', default='en-US', help='BCP 47 language code (e.g., en-US, hi-IN, es-ES)')
 @click.option('--api-url', envvar='KITESFORU_API_URL', default='https://api.kitesforu.com', help='API URL')
@@ -141,7 +141,7 @@ def run(
 @click.option('--output', '-o', default=None, help='Output file path')
 def e2e(
     topic: str,
-    duration: int,
+    duration: float,
     style: str,
     language: str,
     api_url: str,

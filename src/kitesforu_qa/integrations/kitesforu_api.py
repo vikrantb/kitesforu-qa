@@ -35,19 +35,26 @@ class KitesForUClient:
     def create_job(
         self,
         topic: str,
-        duration_min: int = 10,
+        duration_min: float = 0.167,
         style: str = "Explainer",
         language: str = "en-US",
+        quality_tier: str = "low",
         **kwargs,
     ) -> dict:
         """
         Create a new podcast job.
 
+        Test-cost-ladder defaults (June 2026: ~$250 of full-price verification episodes):
+        cheapest real pipeline run — 10s (0.167 min), quality_tier="low" (~$0.025/job).
+        Pass duration_min/quality_tier explicitly to escalate; T4 (medium/high/visuals)
+        additionally requires the founder spend ack per .claude/rules/test-cost-ladder.md.
+
         Args:
             topic: Podcast topic/request
-            duration_min: Target duration in minutes
+            duration_min: Target duration in minutes (float; 0.167 = 10s API minimum)
             style: Podcast style (Explainer, Storytelling, Interview, Motivational)
             language: BCP 47 language code (e.g., "en-US", "hi-IN", "es-ES")
+            quality_tier: low/medium/high/ultra — "low" forces cheapest enabled models
             **kwargs: Additional parameters
 
         Returns:
@@ -62,6 +69,8 @@ class KitesForUClient:
                 "duration_min": duration_min,
                 "style": style,
                 "language": language,
+                "quality_tier": quality_tier,
+                "skip_clarifier": True,
                 **kwargs,
             },
             timeout=30,
