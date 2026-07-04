@@ -113,7 +113,7 @@ if [[ "$WAIT" == "true" ]]; then
   echo "Polling until terminal state..."
   for i in $(seq 1 60); do
     sleep 15
-    STATUS=$(curl -sS "$API_BASE/v1/podcasts/$JOB_ID/status" -H "Authorization: Bearer $TEST_API_KEY" \
+    STATUS=$(curl -sS "$API_BASE/v1/podcasts/$JOB_ID/status" -H "Authorization: Bearer $TEST_API_KEY" "${OBO_ARGS[@]}" \
       | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
     echo "  [$i] $STATUS"
     case "$STATUS" in completed|failed|failed_qa) break ;; esac
