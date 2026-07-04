@@ -96,9 +96,11 @@ PYEOF
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS est=$EST"
 OBO_ARGS=()
 [[ -n "$ON_BEHALF_OF" ]] && OBO_ARGS=(-H "X-On-Behalf-Of: $ON_BEHALF_OF")
+# ${arr[@]+...} guard: macOS bash 3.2 treats an EMPTY array expansion as an
+# unbound variable under `set -u`.
 RESP=$(curl -sS -X POST "$API_BASE/v1/podcasts" \
   -H "Authorization: Bearer $TEST_API_KEY" \
-  "${OBO_ARGS[@]}" \
+  ${OBO_ARGS[@]+"${OBO_ARGS[@]}"} \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD")
 
@@ -113,7 +115,7 @@ if [[ "$WAIT" == "true" ]]; then
   echo "Polling until terminal state..."
   for i in $(seq 1 60); do
     sleep 15
-    STATUS=$(curl -sS "$API_BASE/v1/podcasts/$JOB_ID/status" -H "Authorization: Bearer $TEST_API_KEY" "${OBO_ARGS[@]}" \
+    STATUS=$(curl -sS "$API_BASE/v1/podcasts/$JOB_ID/status" -H "Authorization: Bearer $TEST_API_KEY" ${OBO_ARGS[@]+"${OBO_ARGS[@]}"} \
       | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
     echo "  [$i] $STATUS"
     case "$STATUS" in completed|failed|failed_qa) break ;; esac
