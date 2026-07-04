@@ -19,7 +19,7 @@ ACK_FILE="/Users/vikrantbhosale/gitprojects/kitesforu/.claude/FOUNDER_SPEND_ACK"
 TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
-STYLE="conversation"
+STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
 VISUALS="false"
 WAIT="false"
 
