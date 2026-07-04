@@ -20,6 +20,7 @@ TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
 STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
+FORMAT=""           # optional API format (drama|panel|...) — forces multi-speaker casting at T3 cost
 VISUALS="false"
 WAIT="false"
 ON_BEHALF_OF=""
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     --duration) DURATION="$2"; shift 2 ;;
     --tier)     TIER="$2"; shift 2 ;;
     --style)    STYLE="$2"; shift 2 ;;
+    --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --visuals)  VISUALS="true"; shift ;;
     --wait)     WAIT="true"; shift ;;
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # founder-visible: job lands in this user's library
@@ -74,10 +76,10 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals = sys.argv[1:6]
-print(json.dumps({
+topic, duration, tier, style, visuals, fmt = sys.argv[1:7]
+body = {
     "topic": topic,
     "duration_min": float(duration),
     "style": style,
@@ -89,7 +91,10 @@ print(json.dumps({
     "allow_premium": tier in ("high", "ultra"),
     "skip_clarifier": True,
     "language": "en-US",
-}))
+}
+if fmt:
+    body["format"] = fmt
+print(json.dumps(body))
 PYEOF
 )
 
