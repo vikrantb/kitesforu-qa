@@ -22,6 +22,7 @@ TIER="low"
 STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
 VISUALS="false"
 WAIT="false"
+ON_BEHALF_OF=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --style)    STYLE="$2"; shift 2 ;;
     --visuals)  VISUALS="true"; shift ;;
     --wait)     WAIT="true"; shift ;;
+    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # founder-visible: job lands in this user's library
     -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -92,8 +94,11 @@ PYEOF
 )
 
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS est=$EST"
+OBO_ARGS=()
+[[ -n "$ON_BEHALF_OF" ]] && OBO_ARGS=(-H "X-On-Behalf-Of: $ON_BEHALF_OF")
 RESP=$(curl -sS -X POST "$API_BASE/v1/podcasts" \
   -H "Authorization: Bearer $TEST_API_KEY" \
+  "${OBO_ARGS[@]}" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD")
 
