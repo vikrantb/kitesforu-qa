@@ -8,6 +8,8 @@
 #   ./create_verification_job.sh                          # 10s low-tier audio job (~$0.025)
 #   ./create_verification_job.sh --topic "b-trees" --wait # + poll until done
 #   ./create_verification_job.sh --tier medium --visuals  # T4 — needs FOUNDER_SPEND_ACK
+#   ./create_verification_job.sh --short --duration 1.0 --wait  # born-short (9:16), 60s
+#     — verifies the short-form craft (wpm band, caption dwell); duration>0.5 ⇒ needs ACK
 #
 # Auth: TEST_API_KEY env var, or fetched from Secret Manager (kitesforu-dev).
 
@@ -24,6 +26,7 @@ FORMAT=""           # optional API format (drama|panel|...) — forces multi-spe
 VISUALS="false"
 WAIT="false"
 ON_BEHALF_OF=""
+SHORT="false"       # born-short: short_video=true → 9:16, single-voice, intro/outro suppressed
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --style)    STYLE="$2"; shift 2 ;;
     --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --visuals)  VISUALS="true"; shift ;;
+    --short)    SHORT="true"; shift ;;  # born-short (short_video=true); pair with --duration 1.0
     --wait)     WAIT="true"; shift ;;
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # founder-visible: job lands in this user's library
     -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
@@ -76,9 +80,9 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$SHORT" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt = sys.argv[1:7]
+topic, duration, tier, style, visuals, fmt, short = sys.argv[1:8]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -94,6 +98,10 @@ body = {
 }
 if fmt:
     body["format"] = fmt
+if short == "true":
+    # born-short (P0d): short_video=true + duration<=2 → AudioFormat.SHORT (9:16,
+    # single-voice, intro/outro suppressed, short_form craft).
+    body["short_video"] = True
 print(json.dumps(body))
 PYEOF
 )
