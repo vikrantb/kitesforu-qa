@@ -80,9 +80,9 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$SHORT" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, short = sys.argv[1:8]
+topic, duration, tier, style, visuals, fmt = sys.argv[1:7]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -98,20 +98,25 @@ body = {
 }
 if fmt:
     body["format"] = fmt
-if short == "true":
-    # born-short (P0d): short_video=true + duration<=2 → AudioFormat.SHORT (9:16,
-    # single-voice, intro/outro suppressed, short_form craft).
-    body["short_video"] = True
+# NOTE: short_video is a QUERY PARAM (?short_video=true), NOT a body field — the
+# strict schemas CreateJobRequest drops body extras, so a body short_video is
+# silently ignored (verified live 2026-07-06: body-only rendered a normal episode).
+# The query param is appended to the POST URL below when --short is set.
 print(json.dumps(body))
 PYEOF
 )
+
+# Born-short routing is a QUERY PARAM (crud.py: `?short_video=true`, P0d). duration<=2
+# required (short_hint = short_video AND duration_min<=2), else the hint is ignored.
+POST_URL="$API_BASE/v1/podcasts"
+[[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
 
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS est=$EST"
 OBO_ARGS=()
 [[ -n "$ON_BEHALF_OF" ]] && OBO_ARGS=(-H "X-On-Behalf-Of: $ON_BEHALF_OF")
 # ${arr[@]+...} guard: macOS bash 3.2 treats an EMPTY array expansion as an
 # unbound variable under `set -u`.
-RESP=$(curl -sS -X POST "$API_BASE/v1/podcasts" \
+RESP=$(curl -sS -X POST "$POST_URL" \
   -H "Authorization: Bearer $TEST_API_KEY" \
   ${OBO_ARGS[@]+"${OBO_ARGS[@]}"} \
   -H "Content-Type: application/json" \
