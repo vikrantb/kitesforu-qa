@@ -27,6 +27,7 @@ VISUALS="false"
 WAIT="false"
 ON_BEHALF_OF=""
 SHORT="false"       # born-short: short_video=true → 9:16, single-voice, intro/outro suppressed
+CONTENT_RATING=""   # optional maturity dial: g|pg|pg_13|r (exercises ENABLE_CONTENT_MATURITY end-to-end)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --visuals)  VISUALS="true"; shift ;;
     --short)    SHORT="true"; shift ;;  # born-short (short_video=true); pair with --duration 1.0
+    --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # founder-visible: job lands in this user's library
     -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
@@ -80,9 +82,9 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt = sys.argv[1:7]
+topic, duration, tier, style, visuals, fmt, content_rating = sys.argv[1:8]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -98,6 +100,8 @@ body = {
 }
 if fmt:
     body["format"] = fmt
+if content_rating:
+    body["content_rating"] = content_rating
 # NOTE: short_video is a QUERY PARAM (?short_video=true), NOT a body field — the
 # strict schemas CreateJobRequest drops body extras, so a body short_video is
 # silently ignored (verified live 2026-07-06: body-only rendered a normal episode).
