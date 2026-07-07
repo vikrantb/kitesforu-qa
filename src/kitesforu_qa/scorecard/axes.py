@@ -440,12 +440,6 @@ def score_sync_exactness(art: Any, cfg: ScorecardConfig) -> AxisResult:
 
 # ── axis 7 — AUDIO FEEL (floor 70, T1 $0) ─────────────────────────────────────
 
-_VERDICT_BASE_SCORE = {
-    "likely_real_music": 90.0,
-    "ambiguous": 60.0,
-}
-
-
 def _judge_verdict_base_score(verdict: str, music_expected: bool) -> float:
     if verdict.startswith("likely_real_music"):
         return 90.0
