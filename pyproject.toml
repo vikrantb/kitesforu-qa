@@ -51,6 +51,13 @@ diarization = [
     "pyannote.audio>=3.1.0",
     "torch>=2.0.0",
 ]
+# scorecard.vlm (axis 3, --vlm on short_scorecard.py): provider-agnostic photo-vs-illustration VLM.
+# google-generativeai is already a hard dependency (LLMEvaluator); these two are the OpenAI/Anthropic
+# legs of the provider chain, imported lazily so a bare install without either stays $0/importable.
+vlm = [
+    "openai>=1.0.0",
+    "anthropic>=0.30.0",
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
@@ -60,7 +67,7 @@ dev = [
     "mypy>=1.5.0",
 ]
 all = [
-    "kitesforu-qa[diarization,dev]",
+    "kitesforu-qa[diarization,vlm,dev]",
 ]
 
 [project.scripts]

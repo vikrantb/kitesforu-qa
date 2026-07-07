@@ -16,6 +16,10 @@ from typing import Any
 # judge_fn(art) -> (score_0_100: float, note: str)
 JudgeFn = Callable[[Any], "tuple[float, str]"]
 # vlm_fn(image_uris: list[str], context: dict) -> (score_0_100: float, note: str)
+# context carries {"job_id", "beat_count", "video_path", "beats": [{"beat_index", "start_ms", "asset_uri",
+# "modality", "render_mode"}, ...]} — "beats" + "video_path" are what a real vlm_fn needs to extract a
+# frame (ffmpeg at the beat's start_ms, or the beat's own stored asset as a fallback); image_uris is kept
+# for back-compat with simple injected test doubles. See kitesforu_qa.scorecard.vlm for the reference impl.
 VlmFn = Callable[["list[str]", "dict[str, Any]"], "tuple[float, str]"]
 
 

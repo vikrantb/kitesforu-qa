@@ -9,12 +9,15 @@ list of axes that need instrumentation this render couldn't answer.
 
 Every LLM/VLM axis (substance-novelty judge, visual-truth VLM) is OFF by default via
 ``ScorecardConfig`` — a bare invocation is strictly $0/T1 (Firestore read + GCS download + local
-ffmpeg/ffprobe only). Pass ``--enable-judge``/``--enable-vlm`` to escalate those two axes to their
-authoritative T2 tier once a judge/VLM callable is wired in (unwired = an honest null, never a
-fabricated score — see ``kitesforu_qa.scorecard.config``).
+ffmpeg/ffprobe only). Pass ``--enable-judge``/``--vlm`` to escalate those two axes to their
+authoritative T2 tier: ``--enable-judge`` needs a judge_fn wired in externally (unwired = an honest
+null); ``--vlm`` wires the REAL provider-agnostic photo-vs-illustration VLM
+(``kitesforu_qa.scorecard.vlm.photo_vs_illustration_vlm_fn`` — ~$0.001/beat, T2 ¢, see
+COST_CHANGELOG.md) automatically, so passing it alone is enough to get an authoritative axis-3 score.
 
 Usage:
     python3 scripts/short_scorecard.py --job-id <job_id> [--project kitesforu-dev] [--out result.json]
+    python3 scripts/short_scorecard.py --job-id <job_id> --vlm   # escalate axis 3 to the real VLM (¢)
     python3 scripts/short_scorecard.py --doc-file <job.json> --video <local.mp4>   # fully offline
 """
 from __future__ import annotations
@@ -82,8 +85,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="turn ON the substance-novelty LLM judge axis (¢ spend; needs a wired judge_fn — unwired stays an honest null)",
     )
     p.add_argument(
-        "--enable-vlm", action="store_true",
-        help="turn ON the visual-truth VLM axis (¢ spend; needs a wired vlm_fn — unwired stays an honest null)",
+        "--vlm", action="store_true",
+        help=(
+            "turn ON the visual-truth VLM axis and wire the REAL provider-agnostic photo-vs-illustration "
+            "VLM (T2 ¢ spend, ~$0.001/beat — see COST_CHANGELOG.md); default OFF stays the honest "
+            "'needs-VLM' null"
+        ),
     )
     p.add_argument("--out", help="also write the JSON scorecard to this path")
     return p
@@ -103,7 +110,12 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     art = Artifact.from_doc(doc, audio_path=args.audio, video_path=video_path)
-    cfg = ScorecardConfig(enable_judge=args.enable_judge, enable_vlm=args.enable_vlm)
+    vlm_fn = None
+    if args.vlm:
+        from kitesforu_qa.scorecard.vlm import photo_vs_illustration_vlm_fn  # noqa: E402
+
+        vlm_fn = photo_vs_illustration_vlm_fn
+    cfg = ScorecardConfig(enable_judge=args.enable_judge, enable_vlm=args.vlm, vlm_fn=vlm_fn)
     result = score_short(art, cfg)
 
     out_json = json.dumps(result, indent=2, default=str)
