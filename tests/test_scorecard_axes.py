@@ -160,6 +160,29 @@ def test_visual_truth_enabled_with_vlm_fn_is_authoritative() -> None:
     assert r.passed is False  # below the floor of 90 — catches the Pixar-labeled-photoreal lie
 
 
+def test_visual_truth_context_carries_video_path_and_beats_for_a_real_vlm_fn() -> None:
+    """A REAL vlm_fn (kitesforu_qa.scorecard.vlm) needs the video_path + per-beat start_ms/asset_uri to
+    actually extract a frame — pin that axes.py passes them, not just the resolved image_uris strings."""
+    captured: dict = {}
+
+    def fake_vlm(image_uris, context):
+        captured.update(context)
+        return 100.0, "ok"
+
+    doc = {
+        "visual": {"clips": [
+            {"beat_index": 2, "modality": "ai_photo", "render_mode": "still", "start_ms": 4500,
+             "asset_uri": "gs://x/y.png"},
+        ]},
+    }
+    axes.score_visual_truth(_art(doc, video_path="/tmp/episode.mp4"), _cfg(enable_vlm=True, vlm_fn=fake_vlm))
+    assert captured["video_path"] == "/tmp/episode.mp4"
+    assert captured["beats"] == [{
+        "beat_index": 2, "start_ms": 4500, "asset_uri": "gs://x/y.png",
+        "modality": "ai_photo", "render_mode": "still",
+    }]
+
+
 # ── axis 4 — modality mix ────────────────────────────────────────────────────────
 
 

@@ -245,8 +245,28 @@ def score_visual_truth(art: Any, cfg: ScorecardConfig) -> AxisResult:
         for c in photoreal_beats
     ]
     image_uris = [u for u in image_uris if u]
+    # "beats" carries what a REAL vlm_fn needs to extract an actual frame (video_path + per-beat start_ms,
+    # or a fallback asset URI) — image_uris alone is kept for back-compat with simple injected test doubles.
+    beats_context = [
+        {
+            "beat_index": c.get("beat_index"),
+            "start_ms": c.get("start_ms"),
+            "asset_uri": c.get("asset_uri") or c.get("image_url") or c.get("gcs_uri") or c.get("url"),
+            "modality": c.get("modality"),
+            "render_mode": c.get("render_mode"),
+        }
+        for c in photoreal_beats
+    ]
     try:
-        score, note = cfg.vlm_fn(image_uris, {"job_id": art.job_id, "beat_count": len(photoreal_beats)})
+        score, note = cfg.vlm_fn(
+            image_uris,
+            {
+                "job_id": art.job_id,
+                "beat_count": len(photoreal_beats),
+                "video_path": art.video_path,
+                "beats": beats_context,
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         return make_axis(
             "visual_truth",

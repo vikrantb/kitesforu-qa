@@ -172,3 +172,45 @@ def test_main_writes_out_file_when_requested(sc, tmp_path) -> None:
 def test_main_requires_job_id_or_doc_file(sc) -> None:
     with pytest.raises(SystemExit):
         sc.main([])
+
+
+# ── --vlm wiring (default OFF preserves the null; ON wires the real VLM) ────────
+
+
+def _photoreal_doc(job_id: str) -> dict:
+    return {
+        "job_id": job_id,
+        "visual": {"clips": [
+            {"beat_index": 0, "modality": "scene_image", "asset_uri": "/nonexistent/img.png"}
+        ]},
+    }
+
+
+def test_main_vlm_flag_default_off_stays_the_honest_needs_vlm_null(sc, tmp_path, capsys) -> None:
+    doc_file = tmp_path / "job.json"
+    doc_file.write_text(json.dumps(_photoreal_doc("vlm-off-1")))
+
+    exit_code = sc.main(["--doc-file", str(doc_file)])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    axis = result["axes"]["visual_truth"]
+    assert axis["score"] is None
+    assert "needs-VLM" in axis["how_measured"]
+
+
+def test_main_vlm_flag_wires_the_real_vlm_callable(sc, tmp_path, capsys) -> None:
+    doc_file = tmp_path / "job.json"
+    doc_file.write_text(json.dumps(_photoreal_doc("vlm-on-1")))
+
+    exit_code = sc.main(["--doc-file", str(doc_file), "--vlm"])
+
+    result = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    axis = result["axes"]["visual_truth"]
+    # No local video and an unresolvable asset path — the REAL VLM can't extract a frame from anywhere,
+    # so it degrades to an honest null (never a fabricated pass). This proves --vlm actually invokes the
+    # real callable (a different failure message than the "not wired" null above), fully offline/$0.
+    assert axis["score"] is None
+    assert "vlm_fn raised" in axis["evidence"]
+    assert "no frame source available" in axis["evidence"]
