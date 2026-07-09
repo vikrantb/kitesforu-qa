@@ -2,6 +2,30 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-07-09 — Measured Quality Engine: EPISODES + COURSES extension (cost-NEUTRAL)
+
+**Files:** `src/kitesforu_qa/harness/quality_matrix.py`, `scripts/quality_matrix.py` (new
+`--content-class episodes` mode + `resolve_audio`), `tests/test_quality_matrix_episodes.py` (new),
+`tests/test_quality_matrix_episodes_cli.py` (new)
+
+**Context:** the Measured Quality Engine (PR #55/#56) only ever scored 9:16 SHORTS via the fixed
+8-axis rubric — EPISODES (16:9/audio podcasts) and COURSE modules (corporate training; a course
+episode IS a `podcast_jobs` doc stamped `parent_type=='course'`) were a total measurement blind
+spot. Extended (not forked): a new `detect_content_class`/`score_episode_or_course` path reuses the
+harness's existing GENERAL check battery (`battery.run_scorecard`, 138 checks across structure/
+content/audio-mix/cost-correctness/visual-images/video-sync/music-sfx) instead of inventing a
+parallel rubric, plus a check-level aggregator/ranker (`aggregate_all_checks`,
+`rank_systematic_check_failures`, `aggregate_all_dimensions`) analogous to the short engine's
+axis-level one. The short 8-axis path (`score_all`/`rank_systematic_weaknesses`/
+`render_backlog_markdown`) is untouched — verified byte-identical behavior via the existing test
+suite (511/511 pre-existing tests still pass) plus a new pin
+(`test_main_default_content_class_is_short_unchanged`).
+
+**Per-unit $ delta: $0.** No new LLM/VLM/judge call — every check in the general battery is
+deterministic Python over the job doc (+ locally-resolved audio/video via `gsutil`, same technique
+`resolve_video` already used). The $0 baseline run (`--content-class episodes --query-recent-days
+14`, no new jobs) scores EXISTING completed episode/course jobs only. No pricing-page implication.
+
 ## 2026-07-08 — Measured Quality Engine: scorer calibration fixes (cost-NEUTRAL)
 
 **Files:** `src/kitesforu_qa/scorecard/config.py`, `src/kitesforu_qa/scorecard/axes.py`,
