@@ -51,6 +51,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
 from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
+    CONTENT_CLASS_COURSE,
     CONTENT_CLASS_EPISODE,
     CONTENT_CLASS_SHORT,
     DEFAULT_TARGET_FORMATS,
@@ -424,7 +425,7 @@ def _run_episodes_courses(args: argparse.Namespace) -> int:
 
     by_class = group_cells_by_content_class(cells)
     episodes = by_class.get(CONTENT_CLASS_EPISODE, [])
-    courses = by_class.get("course", [])
+    courses = by_class.get(CONTENT_CLASS_COURSE, [])
 
     result = {
         "generated_at": generated_at,
