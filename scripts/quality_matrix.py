@@ -23,6 +23,15 @@ Usage:
 
     # fully offline (a directory of local job-doc JSON files — for testing, $0, no network)
     python3 scripts/quality_matrix.py --docs-dir fixtures/jobs/
+
+EPISODES + COURSES (extends the engine beyond 9:16 shorts — see kitesforu_qa.harness.quality_matrix
+module docstring for why this is a SEPARATE code path, not a fork of the short scorer):
+
+    # $0 baseline over EPISODE + COURSE jobs from the last 14 days (shorts in the window are
+    # excluded — the short engine above owns shorts). A bigger --limit is recommended here: the
+    # query is most-recent-completed-first across ALL content classes, so a short-heavy period
+    # needs headroom to still surface enough episode/course jobs.
+    python3 scripts/quality_matrix.py --content-class episodes --query-recent-days 14 --limit 400
 """
 from __future__ import annotations
 
@@ -30,6 +39,7 @@ import argparse
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -41,16 +51,27 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
 from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
+    CONTENT_CLASS_EPISODE,
+    CONTENT_CLASS_SHORT,
     DEFAULT_TARGET_FORMATS,
     DEFAULT_TARGET_GENRES,
+    EPISODES_COURSES_SECTION_END,
+    EPISODES_COURSES_SECTION_START,
     aggregate_all_axes,
+    aggregate_all_dimensions,
     aggregate_by_group,
+    detect_content_class,
+    group_cells_by_content_class,
     instrumentation_gaps,
     parse_datetime,
     propose_matrix_fill,
     proxy_dominant_axes,
+    rank_systematic_check_failures,
     rank_systematic_weaknesses,
     render_backlog_markdown,
+    render_episode_course_section,
+    score_episode_or_course,
+    upsert_markdown_section,
 )
 from kitesforu_qa.scorecard import ScorecardConfig, score_short  # noqa: E402
 from kitesforu_qa.scorecard import signals as _signals  # noqa: E402
@@ -125,7 +146,7 @@ def load_docs_dir(path: str) -> list[dict[str, Any]]:
     return out
 
 
-# ── per-cell scoring ─────────────────────────────────────────────────────────
+# ── per-cell scoring (SHORT — unchanged) ────────────────────────────────────────
 
 
 def score_all(
@@ -173,42 +194,138 @@ def score_all(
     return cells
 
 
+# ── per-cell scoring (EPISODES + COURSES) ───────────────────────────────────────
+
+
+def resolve_audio(doc: dict[str, Any], work_dir: str) -> str | None:
+    """Local audio path for an EPISODE/COURSE job — downloads ``outputs.audio_url`` via ``gsutil``
+    when it's a ``gs://`` URI (the SAME technique ``resolve_video`` uses; duplicated here rather than
+    imported since ``short_scorecard.py`` has no audio resolver of its own — its ``--audio`` flag only
+    accepts an already-local path). Returns ``None`` (never raises) when unresolvable — the
+    audio-mix/music-sfx dimensions then degrade to an honest skip rather than crash the whole run.
+
+    Most EPISODE jobs are audio-only (no rendered video) — without this, the audio-mix dimension
+    (the largest deterministic battery besides content: clipping/loudness/silence/truncation/channel
+    balance) would silently skip on every pure-audio podcast, which is exactly the "right measurement
+    for episodes" this extension exists to restore."""
+    outputs = doc.get("outputs")
+    uri = outputs.get("audio_url") if isinstance(outputs, dict) else None
+    if not uri:
+        return None
+    uri = str(uri)
+    if not uri.startswith("gs://"):
+        return uri if os.path.exists(uri) else None
+    dest = os.path.join(work_dir, os.path.basename(uri) or "episode_audio.mp3")
+    try:
+        subprocess.run(["gsutil", "-q", "cp", uri, dest], check=True, timeout=180)
+        return dest
+    except Exception as exc:  # noqa: BLE001 — degrade, don't crash the whole run
+        print(f"warning: gsutil cp failed for audio {uri}: {exc}", file=sys.stderr)
+        return None
+
+
+def score_all_episodes_courses(
+    job_specs: list[Any],
+    *,
+    project: str,
+    download_video: bool,
+    download_audio: bool,
+    fetch_job_doc: Any,
+    resolve_video: Any,
+    resolve_audio: Any,
+) -> list[dict[str, Any]]:
+    """Score every job spec into an EPISODE/COURSE "cell" via ``score_episode_or_course`` (the
+    harness's general $0 battery) — the sibling of ``score_all`` for the non-short content classes.
+
+    SHORT-classified jobs in the input set are EXCLUDED from the result entirely (not scored, not
+    counted as unscored) — this mode only ever produces episode/course cells; the short engine above
+    owns shorts. Bounded + fail-open exactly like ``score_all``: one bad job degrades to
+    ``_scored=False`` and never aborts the run for the rest."""
+    work_dir = tempfile.mkdtemp(prefix="kqa_quality_matrix_ec_")
+    cells: list[dict[str, Any]] = []
+    for spec in job_specs:
+        is_bare_id = isinstance(spec, str)
+        job_id = spec if is_bare_id else str(spec.get("job_id") or spec.get("id") or "unknown")
+        try:
+            doc = fetch_job_doc(project, spec) if is_bare_id else spec
+            video_path = resolve_video(None, doc, work_dir) if download_video else None
+            audio_path = resolve_audio(doc, work_dir) if download_audio else None
+            art = Artifact.from_doc(doc, audio_path=audio_path, video_path=video_path)
+            if detect_content_class(art) == CONTENT_CLASS_SHORT:
+                continue  # out of scope for this mode — the short engine above owns shorts
+            cells.append(score_episode_or_course(art))
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 — one bad job must never crash the run
+            cells.append(
+                {
+                    "job_id": job_id,
+                    "_scored": False,
+                    "_error": f"{type(exc).__name__}: {exc}",
+                    "genre": "unknown",
+                    "content_class": "unknown",
+                    "quality_tier": "unknown",
+                }
+            )
+    return cells
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Score a set of jobs on the 8-axis SHORT SCORECARD and rank systematic weaknesses.")
+    p = argparse.ArgumentParser(description="Score a set of jobs and rank systematic quality weaknesses.")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--job-ids", help="comma-separated Firestore podcast_jobs job_ids to score")
     src.add_argument("--query-recent-days", type=int, help="score COMPLETED jobs from the last N days (the $0 reuse baseline)")
     src.add_argument("--docs-dir", help="score local job-doc JSON files in this directory (offline, $0, no network)")
 
+    p.add_argument(
+        "--content-class", choices=["short", "episodes"], default="short",
+        help=(
+            "'short' (default; unchanged behavior): the 9:16 8-axis SHORT SCORECARD. "
+            "'episodes': score EPISODE + COURSE jobs (course jobs are podcast_jobs docs with "
+            "parent_type=='course') via the harness's GENERAL check battery instead — any short "
+            "job in the source set is excluded from this mode's output."
+        ),
+    )
     p.add_argument("--project", default=os.environ.get("GCP_PROJECT", "kitesforu-dev"))
     p.add_argument("--limit", type=int, default=60, help="max jobs to score in query mode (bounded; default 60)")
-    p.add_argument("--no-video", action="store_true", help="skip gs:// video download (faster; video-dependent axes degrade honestly)")
-    p.add_argument("--enable-judge", action="store_true", help="turn ON the substance-novelty LLM judge axis (¢; unwired stays an honest null)")
-    p.add_argument("--vlm", action="store_true", help="turn ON the visual-truth VLM axis (¢, ~$0.001/beat — wires the real photo-vs-illustration VLM)")
-    p.add_argument("--top-n", type=int, default=5, help="how many ranked systematic weaknesses to show in the markdown backlog (default 5)")
-    p.add_argument("--target-genres", default=",".join(DEFAULT_TARGET_GENRES), help="comma-separated genre list for the PROPOSED MATRIX FILL section")
-    p.add_argument("--target-formats", default=",".join(DEFAULT_TARGET_FORMATS), help="comma-separated format list (short,episode) for the PROPOSED MATRIX FILL section")
-    p.add_argument("--out-json", default=str(REPO_ROOT / "reports" / "quality_matrix_result.json"))
-    p.add_argument("--out-backlog", default=str(REPO_ROOT / "QUALITY_BACKLOG.md"))
+    p.add_argument("--no-video", action="store_true", help="skip gs:// video download (faster; video-dependent axes/checks degrade honestly)")
+    p.add_argument(
+        "--no-audio", action="store_true",
+        help="episodes mode only: skip outputs.audio_url download (audio-mix/music-sfx checks degrade honestly)",
+    )
+    p.add_argument("--enable-judge", action="store_true", help="short mode only: turn ON the substance-novelty LLM judge axis (¢; unwired stays an honest null)")
+    p.add_argument("--vlm", action="store_true", help="short mode only: turn ON the visual-truth VLM axis (¢, ~$0.001/beat — wires the real photo-vs-illustration VLM)")
+    p.add_argument("--top-n", type=int, default=5, help="how many ranked systematic weaknesses/failures to show (default 5)")
+    p.add_argument("--target-genres", default=",".join(DEFAULT_TARGET_GENRES), help="short mode only: comma-separated genre list for the PROPOSED MATRIX FILL section")
+    p.add_argument("--target-formats", default=",".join(DEFAULT_TARGET_FORMATS), help="short mode only: comma-separated format list (short,episode) for the PROPOSED MATRIX FILL section")
+    p.add_argument(
+        "--out-json", default=None,
+        help="default: reports/quality_matrix_result.json (short mode) or "
+             "reports/quality_matrix_episodes_courses_result.json (episodes mode)",
+    )
+    p.add_argument(
+        "--out-backlog", default=None,
+        help="default: QUALITY_BACKLOG.md for both modes. Short mode OVERWRITES the file (idempotent "
+             "given the same cells); episodes mode UPSERTS a marked section into it instead, so a "
+             "prior short baseline in the same file is preserved.",
+    )
     return p
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
-
+def _resolve_job_specs(args: argparse.Namespace) -> tuple[list[Any], str]:
+    """Shared job-sourcing step (identical across both content-class modes)."""
     if args.job_ids:
-        job_specs: list[Any] = [j.strip() for j in args.job_ids.split(",") if j.strip()]
-        mode = "job-ids"
-    elif args.query_recent_days is not None:
-        job_specs = query_recent_completed_jobs(args.project, days=args.query_recent_days, limit=args.limit)
-        mode = f"query-recent-{args.query_recent_days}d"
-    else:
-        job_specs = load_docs_dir(args.docs_dir)
-        mode = "docs-dir"
+        return [j.strip() for j in args.job_ids.split(",") if j.strip()], "job-ids"
+    if args.query_recent_days is not None:
+        specs = query_recent_completed_jobs(args.project, days=args.query_recent_days, limit=args.limit)
+        return specs, f"query-recent-{args.query_recent_days}d"
+    return load_docs_dir(args.docs_dir), "docs-dir"
 
+
+def _run_short(args: argparse.Namespace) -> int:
+    """The ORIGINAL (unchanged) 9:16 SHORT SCORECARD path."""
+    job_specs, mode = _resolve_job_specs(args)
     sc_lib = _load_short_scorecard_lib()
 
     vlm_fn = None
@@ -257,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         "proposed_matrix_fill": matrix_fill,
     }
 
-    out_json = Path(args.out_json)
+    out_json = Path(args.out_json) if args.out_json else (REPO_ROOT / "reports" / "quality_matrix_result.json")
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result, indent=2, default=str))
 
@@ -270,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         target_genres=target_genres,
         target_formats=target_formats,
     )
-    out_backlog = Path(args.out_backlog)
+    out_backlog = Path(args.out_backlog) if args.out_backlog else (REPO_ROOT / "QUALITY_BACKLOG.md")
     out_backlog.parent.mkdir(parents=True, exist_ok=True)
     out_backlog.write_text(backlog_md)
 
@@ -282,6 +399,89 @@ def main(argv: list[str] | None = None) -> int:
     for i, w in enumerate(weaknesses[: args.top_n], start=1):
         print(f"  {i}. {w.axis}: severity={w.severity:.1f} mean={w.mean_score} n_below_floor={w.n_below_floor}/{w.n_scored}")
     return 0
+
+
+def _run_episodes_courses(args: argparse.Namespace) -> int:
+    """The EPISODES + COURSES path — general-battery scoring, check-level ranking, per-content-class
+    report. See ``kitesforu_qa.harness.quality_matrix`` module docstring for why this is a separate
+    engine rather than a fork of the 9:16 short rubric."""
+    job_specs, mode = _resolve_job_specs(args)
+    sc_lib = _load_short_scorecard_lib()
+
+    cells = score_all_episodes_courses(
+        job_specs,
+        project=args.project,
+        download_video=not args.no_video,
+        download_audio=not args.no_audio,
+        fetch_job_doc=sc_lib.fetch_job_doc,
+        resolve_video=sc_lib.resolve_video,
+        resolve_audio=resolve_audio,
+    )
+
+    n_scored = sum(1 for c in cells if c.get("_scored"))
+    n_excluded_short = len(job_specs) - len(cells)
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    by_class = group_cells_by_content_class(cells)
+    episodes = by_class.get(CONTENT_CLASS_EPISODE, [])
+    courses = by_class.get("course", [])
+
+    result = {
+        "generated_at": generated_at,
+        "project": args.project,
+        "mode": mode,
+        "content_class": "episodes",
+        "n_job_specs": len(job_specs),
+        "n_excluded_short": n_excluded_short,
+        "n_cells_total": len(cells),
+        "n_cells_scored": n_scored,
+        "n_cells_unscored": len(cells) - n_scored,
+        "cells": cells,
+        "episode_dimension_aggregate": {d: a.to_dict() for d, a in aggregate_all_dimensions(episodes).items()},
+        "course_dimension_aggregate": {d: a.to_dict() for d, a in aggregate_all_dimensions(courses).items()},
+        "episode_ranked_systematic_check_failures": [w.to_dict() for w in rank_systematic_check_failures(episodes)],
+        "course_ranked_systematic_check_failures": [w.to_dict() for w in rank_systematic_check_failures(courses)],
+    }
+
+    out_json = Path(args.out_json) if args.out_json else (REPO_ROOT / "reports" / "quality_matrix_episodes_courses_result.json")
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(result, indent=2, default=str))
+
+    section_body = render_episode_course_section(
+        cells, generated_at=generated_at, project=args.project, mode=mode, top_n=args.top_n,
+    )
+    out_backlog = Path(args.out_backlog) if args.out_backlog else (REPO_ROOT / "QUALITY_BACKLOG.md")
+    out_backlog.parent.mkdir(parents=True, exist_ok=True)
+    existing = out_backlog.read_text() if out_backlog.exists() else ""
+    out_backlog.write_text(
+        upsert_markdown_section(
+            existing, section_body,
+            start_marker=EPISODES_COURSES_SECTION_START, end_marker=EPISODES_COURSES_SECTION_END,
+        )
+    )
+
+    print(
+        f"scored {n_scored}/{len(cells)} episode/course cells (mode={mode}, project={args.project}; "
+        f"excluded {n_excluded_short} short job(s) from the source set)"
+    )
+    print(f"wrote {out_json}")
+    print(f"wrote {out_backlog}")
+    for label, subset in (("episodes", episodes), ("courses", courses)):
+        ranked = rank_systematic_check_failures(subset)
+        print()
+        print(f"Top ranked systematic check failures — {label}:")
+        if not ranked:
+            print("  (none — every applicable check passed, or too few scored jobs)")
+        for i, w in enumerate(ranked[: args.top_n], start=1):
+            print(f"  {i}. {w.check_id} [{w.dimension}/{w.severity}]: weighted={w.severity_weighted:.1f} failing={w.n_failed}/{w.n_applicable}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    if args.content_class == "short":
+        return _run_short(args)
+    return _run_episodes_courses(args)
 
 
 if __name__ == "__main__":

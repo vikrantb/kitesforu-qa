@@ -31,7 +31,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from ..scorecard import signals as _signals
 from ..scorecard.rubric import RUBRIC, RUBRIC_BY_NAME
+from .battery import run_scorecard, scorecard_summary
 
 # ── datetime parsing ──────────────────────────────────────────────────────────
 # Firestore ``created_at`` shows up as a str (ISO8601), a naive/aware ``datetime``, or a
@@ -710,3 +712,387 @@ problems rank first; a single one-off low score on an otherwise-fine axis will n
 
 {_matrix_fill_section(matrix_fill)}
 """
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# EPISODES + COURSES — extends the Measured Quality Engine beyond 9:16 shorts (2026-07-09).
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+#
+# The 8-axis SHORT SCORECARD above is deliberately 9:16-specific: modality_mix/motion_density/
+# visual_truth are shot-language axes for a scrolling short, and hook_stop_power/sync_exactness
+# assume a single-beat-per-second vertical reel. None of that is the right yardstick for a
+# 16:9/audio EPISODE (podcasts) or a COURSE module (corporate training — "every lesson IS a podcast
+# job", see kitesforu-docs' course-revamp memory) — those are audio-first, longer-form, and often
+# carry NO 9:16 visual beats at all.
+#
+# So this extension does NOT invent a parallel fixed rubric for episodes/courses. It reuses the
+# harness's own GENERAL battery (``battery.run_scorecard``), which already runs the RIGHT
+# measurement per genre: ``structure`` (is this a real completed render), ``content`` (per-genre
+# script quality — hook/substance/examples/attribution/dread/etc, genre-gated via ``checks_for``),
+# ``audio-mix`` (clipping/loudness/silence/truncation/channel-balance — the real audio_feel),
+# ``cost-correctness`` (the TTS-cost reconciliation invariant), and — only when the episode/course
+# opted into visuals — ``visual-images``/``video-sync``/``music-sfx``. A pure audio-only podcast
+# simply skip()s the visual dimensions (not a failure, not fabricated) and is scored on
+# structure+content+audio-mix+cost-correctness alone.
+#
+# The granular unit here is the individual CHECK (138 registered today, vs the short scorecard's
+# fixed 8 axes) — ranking "systematic weaknesses" at the check_id level is the natural granularity
+# for a battery this rich, mirroring how the short engine ranks by axis: SEVERITY = how WIDESPREAD
+# (how many jobs fail it) x how SEVERE (the check's own authored severity: critical/high/medium/
+# low), so a widespread + severe class-level bug ranks above a single job's one-off low mark.
+
+CONTENT_CLASS_SHORT = "short"
+CONTENT_CLASS_EPISODE = "episode"
+CONTENT_CLASS_COURSE = "course"
+
+
+def detect_content_class(art: Any) -> str:
+    """course | episode | short — the routing key for the episodes/courses extension.
+
+    'course' wins over 'short': a course episode is a regular ``podcast_jobs`` doc stamped
+    ``parent_type=='course'`` by the course pipeline's job-creation client ("a course episode IS a
+    podcast job" — kitesforu-course-workers' ``podcast_api_client.py`` / the live course pipeline in
+    kitesforu-workers). In practice a course module is never also short-classified, so ordering only
+    matters defensively. Everything else non-short is a regular 'episode' (this also covers
+    ``parent_type=='class'`` children — they are not shorts and not courses, so they fall into the
+    general 'episode' bucket rather than a third dedicated class)."""
+    parent_type = str(art.doc.get("parent_type") or "").strip().lower()
+    if parent_type == "course":
+        return CONTENT_CLASS_COURSE
+    if _signals.is_short(art):
+        return CONTENT_CLASS_SHORT
+    return CONTENT_CLASS_EPISODE
+
+
+def score_episode_or_course(art: Any) -> dict[str, Any]:
+    """Score one EPISODE or COURSE artifact via the harness's GENERAL battery (``run_scorecard``) —
+    REUSED, never reimplemented. $0/T1: every check is deterministic Python over the job doc (+ any
+    locally-resolved audio/video) — nothing here calls an LLM/VLM/judge.
+
+    Returns a "cell" analogous to ``score_short()``'s ``{job_id, axes, ...}`` shape, but keyed by
+    check_id rather than a fixed axis rubric: ``{job_id, genre, content_class, quality_tier,
+    overall_passed, dimensions, checks, n_checks_total, n_checks_failed, _scored}``. ``checks`` is
+    the FLAT list of every NON-skipped ``CheckResult`` dict this artifact's genre applies — a skip
+    means "not applicable" (e.g. no audio on this doc), not a measurement, so it must never enter a
+    fail-rate denominator downstream."""
+    scorecard = run_scorecard(art)
+    summary = scorecard_summary(scorecard)
+    checks_flat: list[dict[str, Any]] = [
+        c for stage in scorecard.values() for c in stage.data.get("checks", []) if not c.get("skipped")
+    ]
+    return {
+        "job_id": art.job_id,
+        "genre": art.genre,
+        "content_class": detect_content_class(art),
+        "quality_tier": _signals.job_quality_tier(art),
+        "overall_passed": summary["passed"],
+        "dimensions": summary["dimensions"],
+        "checks": checks_flat,
+        "n_checks_total": summary["total_checks"],
+        "n_checks_failed": summary["total_failed"],
+        "_scored": True,
+    }
+
+
+def group_cells_by_content_class(cells: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """{content_class: [cell, ...]} — the episode/course analogue of ``group_cells``."""
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in cells:
+        groups[str(c.get("content_class") or "unknown")].append(c)
+    return dict(groups)
+
+
+# ── per-check aggregation (the check-level analogue of AxisAggregate) ────────────────────────────
+
+_SEVERITY_WEIGHT: dict[str, float] = {"critical": 4.0, "high": 3.0, "medium": 2.0, "low": 1.0}
+
+
+@dataclass
+class CheckAggregate:
+    check_id: str
+    dimension: str
+    severity: str
+    genre: str | None
+    n_applicable: int          # non-skipped instances across scored cells (this check actually ran)
+    n_failed: int
+    fail_rate: float | None    # n_failed / n_applicable
+    mean_score: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "check_id": self.check_id, "dimension": self.dimension, "severity": self.severity,
+            "genre": self.genre, "n_applicable": self.n_applicable, "n_failed": self.n_failed,
+            "fail_rate": self.fail_rate, "mean_score": self.mean_score,
+        }
+
+
+def _check_instances(cells: list[dict[str, Any]], check_id: str) -> list[dict[str, Any]]:
+    """Every non-skipped CheckResult dict for ``check_id`` across scored cells (``score_episode_or_
+    course`` already drops skipped instances, so every entry here is a real applicable measurement)."""
+    return [
+        chk for c in cells if c.get("_scored")
+        for chk in c.get("checks", []) if chk.get("check_id") == check_id
+    ]
+
+
+def aggregate_check(cells: list[dict[str, Any]], check_id: str) -> CheckAggregate:
+    instances = _check_instances(cells, check_id)
+    n = len(instances)
+    n_failed = sum(1 for i in instances if not i.get("passed"))
+    scores = [float(i["score"]) for i in instances if i.get("score") is not None]
+    return CheckAggregate(
+        check_id=check_id,
+        dimension=str(instances[0].get("dimension")) if instances else "unknown",
+        severity=str(instances[0].get("severity")) if instances else "medium",
+        genre=(instances[0].get("genre") if instances else None),
+        n_applicable=n,
+        n_failed=n_failed,
+        fail_rate=(round(n_failed / n, 3) if n else None),
+        mean_score=(round(sum(scores) / len(scores), 3) if scores else None),
+    )
+
+
+def aggregate_all_checks(cells: list[dict[str, Any]]) -> dict[str, CheckAggregate]:
+    """{check_id: CheckAggregate} over every check_id that appears in >= 1 scored cell — NOT the
+    full 138-check registry (the applicable set differs per genre; a check that never ran on this
+    cell set has no aggregate, exactly like an axis that was never scored has no meaningful mean)."""
+    ids = sorted({chk["check_id"] for c in cells if c.get("_scored") for chk in c.get("checks", [])})
+    return {cid: aggregate_check(cells, cid) for cid in ids}
+
+
+@dataclass
+class SystematicCheckFailure:
+    check_id: str
+    dimension: str
+    severity: str
+    n_failed: int
+    n_applicable: int
+    fail_rate: float
+    severity_weighted: float
+    affected_job_ids: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "check_id": self.check_id, "dimension": self.dimension, "severity": self.severity,
+            "n_failed": self.n_failed, "n_applicable": self.n_applicable, "fail_rate": self.fail_rate,
+            "severity_weighted": self.severity_weighted, "affected_job_ids": self.affected_job_ids,
+        }
+
+
+def rank_systematic_check_failures(
+    cells: list[dict[str, Any]],
+    agg_by_check: dict[str, CheckAggregate] | None = None,
+    *,
+    min_applicable: int = 2,
+) -> list[SystematicCheckFailure]:
+    """Rank check_ids by SEVERITY = (# jobs failing) x (the check's own authored severity weight:
+    critical=4/high=3/medium=2/low=1) — a widespread AND severe class-level bug outranks a single
+    job's one-off low mark on an otherwise-fine check, mirroring ``rank_systematic_weaknesses``'s
+    "widespread AND deep" principle at check granularity. ``min_applicable`` guards against ranking
+    a check that only ever ran once (100% fail rate on n=1 is not evidence of a class-level bug)."""
+    agg_by_check = agg_by_check or aggregate_all_checks(cells)
+    out: list[SystematicCheckFailure] = []
+    for cid, agg in agg_by_check.items():
+        if agg.n_applicable < min_applicable or agg.n_failed == 0:
+            continue
+        weight = _SEVERITY_WEIGHT.get(agg.severity, 1.0)
+        severity_weighted = round(agg.n_failed * weight, 1)
+        job_ids = sorted({
+            c["job_id"] for c in cells if c.get("_scored")
+            for chk in c.get("checks", [])
+            if chk.get("check_id") == cid and not chk.get("passed")
+        })
+        out.append(
+            SystematicCheckFailure(
+                check_id=cid, dimension=agg.dimension, severity=agg.severity,
+                n_failed=agg.n_failed, n_applicable=agg.n_applicable,
+                fail_rate=agg.fail_rate or 0.0, severity_weighted=severity_weighted,
+                affected_job_ids=job_ids,
+            )
+        )
+    out.sort(key=lambda w: (-w.severity_weighted, -w.n_failed, -w.fail_rate))
+    return out
+
+
+# ── per-dimension aggregation (the dimension-level rollup — content/structure/audio-mix/...) ─────
+
+
+@dataclass
+class DimensionAggregate:
+    dimension: str
+    n_cells: int            # scored cells where >= 1 check in this dimension applied (non-skipped)
+    n_total_cells: int       # all scored cells in the set
+    mean_score: float | None   # mean CheckResult.score over every applicable check in this dimension
+    pass_rate: float | None    # fraction of n_cells whose StageResult.passed was True
+    n_checks_total: int
+    n_checks_failed: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dimension": self.dimension, "n_cells": self.n_cells, "n_total_cells": self.n_total_cells,
+            "mean_score": self.mean_score, "pass_rate": self.pass_rate,
+            "n_checks_total": self.n_checks_total, "n_checks_failed": self.n_checks_failed,
+        }
+
+
+def aggregate_dimension(cells: list[dict[str, Any]], dimension: str) -> DimensionAggregate:
+    scored = [c for c in cells if c.get("_scored")]
+    cells_with_dim = [c for c in scored if any(chk.get("dimension") == dimension for chk in c.get("checks", []))]
+    dim_checks = [chk for c in scored for chk in c.get("checks", []) if chk.get("dimension") == dimension]
+    scores = [float(chk["score"]) for chk in dim_checks if chk.get("score") is not None]
+    n_pass = sum(
+        1 for c in cells_with_dim if bool((c.get("dimensions") or {}).get(dimension, {}).get("passed"))
+    )
+    return DimensionAggregate(
+        dimension=dimension,
+        n_cells=len(cells_with_dim),
+        n_total_cells=len(scored),
+        mean_score=(round(sum(scores) / len(scores), 3) if scores else None),
+        pass_rate=(round(n_pass / len(cells_with_dim), 3) if cells_with_dim else None),
+        n_checks_total=len(dim_checks),
+        n_checks_failed=sum(1 for chk in dim_checks if not chk.get("passed")),
+    )
+
+
+def aggregate_all_dimensions(cells: list[dict[str, Any]]) -> dict[str, DimensionAggregate]:
+    """{dimension: DimensionAggregate} over every dimension that produced >= 1 applicable check."""
+    dims = sorted({chk["dimension"] for c in cells if c.get("_scored") for chk in c.get("checks", [])})
+    return {d: aggregate_dimension(cells, d) for d in dims}
+
+
+# ── markdown rendering (episodes/courses section — inserted, never overwrites the short baseline) ──
+
+
+def _dimension_table(agg_by_dim: dict[str, DimensionAggregate]) -> str:
+    if not agg_by_dim:
+        return "_no dimension produced any applicable check for this content-class (nothing scored yet)._"
+    lines = [
+        "| Dimension | Mean score | Pass rate | Checks (failed/total) | Cells with checks |",
+        "|---|---|---|---|---|",
+    ]
+    for dim in sorted(agg_by_dim):
+        a = agg_by_dim[dim]
+        mean = "—" if a.mean_score is None else f"{a.mean_score:.2f}"
+        pr = "—" if a.pass_rate is None else f"{a.pass_rate * 100:.0f}%"
+        lines.append(
+            f"| `{dim}` | {mean} | {pr} | {a.n_checks_failed}/{a.n_checks_total} | "
+            f"{a.n_cells}/{a.n_total_cells} |"
+        )
+    return "\n".join(lines)
+
+
+def _check_failure_section(weaknesses: list[SystematicCheckFailure], top_n: int) -> str:
+    if not weaknesses:
+        return "_no check has any failing instance — nothing systematic to rank (or too few scored jobs)._"
+    out = []
+    for i, w in enumerate(weaknesses[:top_n], start=1):
+        sample_ids = ", ".join(w.affected_job_ids[:8])
+        more = f" (+{len(w.affected_job_ids) - 8} more)" if len(w.affected_job_ids) > 8 else ""
+        out.append(
+            f"### {i}. `{w.check_id}` ({w.dimension}, severity={w.severity}) — weighted "
+            f"{w.severity_weighted:.1f}\n\n"
+            f"- **Failing:** {w.n_failed}/{w.n_applicable} applicable cells "
+            f"({w.fail_rate * 100:.0f}%)\n"
+            f"- **Affected job_ids:** {sample_ids}{more}\n"
+        )
+    return "\n".join(out)
+
+
+def _content_class_unscored_section(cells: list[dict[str, Any]]) -> str:
+    unscored = [c for c in cells if not c.get("_scored")]
+    if not unscored:
+        return ""
+    lines = ["", "### Unscored jobs (fetch/score failures — fail-open)", "", "| job_id | error |", "|---|---|"]
+    for c in unscored[:20]:
+        lines.append(f"| {c.get('job_id', 'unknown')} | {c.get('_error', 'unknown')} |")
+    more = f"\n\n_(+{len(unscored) - 20} more unscored, truncated)_" if len(unscored) > 20 else ""
+    return "\n".join(lines) + more
+
+
+def _content_class_section(cells: list[dict[str, Any]], *, label: str, top_n: int) -> str:
+    scored = [c for c in cells if c.get("_scored")]
+    return "\n".join(
+        [
+            f"## {label.upper()} — {len(scored)}/{len(cells)} scored",
+            "",
+            "### Dimension baseline",
+            "",
+            _dimension_table(aggregate_all_dimensions(cells)),
+            "",
+            f"### Top {top_n} ranked systematic check failures",
+            "",
+            _check_failure_section(rank_systematic_check_failures(cells), top_n),
+            _content_class_unscored_section(cells),
+        ]
+    )
+
+
+def render_episode_course_section(
+    cells: list[dict[str, Any]],
+    *,
+    generated_at: str,
+    project: str,
+    mode: str,
+    top_n: int = 5,
+) -> str:
+    """The EPISODES + COURSES section BODY (no upsert markers — the CLI wraps this with
+    ``upsert_markdown_section``). Deterministic given the same ``cells`` input."""
+    by_class = group_cells_by_content_class(cells)
+    episodes = by_class.get(CONTENT_CLASS_EPISODE, [])
+    courses = by_class.get(CONTENT_CLASS_COURSE, [])
+    n_total = len(cells)
+    n_scored = sum(1 for c in cells if c.get("_scored"))
+
+    return f"""# Measured Quality Engine — EPISODES + COURSES
+
+Generated: {generated_at} · Project: `{project}` · Mode: `{mode}`
+Cells: {n_scored}/{n_total} scored.
+
+This section is produced by `scripts/quality_matrix.py --content-class episodes` — a $0/T1
+aggregation of the harness's GENERAL check battery (`kitesforu_qa.harness.battery.run_scorecard`,
+138 checks across structure/content/audio-mix/cost-correctness/visual-images/video-sync/music-sfx)
+over real completed EPISODE + COURSE jobs. Course jobs are `podcast_jobs` docs stamped
+`parent_type=='course'` — "a course episode IS a podcast job". Unlike the 9:16 SHORT SCORECARD
+above, there is no fixed 8-axis rubric here: the granular unit is the individual CHECK, ranked by
+how widespread + severe its failures are across the scored set. No new jobs were generated to
+produce this baseline.
+
+{_content_class_section(episodes, label="episodes", top_n=top_n)}
+
+{_content_class_section(courses, label="courses", top_n=top_n)}
+"""
+
+
+EPISODES_COURSES_SECTION_START = (
+    "<!-- MEASURED_QUALITY_ENGINE:EPISODES_COURSES:START "
+    "(auto-generated by scripts/quality_matrix.py --content-class episodes; do not hand-edit) -->"
+)
+EPISODES_COURSES_SECTION_END = "<!-- MEASURED_QUALITY_ENGINE:EPISODES_COURSES:END -->"
+
+
+def upsert_markdown_section(
+    existing_text: str,
+    section_body: str,
+    *,
+    start_marker: str,
+    end_marker: str,
+) -> str:
+    """Insert/replace a MARKED block inside an existing markdown document without touching anything
+    outside the markers — how the episodes/courses baseline coexists with the short baseline in the
+    SAME QUALITY_BACKLOG.md without clobbering it (each is idempotent + deterministic on its own:
+    the short engine overwrites the whole file when run in ``--content-class short`` mode; this
+    upsert only ever replaces its own marked block within whatever the short engine last wrote).
+    A file with no existing markers gets the block appended; re-running replaces only the
+    previously-inserted block, never anything else."""
+    block = f"{start_marker}\n\n{section_body}\n\n{end_marker}\n"
+    if start_marker in existing_text and end_marker in existing_text:
+        pre, _, rest = existing_text.partition(start_marker)
+        _, _, post = rest.partition(end_marker)
+        pre = pre.rstrip("\n")
+        sep = "\n\n" if pre else ""
+        post = post.lstrip("\n")
+        return f"{pre}{sep}{block}{post}"
+    if not existing_text.strip():
+        return block
+    sep = "" if existing_text.endswith("\n\n") else ("\n" if existing_text.endswith("\n") else "\n\n")
+    return f"{existing_text}{sep}{block}"
