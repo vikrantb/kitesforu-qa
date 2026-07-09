@@ -68,6 +68,17 @@ _DIAGRAM_DENSITY_CAP = 0.40    # at most 40% of clips may be structural diagrams
 _VIDEO_W = 1920
 _VIDEO_H = 1080
 
+# LONG-FORM CORRECTNESS Part D, Layer 2 — the OCR visual-fit check (founder's cut/overflow class:
+# title/labels/subtitle chopped at the frame edge, e.g. by the video_assembler push-zoom). $0 CPU
+# (ffmpeg seek + pytesseract), no LLM. Samples the LAST ~500ms of each structural-diagram beat — the
+# worst-case post-zoom moment — because a progressive push-zoom crops MORE as a hold continues.
+_OCR_CONF_MIN = 40              # pytesseract word confidence floor (0-100); below this is noise
+_EDGE_CROP_PX = 3               # a word within this many px of the frame edge is LITERALLY clipped
+_TEXT_SAFE_MARGIN_FRAC = 0.08   # the softer SMPTE-style advisory margin (matches workers Layer 1's
+                                 # DEFAULT_MARGIN_FRAC by deliberate convention, not coupling)
+_WORST_CASE_TAIL_S = 0.5        # "last ~500ms" of a beat's on-screen window
+_MAX_DIAGRAM_BEATS_SAMPLED = 12  # bounded (orchestra-oe): evenly subsampled, never unbounded
+
 # Diagram-weave adjacency caps — MIRROR the workers' modality_selector.weave() invariant
 # (stages/visuals/modality_selector.py: _MAX_ADJACENT=1 fiction, _MAX_ADJACENT_NONFICTION=2). The
 # producer deliberately allows a 2-long diagram run for non-fiction/educational ("a short diagram run
@@ -904,3 +915,209 @@ def scene_images_text_free_guard(art):
     ok = not suspicious
     return ok, (f"{len(suspicious)}/{assessed} scene image(s) text-suspect "
                 f"(max edge frac {worst:.2f}, ceiling {_TEXT_EDGE_FRACTION_MAX}): {suspicious[:3]}")
+
+
+# ── named regression guard: cut/overflow text-edge-crop (LONG-FORM CORRECTNESS Part D, Layer 2) ──
+#
+# The MEASURED-QUALITY-ENGINE half of the two-layer gate: workers Layer 1 (render/safe_area_verify.py,
+# safe_area_bbox_phase + verify_text_safe_margin) catches an overflow at RENDER time, $0, no OCR, but
+# only sees the deterministic diagram/card render — not what the final MUXED VIDEO looks like after
+# video_assembler's push-zoom crops a still progressively over its hold. This layer DETECTS that class
+# on the delivered artifact: it OCRs the actual rendered pixels of the LAST ~500ms of each structural
+# (diagram/chart) beat's on-screen window — the worst-case post-zoom moment — and flags any confident
+# word that touches the frame edge. This is what turns the founder's exact bug (title/labels/subtitle
+# chopped at the frame edge) into something the quality engine SEES and scores, per the
+# artifact-verification.md rule ("ffmpeg-extract frames and OCR them") — previously written but never
+# automated as a gate.
+
+
+def _clip_start_s(c: dict[str, Any]) -> float | None:
+    v = c.get("start_ms")
+    return v / 1000.0 if isinstance(v, (int, float)) else None
+
+
+def _clip_end_s(c: dict[str, Any]) -> float | None:
+    end = c.get("end_ms")
+    if isinstance(end, (int, float)):
+        return end / 1000.0
+    start = c.get("start_ms")
+    dur = c.get("duration_ms")
+    if isinstance(start, (int, float)) and isinstance(dur, (int, float)):
+        return (start + dur) / 1000.0
+    return None
+
+
+def _structural_clip_spans(art) -> list[tuple[int, float, float]]:
+    """``[(beat_index, start_s, end_s)]`` for STRUCTURAL (diagram/chart) clips with a usable span,
+    ONE (widest) span per beat — reveal sub-clips share a ``beat_index``, so a diagram that builds
+    over N reveal frames is still ONE on-screen window, from its first reveal's start to its last
+    reveal's end. Sorted by beat_index (deterministic sampling order)."""
+    by_beat: dict[int, list[float]] = {}
+    for c in _clips(art):
+        if not _is_structural(c):
+            continue
+        bi = c.get("beat_index")
+        if not isinstance(bi, int):
+            continue
+        cs, ce = _clip_start_s(c), _clip_end_s(c)
+        if cs is None or ce is None or ce <= cs:
+            continue
+        if bi not in by_beat:
+            by_beat[bi] = [cs, ce]
+        else:
+            by_beat[bi][0] = min(by_beat[bi][0], cs)
+            by_beat[bi][1] = max(by_beat[bi][1], ce)
+    return sorted((bi, lo, hi) for bi, (lo, hi) in by_beat.items())
+
+
+def _extract_frame_at(video_path: str, at_s: float):
+    """ONE frame at ``at_s`` via ffmpeg seek + single-frame extract → ``PIL.Image | None``. Mirrors
+    ``video_sync._frame``/``visual._video_mid_frame``'s established $0 ffmpeg-extract pattern.
+    Fail-open: any ffmpeg/decode failure returns ``None`` so the caller skips just THIS beat, never
+    the whole check."""
+    import os
+    import subprocess
+    import tempfile
+
+    from PIL import Image
+    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, at_s):.3f}",
+             "-i", video_path, "-frames:v", "1", "-y", tmp_path],
+            capture_output=True, timeout=60,
+        )
+        if r.returncode != 0 or not os.path.getsize(tmp_path):
+            return None
+        img = Image.open(tmp_path)
+        img.load()
+        return img
+    except Exception:  # noqa: BLE001 — extraction is best-effort; the caller fails-open on None
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _diagram_worst_case_frames(art) -> list[tuple[int, Any]]:
+    """``[(beat_index, PIL.Image)]`` for up to :data:`_MAX_DIAGRAM_BEATS_SAMPLED` structural-diagram
+    beats, each sampled at its WORST-CASE moment — the last :data:`_WORST_CASE_TAIL_S` of its
+    on-screen window (a progressive push-zoom crops MORE the longer a still holds, so the tail is
+    where a cut/overflow is most likely to have become visible). Evenly subsampled across ALL beats
+    (not just the first N) so a long episode's check isn't biased toward its opening beats — bounded,
+    orchestra-oe. $0 CPU (ffmpeg + PIL), no LLM."""
+    spans = _structural_clip_spans(art)
+    if not spans:
+        return []
+    if len(spans) > _MAX_DIAGRAM_BEATS_SAMPLED:
+        step = len(spans) / _MAX_DIAGRAM_BEATS_SAMPLED
+        spans = [spans[int(i * step)] for i in range(_MAX_DIAGRAM_BEATS_SAMPLED)]
+    out: list[tuple[int, Any]] = []
+    for bi, lo, hi in spans:
+        at = max(lo, hi - _WORST_CASE_TAIL_S)
+        img = _extract_frame_at(art.video_path, at)
+        if img is not None:
+            out.append((bi, img))
+    return out
+
+
+def _ocr_words(img) -> list[tuple[str, int, int, int, int]]:
+    """``[(text, x, y, w, h)]`` for OCR'd words with confidence >= :data:`_OCR_CONF_MIN`. Raises if
+    pytesseract / the tesseract-ocr binary is unavailable — callers catch that PER-FRAME and treat an
+    all-frames failure as ``skip()`` (fail-open: no OCR available must never FAIL the gate)."""
+    import pytesseract
+
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    texts = data.get("text") or []
+    out: list[tuple[str, int, int, int, int]] = []
+    for i in range(len(texts)):
+        word = str(texts[i]).strip()
+        if not word:
+            continue
+        try:
+            conf = int(float(data["conf"][i]))
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        if conf < _OCR_CONF_MIN:
+            continue
+        try:
+            x, y = int(data["left"][i]), int(data["top"][i])
+            ww, hh = int(data["width"][i]), int(data["height"][i])
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        out.append((word, x, y, ww, hh))
+    return out
+
+
+@check("visual.text_not_edge_cropped", dimension=_DIMENSION, severity="critical")
+def text_not_edge_cropped(art):
+    """CRITICAL: OCR'd text on a rendered diagram/chart beat must not touch the frame edge — the
+    founder's cut/overflow class (title/labels/subtitle chopped, e.g. by a downstream push-zoom).
+    Samples the LAST ~500ms of each structural-diagram beat's on-screen window (worst-case post-zoom).
+    """
+    _require_visuals(art)
+    if not getattr(art, "video_path", None):
+        skip("no video to frame-extract")
+    frames = _diagram_worst_case_frames(art)
+    if not frames:
+        skip("no structural-diagram clip with a usable on-screen span")
+    clipped: list[str] = []
+    assessed = 0
+    for bi, img in frames:
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            continue
+        try:
+            words = _ocr_words(img)
+        except Exception as exc:  # noqa: BLE001 — no OCR on THIS frame; other frames still assessed
+            _ = exc
+            continue
+        assessed += 1
+        for word, x, y, ww, hh in words:
+            if (x <= _EDGE_CROP_PX or y <= _EDGE_CROP_PX
+                    or (x + ww) >= (w - _EDGE_CROP_PX) or (y + hh) >= (h - _EDGE_CROP_PX)):
+                clipped.append(f"beat {bi}: {word!r} touches the frame edge")
+    if assessed == 0:
+        skip("pytesseract/tesseract-ocr unavailable (or OCR failed on every sampled frame)")
+    ok = not clipped
+    return ok, (f"{len(clipped)} edge-touching word(s) over {assessed} beat(s) sampled "
+                f"(±{_EDGE_CROP_PX}px floor): {clipped[:5]}")
+
+
+@check("visual.text_in_safe_area", dimension=_DIMENSION, severity="low")
+def text_in_safe_area(art):
+    """ADVISORY: OCR'd text on a rendered diagram/chart beat should stay within an
+    :data:`_TEXT_SAFE_MARGIN_FRAC` safe-area margin — the softer SMPTE-style companion to the
+    critical edge-touch guard above (catches a title that's technically on-frame but crowding the
+    edge, before it becomes a hard crop on the next zoom-cap regression)."""
+    _require_visuals(art)
+    if not getattr(art, "video_path", None):
+        skip("no video to frame-extract")
+    frames = _diagram_worst_case_frames(art)
+    if not frames:
+        skip("no structural-diagram clip with a usable on-screen span")
+    outside: list[str] = []
+    assessed = 0
+    for bi, img in frames:
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            continue
+        try:
+            words = _ocr_words(img)
+        except Exception as exc:  # noqa: BLE001 — no OCR on THIS frame; other frames still assessed
+            _ = exc
+            continue
+        assessed += 1
+        lo_x, hi_x = w * _TEXT_SAFE_MARGIN_FRAC, w * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
+        lo_y, hi_y = h * _TEXT_SAFE_MARGIN_FRAC, h * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
+        for word, x, y, ww, hh in words:
+            if x < lo_x or y < lo_y or (x + ww) > hi_x or (y + hh) > hi_y:
+                outside.append(f"beat {bi}: {word!r}")
+    if assessed == 0:
+        skip("pytesseract/tesseract-ocr unavailable (or OCR failed on every sampled frame)")
+    ok = not outside
+    return ok, (f"{len(outside)} word(s) outside the {_TEXT_SAFE_MARGIN_FRAC:.0%} safe area over "
+                f"{assessed} beat(s) sampled: {outside[:5]}")
