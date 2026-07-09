@@ -326,7 +326,16 @@ def score_motion_density(art: Any, cfg: ScorecardConfig) -> AxisResult:
     """Engine-rendered motion events per second, from renderer provenance (``render_mode`` /
     ``motion_preset`` stamped per beat) when available; falls back to an ffmpeg scene-change PROXY
     on the rendered MP4 only when NO beat carries motion provenance at all (``proxy=True`` in that
-    case — a scene-change count is a stand-in for, not equal to, an engine motion event)."""
+    case — a scene-change count is a stand-in for, not equal to, an engine motion event).
+
+    CALIBRATION (2026-07): when the renderer's OWN ``visual.rendered_motion_clips`` counter
+    contradicts the render_mode-derived beat count (0 vs N>0 motion beats), the ``render_mode``
+    signal this axis is about to score from is exactly the one the pipeline's own telemetry
+    disagrees with — so the resulting score is marked ``proxy=True`` (non-authoritative) rather
+    than trusted silently. Previously the contradiction was only appended as a text note in
+    ``evidence`` while the numeric score still used the untrusted count as if authoritative — the
+    Measured Quality Engine's aggregate ranking has no way to see a text note, only the
+    ``proxy``/``score`` fields, so an un-flagged contradiction was invisible to the ranking."""
     n_motion, n_total, motion_records = signals.motion_beats(art)
     duration = signals.video_duration_s(art)
     if duration is None or duration <= 0:
@@ -339,9 +348,11 @@ def score_motion_density(art: Any, cfg: ScorecardConfig) -> AxisResult:
         )
 
     contradiction = ""
+    contradicted = False
     rmc = signals.rendered_motion_clips_counter(art)
     if rmc is not None and n_motion > 0 and rmc == 0:
-        contradiction = f" [NOTE: visual.rendered_motion_clips={rmc} contradicts {n_motion} motion-mode beat(s) — provenance discrepancy, not scored]"
+        contradicted = True
+        contradiction = f" [NOTE: visual.rendered_motion_clips={rmc} contradicts {n_motion} motion-mode beat(s) — provenance discrepancy, score is a PROXY]"
 
     if n_total > 0:
         rate = n_motion / duration
@@ -354,9 +365,15 @@ def score_motion_density(art: Any, cfg: ScorecardConfig) -> AxisResult:
                 f"{rate:.3f} events/s (target {cfg.motion_target_rate_per_s}/s){contradiction}"
             ),
             how_measured="T1 $0: renderer-stamped motion beats / video duration",
+            proxy=contradicted,
+            needs=(
+                "rendered_motion_clips_counter contradicts render_mode-derived beats — reconcile "
+                "the two producer-side provenance signals for an authoritative score"
+            ) if contradicted else None,
             sub_signals={
                 "motion_beats": n_motion, "total_beats": n_total, "rate_per_s": round(rate, 4),
                 "rendered_motion_clips_counter": rmc, "motion_beat_records": motion_records,
+                "provenance_contradiction": contradicted,
             },
         )
 
@@ -557,15 +574,24 @@ def score_cost_safety(art: Any, cfg: ScorecardConfig) -> AxisResult:
     EITHER criterion fails the whole axis outright (score=0) even when the OTHER criterion is
     unmeasurable — unmeasurability can never rescue a known failure. Only when BOTH are known and
     both pass does the axis score 100; if either is simply unknown (and neither is a known fail),
-    the axis is an honest ``missing_instrumentation`` null."""
+    the axis is an honest ``missing_instrumentation`` null.
+
+    The cost cap is TIER-AWARE (``cfg.cost_cap_usd_by_tier``, keyed by ``quality_tier``) — a
+    medium/high/ultra job is EXPECTED to cost more than a low-tier one by design (see the cap
+    table's docstring in ``config.py``), so grading every tier against one low-tier-sized cap
+    would fail non-low jobs by construction, not because they overspent. An unrecognized/missing
+    tier falls back to ``cfg.per_short_cost_cap_usd`` (the strict low-tier number) — unknown tier
+    never gets a MORE lenient cap than the default."""
     cost = signals.cost_total_usd(art)
     safety = signals.safety_verdict(art)
     safety_ok = _safety_passed(safety) if safety is not None else None
-    cost_ok = (cost <= cfg.per_short_cost_cap_usd) if cost is not None else None
+    tier = signals.job_quality_tier(art)
+    cap = cfg.cost_cap_usd_by_tier.get(tier, cfg.per_short_cost_cap_usd)
+    cost_ok = (cost <= cap) if cost is not None else None
 
     notes = []
     if cost is not None:
-        notes.append(f"cost=${cost:.4f} {'<=' if cost_ok else '>'} cap ${cfg.per_short_cost_cap_usd:.2f}")
+        notes.append(f"cost=${cost:.4f} {'<=' if cost_ok else '>'} cap ${cap:.2f} (tier={tier!r})")
     else:
         notes.append("cost=unknown (no costs.total_usd_estimate)")
     if safety is not None:
@@ -574,7 +600,7 @@ def score_cost_safety(art: Any, cfg: ScorecardConfig) -> AxisResult:
         notes.append("safety=unknown (no persisted safety/moderation verdict)")
     evidence = "; ".join(notes)
     sub_signals = {
-        "cost_usd": cost, "cost_cap_usd": cfg.per_short_cost_cap_usd, "cost_ok": cost_ok,
+        "cost_usd": cost, "cost_cap_usd": cap, "quality_tier": tier, "cost_ok": cost_ok,
         "safety_ok": safety_ok,
     }
 

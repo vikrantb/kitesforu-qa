@@ -75,6 +75,13 @@ class AxisAggregate:
     max: float | None
     n_below_floor: int
     pass_rate: float | None  # (n_scored - n_below_floor) / n_scored
+    n_proxy: int = 0        # of the scored cells, how many carry proxy=True (non-authoritative $0
+                             # heuristic standing in for a disabled/absent paid judge or a producer-side
+                             # provenance contradiction — see rubric.AxisResult.proxy)
+
+    @property
+    def proxy_fraction(self) -> float | None:
+        return round(self.n_proxy / self.n_scored, 3) if self.n_scored else None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +94,8 @@ class AxisAggregate:
             "max": self.max,
             "n_below_floor": self.n_below_floor,
             "pass_rate": self.pass_rate,
+            "n_proxy": self.n_proxy,
+            "proxy_fraction": self.proxy_fraction,
         }
 
 
@@ -100,6 +109,18 @@ def _axis_scores(cells: list[dict[str, Any]], axis_name: str) -> list[float]:
         if s is not None:
             out.append(float(s))
     return out
+
+
+def _axis_proxy_count(cells: list[dict[str, Any]], axis_name: str) -> int:
+    """How many SCORED cells' ``axis_name`` result is a ``proxy=True`` (non-authoritative) score."""
+    n = 0
+    for c in cells:
+        if not c.get("_scored"):
+            continue
+        ax = (c.get("axes") or {}).get(axis_name) or {}
+        if ax.get("score") is not None and ax.get("proxy"):
+            n += 1
+    return n
 
 
 def aggregate_axis(cells: list[dict[str, Any]], axis_name: str) -> AxisAggregate:
@@ -117,6 +138,7 @@ def aggregate_axis(cells: list[dict[str, Any]], axis_name: str) -> AxisAggregate
         max=(round(max(scores), 1) if scores else None),
         n_below_floor=n_below,
         pass_rate=(round((len(scores) - n_below) / len(scores), 3) if scores else None),
+        n_proxy=_axis_proxy_count(cells, axis_name),
     )
 
 
@@ -243,22 +265,44 @@ class SystematicWeakness:
         }
 
 
+# An axis where >= this fraction of its scored cells are proxy=True (a non-authoritative $0
+# heuristic standing in for a disabled judge, e.g. substance_novelty's research-grounding proxy when
+# --enable-judge is off, or a producer-side provenance contradiction) is EXCLUDED from the ranked
+# "systematic weaknesses" list — see ``proxy_dominant_axes`` below. Ranking a self-declared
+# non-authoritative proxy alongside fully-measured axes (identical severity math, no caveat) is
+# exactly the aggregation bug the 2026-07 baseline validation found: substance_novelty's mean
+# 1.2/70 ranked as the #1 severity "systematic weakness" even though ``rubric.evaluate()`` already
+# treats a proxy as "provisional — cannot certify ship", never an equal-confidence measured failure.
+PROXY_FRACTION_FLOOR = 0.5
+
+
 def rank_systematic_weaknesses(
     cells: list[dict[str, Any]],
     agg_by_axis: dict[str, AxisAggregate] | None = None,
+    *,
+    proxy_fraction_floor: float = PROXY_FRACTION_FLOOR,
 ) -> list[SystematicWeakness]:
     """Rank axes by SEVERITY = (# cells below floor) x (mean point-gap below floor).
 
     An axis that is both WIDESPREAD (many affected cells) AND DEEP (far below its floor on average)
     ranks above a one-off single low score on an otherwise-fine axis — operationalising "the class-level
     failures, not one-offs". Axes with zero cells below floor (or zero scored cells) are omitted
-    entirely — this ranks WEAKNESSES, not the whole rubric.
+    entirely — this ranks WEAKNESSES, not the whole rubric. An axis whose scored cells are MOSTLY
+    ``proxy=True`` (>= ``proxy_fraction_floor``, default 50%) is ALSO omitted here — a proxy score is
+    a non-authoritative $0 heuristic standing in for a disabled paid judge (or a producer-side
+    provenance contradiction), so a low proxy mean cannot be presented as a validated, class-level
+    PIPELINE failure with the same confidence as a fully-measured axis. See ``proxy_dominant_axes``
+    for where these are surfaced instead (a distinct failure class, same pattern as
+    ``instrumentation_gaps``).
     """
     agg_by_axis = agg_by_axis or aggregate_all_axes(cells)
     out: list[SystematicWeakness] = []
     for spec in RUBRIC:
         agg = agg_by_axis.get(spec.name)
         if agg is None or agg.n_scored == 0 or agg.n_below_floor == 0:
+            continue
+        pf = agg.proxy_fraction
+        if pf is not None and pf >= proxy_fraction_floor:
             continue
         gaps: list[float] = []
         job_ids: list[str] = []
@@ -343,6 +387,62 @@ def instrumentation_gaps(
                 )
             )
     out.sort(key=lambda g: g.coverage)
+    return out
+
+
+# ── proxy-dominant axes (score is a non-authoritative $0 heuristic, not a validated failure) ──
+
+
+@dataclass
+class ProxyAxis:
+    axis: str
+    mean_score: float | None
+    n_proxy: int
+    n_scored: int
+    proxy_fraction: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "axis": self.axis,
+            "mean_score": self.mean_score,
+            "n_proxy": self.n_proxy,
+            "n_scored": self.n_scored,
+            "proxy_fraction": self.proxy_fraction,
+        }
+
+
+def proxy_dominant_axes(
+    cells: list[dict[str, Any]],
+    agg_by_axis: dict[str, AxisAggregate] | None = None,
+    *,
+    proxy_fraction_floor: float = PROXY_FRACTION_FLOOR,
+) -> list[ProxyAxis]:
+    """Axes where >= ``proxy_fraction_floor`` (default 50%) of scored cells are ``proxy=True`` — a
+    DIFFERENT failure class from both "measured and failing" (``rank_systematic_weaknesses``) and
+    "unmeasurable" (``instrumentation_gaps``): the axis DID produce a number, but that number is a
+    non-authoritative $0 heuristic (a disabled paid judge's proxy, or a producer-side provenance
+    contradiction) — ``rubric.evaluate()`` already refuses to certify SHIP on a proxy for exactly
+    this reason. Sorted worst-mean-score first so the most alarming-looking (but least trustworthy)
+    proxy leads the section."""
+    agg_by_axis = agg_by_axis or aggregate_all_axes(cells)
+    out: list[ProxyAxis] = []
+    for spec in RUBRIC:
+        agg = agg_by_axis.get(spec.name)
+        if agg is None or agg.n_scored == 0:
+            continue
+        pf = agg.proxy_fraction
+        if pf is None or pf < proxy_fraction_floor:
+            continue
+        out.append(
+            ProxyAxis(
+                axis=spec.name,
+                mean_score=agg.mean,
+                n_proxy=agg.n_proxy,
+                n_scored=agg.n_scored,
+                proxy_fraction=pf,
+            )
+        )
+    out.sort(key=lambda p: (p.mean_score if p.mean_score is not None else 0.0))
     return out
 
 
@@ -473,6 +573,33 @@ def _instrumentation_section(gaps: list[InstrumentationGap]) -> str:
     return "\n".join(lines)
 
 
+def _proxy_section(proxies: list[ProxyAxis]) -> str:
+    if not proxies:
+        return "_no axis is majority-proxy — every ranked weakness above is a fully-measured score._"
+    lines = [
+        "| Axis | Mean score | Proxy cells | Proxy fraction |",
+        "|---|---|---|---|",
+    ]
+    for p in proxies:
+        lines.append(
+            f"| `{p.axis}` | {_fmt_score(p.mean_score)} | {p.n_proxy}/{p.n_scored} | "
+            f"{p.proxy_fraction * 100:.0f}% |"
+        )
+    lines.append("")
+    lines.append(
+        "A **proxy** score is a non-authoritative $0 heuristic standing in for a disabled paid "
+        "judge/VLM (e.g. substance_novelty's research-grounding proxy when `--enable-judge` is "
+        "off) or a producer-side provenance contradiction the axis detected in its own inputs "
+        "(e.g. motion_density when the renderer's own telemetry disagrees with the render_mode "
+        "signal). These axes are deliberately EXCLUDED from Top Ranked Systematic Weaknesses above "
+        "— a low mean here may be a REAL pipeline gap or may just reflect the disabled judge; "
+        "escalate the relevant flag (`--enable-judge` / `--vlm`) before treating it as a validated "
+        "class-level failure. `rubric.evaluate()` already refuses to certify SHIP on any proxy axis "
+        "for the same reason."
+    )
+    return "\n".join(lines)
+
+
 def _unscored_section(cells: list[dict[str, Any]]) -> str:
     unscored = [c for c in cells if not c.get("_scored")]
     if not unscored:
@@ -535,6 +662,7 @@ def render_backlog_markdown(
     agg_by_axis = aggregate_all_axes(cells)
     weaknesses = rank_systematic_weaknesses(cells, agg_by_axis)
     gaps = instrumentation_gaps(cells, agg_by_axis)
+    proxies = proxy_dominant_axes(cells, agg_by_axis)
     groups = aggregate_by_group(cells)
     matrix_fill = propose_matrix_fill(cells, target_genres=target_genres, target_formats=target_formats)
 
@@ -565,6 +693,10 @@ Ranked by **severity = (# cells below floor) x (mean point-gap below floor)** �
 problems rank first; a single one-off low score on an otherwise-fine axis will not appear here.
 
 {_weakness_section(weaknesses, top_n)}
+
+## Non-Authoritative Proxy Axes (score is a $0 heuristic, not a validated failure)
+
+{_proxy_section(proxies)}
 
 ## Instrumentation Gaps (axis is UNMEASURABLE, not low — a different failure class)
 

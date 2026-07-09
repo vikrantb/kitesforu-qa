@@ -48,6 +48,7 @@ from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
     instrumentation_gaps,
     parse_datetime,
     propose_matrix_fill,
+    proxy_dominant_axes,
     rank_systematic_weaknesses,
     render_backlog_markdown,
 )
@@ -155,7 +156,7 @@ def score_all(
             result = score_short(art, cfg)
             result["genre"] = art.genre
             result["format"] = "short" if _signals.is_short(art) else "episode"
-            result["quality_tier"] = str(doc.get("quality_tier") or doc.get("tier") or "unknown")
+            result["quality_tier"] = _signals.job_quality_tier(art)
             result["_scored"] = True
             cells.append(result)
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — one bad job must never crash the run
@@ -229,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     agg_by_axis = aggregate_all_axes(cells)
     weaknesses = rank_systematic_weaknesses(cells, agg_by_axis)
     gaps = instrumentation_gaps(cells, agg_by_axis)
+    proxies = proxy_dominant_axes(cells, agg_by_axis)
     target_genres = tuple(g.strip() for g in args.target_genres.split(",") if g.strip())
     target_formats = tuple(f.strip() for f in args.target_formats.split(",") if f.strip())
     matrix_fill = propose_matrix_fill(cells, target_genres=target_genres, target_formats=target_formats)
@@ -251,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "ranked_systematic_weaknesses": [w.to_dict() for w in weaknesses],
         "instrumentation_gaps": [g.to_dict() for g in gaps],
+        "proxy_dominant_axes": [p.to_dict() for p in proxies],
         "proposed_matrix_fill": matrix_fill,
     }
 

@@ -2,6 +2,27 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-07-08 — Measured Quality Engine: scorer calibration fixes (cost-NEUTRAL)
+
+**Files:** `src/kitesforu_qa/scorecard/config.py`, `src/kitesforu_qa/scorecard/axes.py`,
+`src/kitesforu_qa/scorecard/signals.py`, `src/kitesforu_qa/harness/quality_matrix.py`,
+`scripts/quality_matrix.py`
+
+**Context:** validated the $0 Measured Quality Engine baseline (QUALITY_BACKLOG.md, PR #55)
+before acting on its findings. Found axis 8 (cost_safety) applied one flat $0.10 cap to every
+`quality_tier`, when the tier system itself targets low ~$0.025, medium ~$0.15, high ~$1.0-1.3,
+ultra "flagship headroom" — guaranteeing every non-low-tier job would fail the axis by
+construction, not because it overspent. Fixed with a tier-aware cap table
+(`cfg.cost_cap_usd_by_tier`). Also found the aggregate ranking (`rank_systematic_weaknesses`)
+treated a self-declared non-authoritative `proxy=True` score (substance_novelty's $0
+research-grounding heuristic when `--enable-judge` is off) identically to a fully-measured axis —
+fixed by excluding majority-proxy axes from the ranked list into a new, honestly-labeled section.
+
+**Per-unit $ delta: $0.** This is a SCORER/measurement-tool calibration fix only — no change to
+any LLM/TTS/provider call, no new judge enabled by default, no pipeline behavior touched. The
+$0 baseline re-run (query-recent-7d, no new jobs) used to validate the fix is itself $0 (existing
+completed jobs, re-scored; no generation). No pricing-page implication.
+
 ## 2026-07-06 — SHORT SCORECARD axis 3 (visual truth): real VLM wired, ¢-cheap, OFF by default
 
 **Files:** `src/kitesforu_qa/scorecard/vlm.py` (new), `src/kitesforu_qa/scorecard/axes.py`,

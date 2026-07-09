@@ -371,6 +371,15 @@ def cost_total_usd(art: Any) -> float | None:
     return _float_or_none(art.costs.get("total_usd_estimate"))
 
 
+def job_quality_tier(art: Any) -> str:
+    """The job's ``quality_tier`` (low/medium/high/ultra), or ``"unknown"`` when unstamped.
+
+    SINGLE source of truth for this lookup — ``scripts/quality_matrix.py``'s cell-tagging and axis 8's
+    tier-aware cost cap (``score_cost_safety``) both read this so the two can never drift apart."""
+    doc = art.doc
+    return str(doc.get("quality_tier") or doc.get("tier") or "unknown")
+
+
 def cost_estimate_cents(art: Any) -> float | None:
     """The separate ``cost_estimate_cents`` field — surfaced only to flag when it disagrees with the
     rollup (an observability discrepancy), never as the authoritative number."""
