@@ -10,7 +10,7 @@ honestly reports "enabled but not wired" rather than fabricating a score.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 # judge_fn(art) -> (score_0_100: float, note: str)
@@ -32,7 +32,22 @@ class ScorecardConfig:
     vlm_fn: VlmFn | None = None      # injected VLM (unset ⇒ axis 3 stays needs-VLM/null)
 
     # ── thresholds (SSOT for the tunable knobs the axes read) ──
-    per_short_cost_cap_usd: float = 0.10       # axis 8 hard gate
+    # axis 8 hard gate — TIER-AWARE (2026-07 calibration fix). The Measured Quality Engine's first
+    # baseline (QUALITY_BACKLOG.md) found cost_safety at 0/100 on 100% of scored cells and root-caused
+    # it to a single flat $0.10 cap applied regardless of quality_tier: the tier system itself targets
+    # low ~$0.025/unit, medium ~$0.15, high ~$1.0-1.3, ultra "flagship headroom" (see
+    # kitesforu-docs/proposals/quality-slider-cost-mode-2026-06-24 + .claude/knowledge/cost-reference.md)
+    # — so a medium/high/ultra job was GUARANTEED to fail this axis by design, not because it overspent.
+    # Each cap is a generous multiple of its tier's documented target (headroom for real duration/
+    # provider variance) without silently passing every non-low job. ``per_short_cost_cap_usd`` remains
+    # the STRICT fallback for a missing/unrecognized tier (never relax the gate when tier is unknown).
+    cost_cap_usd_by_tier: dict[str, float] = field(default_factory=lambda: {
+        "low": 0.10,
+        "medium": 0.30,
+        "high": 2.00,
+        "ultra": 5.00,
+    })
+    per_short_cost_cap_usd: float = 0.10       # axis 8 hard gate — fallback for unknown/missing tier
     motion_target_rate_per_s: float = 0.25     # axis 5 — >= 1 engine motion event / 4s
     hook_max_words: int = 12                   # axis 1
     hook_first_word_max_s: float = 2.5         # axis 1

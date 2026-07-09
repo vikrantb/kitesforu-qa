@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from kitesforu_qa.harness.quality_matrix import (
     DEFAULT_TARGET_FORMATS,
     DEFAULT_TARGET_GENRES,
+    PROXY_FRACTION_FLOOR,
     aggregate_all_axes,
     aggregate_axis,
     aggregate_by_group,
@@ -17,6 +18,7 @@ from kitesforu_qa.harness.quality_matrix import (
     instrumentation_gaps,
     parse_datetime,
     propose_matrix_fill,
+    proxy_dominant_axes,
     rank_systematic_weaknesses,
     render_backlog_markdown,
 )
@@ -25,8 +27,11 @@ from kitesforu_qa.scorecard.rubric import RUBRIC, RUBRIC_BY_NAME
 ALL_AXES = [spec.name for spec in RUBRIC]
 
 
-def _axis(score: float | None, floor: int | None = None) -> dict:
-    return {"score": score, "floor": floor if floor is not None else 0, "pass": (score is not None and floor is not None and score >= floor)}
+def _axis(score: float | None, floor: int | None = None, *, proxy: bool = False) -> dict:
+    out = {"score": score, "floor": floor if floor is not None else 0, "pass": (score is not None and floor is not None and score >= floor)}
+    if proxy:
+        out["proxy"] = True
+    return out
 
 
 def _cell(
@@ -37,11 +42,16 @@ def _cell(
     tier: str = "low",
     scored: bool = True,
     error: str | None = None,
+    proxy_axes: set[str] | None = None,
     **axis_scores: float | None,
 ) -> dict:
     if not scored:
         return {"job_id": job_id, "_scored": False, "_error": error or "boom", "genre": "unknown", "format": "unknown", "quality_tier": "unknown"}
-    axes = {name: _axis(axis_scores.get(name), RUBRIC_BY_NAME[name].floor) for name in ALL_AXES}
+    proxy_axes = proxy_axes or set()
+    axes = {
+        name: _axis(axis_scores.get(name), RUBRIC_BY_NAME[name].floor, proxy=name in proxy_axes)
+        for name in ALL_AXES
+    }
     return {"job_id": job_id, "axes": axes, "genre": genre, "format": fmt, "quality_tier": tier, "_scored": True}
 
 
@@ -102,6 +112,24 @@ def test_aggregate_axis_computes_mean_min_max() -> None:
     assert agg.max == 100.0
     assert agg.n_below_floor == 1  # 60 < floor 80
     assert agg.pass_rate == round(2 / 3, 3)
+
+
+def test_aggregate_axis_counts_proxy_cells() -> None:
+    cells = [
+        _cell("a", substance_novelty=50.0, proxy_axes={"substance_novelty"}),
+        _cell("b", substance_novelty=0.0, proxy_axes={"substance_novelty"}),
+        _cell("c", substance_novelty=80.0),  # not proxy (e.g. --enable-judge was on for this cell)
+    ]
+    agg = aggregate_axis(cells, "substance_novelty")
+    assert agg.n_scored == 3
+    assert agg.n_proxy == 2
+    assert agg.proxy_fraction == round(2 / 3, 3)
+
+
+def test_aggregate_axis_proxy_fraction_none_when_unscored() -> None:
+    agg = aggregate_axis([_cell("a", scored=False)], "hook_stop_power")
+    assert agg.n_proxy == 0
+    assert agg.proxy_fraction is None
 
 
 def test_aggregate_axis_excludes_none_scores_not_zero() -> None:
@@ -209,6 +237,64 @@ def test_rank_systematic_weaknesses_excludes_unscored_cells_from_gaps() -> None:
     assert hook.affected_job_ids == ["a"]
 
 
+# ── rank_systematic_weaknesses: proxy-dominant axes are EXCLUDED (2026-07 calibration fix) ──────
+#
+# The first Measured Quality Engine baseline ranked substance_novelty (a $0 PROXY, non-authoritative
+# by design whenever --enable-judge is off) as the #1 severity "systematic weakness" — identical
+# treatment to a fully-measured axis. rubric.evaluate() already refuses to certify SHIP on a proxy
+# ("provisional — cannot certify ship"); the aggregate ranking must apply the same caution.
+
+
+def test_majority_proxy_axis_excluded_from_ranking_even_when_universally_below_floor() -> None:
+    # substance_novelty scores 0 on every cell (would be the #1 severity by raw math) but every
+    # cell is proxy=True (the $0 heuristic, judge disabled) -> must NOT appear in the ranked list.
+    cells = [_cell(f"job{i}", substance_novelty=0.0, proxy_axes={"substance_novelty"}) for i in range(10)]
+    ranked = rank_systematic_weaknesses(cells)
+    assert all(w.axis != "substance_novelty" for w in ranked)
+
+
+def test_minority_proxy_axis_still_ranked() -> None:
+    # Only 1/10 cells is a proxy (e.g. one motion_density provenance contradiction) — below the 50%
+    # floor, so the axis is NOT proxy-dominant and must still be ranked normally.
+    cells = [
+        _cell(f"job{i}", motion_density=10.0, proxy_axes=({"motion_density"} if i == 0 else set()))
+        for i in range(10)
+    ]
+    ranked = rank_systematic_weaknesses(cells)
+    assert any(w.axis == "motion_density" for w in ranked)
+
+
+def test_proxy_fraction_floor_is_a_tunable_parameter() -> None:
+    # At a stricter (lower) floor, even a minority-proxy axis gets excluded.
+    cells = [
+        _cell(f"job{i}", motion_density=10.0, proxy_axes=({"motion_density"} if i == 0 else set()))
+        for i in range(10)
+    ]
+    ranked = rank_systematic_weaknesses(cells, proxy_fraction_floor=0.05)
+    assert all(w.axis != "motion_density" for w in ranked)
+
+
+def test_proxy_dominant_axes_lists_the_excluded_axis() -> None:
+    cells = [_cell(f"job{i}", substance_novelty=1.2, proxy_axes={"substance_novelty"}) for i in range(5)]
+    proxies = proxy_dominant_axes(cells)
+    assert len(proxies) == 1
+    p = proxies[0]
+    assert p.axis == "substance_novelty"
+    assert p.n_proxy == 5
+    assert p.n_scored == 5
+    assert p.proxy_fraction == 1.0
+    assert p.mean_score == 1.2
+
+
+def test_proxy_dominant_axes_empty_when_nothing_is_proxy() -> None:
+    cells = [_cell(f"job{i}", hook_stop_power=90.0) for i in range(5)]
+    assert proxy_dominant_axes(cells) == []
+
+
+def test_proxy_dominant_axes_respects_default_floor_constant() -> None:
+    assert 0.0 < PROXY_FRACTION_FLOOR <= 1.0
+
+
 # ── instrumentation_gaps ─────────────────────────────────────────────────────────
 
 
@@ -282,11 +368,21 @@ def test_render_backlog_markdown_contains_all_sections() -> None:
         "## Baseline Summary",
         "## Per (Genre x Format) Breakdown",
         "## Top Ranked Systematic Weaknesses",
+        "## Non-Authoritative Proxy Axes",
         "## Instrumentation Gaps",
         "## Unscored Jobs",
         "## PROPOSED MATRIX FILL",
     ):
         assert heading in md
+
+
+def test_render_backlog_markdown_proxy_axis_appears_in_proxy_section_not_weaknesses() -> None:
+    cells = [_cell(f"job{i}", substance_novelty=1.2, proxy_axes={"substance_novelty"}) for i in range(5)]
+    md = render_backlog_markdown(cells, generated_at="x", project="p", mode="m")
+    proxy_section = md.split("## Non-Authoritative Proxy Axes")[1].split("## Instrumentation Gaps")[0]
+    weakness_section = md.split("## Top Ranked Systematic Weaknesses")[1].split("## Non-Authoritative Proxy Axes")[0]
+    assert "substance_novelty" in proxy_section
+    assert "substance_novelty" not in weakness_section
 
 
 def test_render_backlog_markdown_respects_top_n() -> None:

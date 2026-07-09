@@ -268,6 +268,24 @@ def test_motion_density_surfaces_provenance_contradiction_as_evidence(monkeypatc
     monkeypatch.setattr(axes.signals, "video_duration_s", lambda a: 4.0)
     r = axes.score_motion_density(art, _cfg())
     assert "contradicts" in r.evidence
+    # 2026-07 calibration fix: a contradiction between the renderer's OWN rendered_motion_clips
+    # counter and the render_mode-derived beat count means the signal this score is computed FROM
+    # is one the pipeline's own telemetry disagrees with — so the score must be flagged non-
+    # authoritative (proxy=True), not silently trusted (previously only a text note, invisible to
+    # the aggregate ranking in harness/quality_matrix.py).
+    assert r.proxy is True
+    assert r.needs is not None
+    assert r.sub_signals["provenance_contradiction"] is True
+
+
+def test_motion_density_no_contradiction_is_not_proxy(monkeypatch) -> None:
+    # Sanity check: agreement between the two provenance signals must NOT be flagged proxy.
+    doc = {"visual": {"clips": [{"beat_index": 0, "render_mode": "video"}], "rendered_motion_clips": 1}}
+    art = _art(doc)
+    monkeypatch.setattr(axes.signals, "video_duration_s", lambda a: 4.0)
+    r = axes.score_motion_density(art, _cfg())
+    assert r.proxy is False
+    assert r.sub_signals["provenance_contradiction"] is False
 
 
 # ── axis 6 — sync exactness ──────────────────────────────────────────────────────
@@ -424,3 +442,57 @@ def test_cost_safety_cost_under_cap_but_safety_unknown_is_honest_null() -> None:
     r = axes.score_cost_safety(_art(doc), _cfg())
     assert r.score is None
     assert r.needs == "safety verdict (no safety/moderation block persisted)"
+
+
+# ── axis 8 — cost + safety: TIER-AWARE cap calibration (2026-07 fix) ──────────────
+#
+# QUALITY_BACKLOG.md's first baseline found cost_safety at 0/100 on 100% of scored cells. Root
+# cause: a single $0.10 cap applied regardless of quality_tier, when the tier system itself targets
+# low ~$0.025, medium ~$0.15, high ~$1.0-1.3, ultra "flagship headroom" — so medium/high/ultra jobs
+# were GUARANTEED to fail by construction, not because they overspent. These pin the tier-aware cap.
+
+
+def test_cost_safety_medium_tier_passes_above_the_old_flat_cap() -> None:
+    # $0.15 blew the old flat $0.10 cap but is exactly medium tier's documented target cost.
+    doc = {"quality_tier": "medium", "costs": {"total_usd_estimate": 0.15}, "safety": {"passed": True}}
+    r = axes.score_cost_safety(_art(doc), _cfg())
+    assert r.score == 100.0
+    assert r.sub_signals["cost_cap_usd"] == 0.30
+    assert r.sub_signals["quality_tier"] == "medium"
+
+
+def test_cost_safety_high_tier_passes_above_the_old_flat_cap() -> None:
+    doc = {"quality_tier": "high", "costs": {"total_usd_estimate": 1.3}, "safety": {"passed": True}}
+    r = axes.score_cost_safety(_art(doc), _cfg())
+    assert r.score == 100.0
+    assert r.sub_signals["cost_cap_usd"] == 2.00
+
+
+def test_cost_safety_ultra_tier_passes_above_the_old_flat_cap() -> None:
+    doc = {"quality_tier": "ultra", "costs": {"total_usd_estimate": 1.55}, "safety": {"passed": True}}
+    r = axes.score_cost_safety(_art(doc), _cfg())
+    assert r.score == 100.0
+    assert r.sub_signals["cost_cap_usd"] == 5.00
+
+
+def test_cost_safety_medium_tier_still_fails_a_genuine_overrun() -> None:
+    # A tier-aware cap must still CATCH real overspend, not rubber-stamp every tier.
+    doc = {"quality_tier": "medium", "costs": {"total_usd_estimate": 5.0}, "safety": {"passed": True}}
+    r = axes.score_cost_safety(_art(doc), _cfg())
+    assert r.score == 0.0
+    assert r.passed is False
+
+
+def test_cost_safety_unknown_tier_falls_back_to_the_strict_low_cap() -> None:
+    doc = {"costs": {"total_usd_estimate": 0.18}, "safety": {"passed": True}}  # no quality_tier field
+    r = axes.score_cost_safety(_art(doc), _cfg())
+    assert r.sub_signals["quality_tier"] == "unknown"
+    assert r.sub_signals["cost_cap_usd"] == 0.10
+    assert r.score == 0.0  # unknown tier never gets a MORE lenient cap than the low-tier default
+
+
+def test_cost_safety_low_tier_cap_unchanged_at_ten_cents() -> None:
+    doc = {"quality_tier": "low", "costs": {"total_usd_estimate": 0.11}, "safety": {"passed": True}}
+    r = axes.score_cost_safety(_art(doc), _cfg())
+    assert r.sub_signals["cost_cap_usd"] == 0.10
+    assert r.score == 0.0
