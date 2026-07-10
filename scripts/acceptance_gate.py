@@ -57,6 +57,47 @@ def _extract_frames(mp4: str, out_dir: str) -> list[str]:
     return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".png"))
 
 
+def _pixel_invariants(frames: list[str]) -> list[dict]:
+    """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
+    measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
+    layer would flag, without an LLM call. Rough heuristics, biased toward flagging."""
+    issues: list[dict] = []
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return issues
+    if not frames:
+        return issues
+    samp = frames[:: max(1, len(frames) // 12)][:12]
+    letterbox = edge_clip = 0
+    for fp in samp:
+        try:
+            im = np.asarray(Image.open(fp).convert("L"), dtype=float)
+        except Exception:  # noqa: BLE001 — a bad frame is skipped, never fatal
+            continue
+        h = im.shape[0]
+        band = max(1, int(h * 0.10))
+        top, bot, mid = im[:band], im[-band:], im[band:-band]
+        # B: uniform dark band top AND bottom, clearly darker than the middle => letterbox.
+        if mid.size and (mid.mean() - max(top.mean(), bot.mean())) > 16 \
+                and top.std() < 9 and bot.std() < 9:
+            letterbox += 1
+        # C: bright (text/marker) pixels hugging the very edge column => content cut off-frame.
+        if (im[:, :2].max() > 200 or im[:, -2:].max() > 200) \
+                and np.concatenate([im[:, :3].ravel(), im[:, -3:].ravel()]).std() > 38:
+            edge_clip += 1
+    if letterbox >= max(2, len(samp) // 2):
+        issues.append({"sev": "MAJOR", "msg": (
+            f"LETTERBOX: {letterbox}/{len(samp)} frames show a persistent dark band — content "
+            "not filling the vertical frame (authored for the wrong aspect)")})
+    if edge_clip >= max(2, len(samp) // 3):
+        issues.append({"sev": "MAJOR", "msg": (
+            f"EDGE-CLIP: {edge_clip}/{len(samp)} frames have bright/text pixels hugging the frame "
+            "edge — content likely cut off-frame")})
+    return issues
+
+
 def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
     d = _fetch_job(job_id)
     topic = d.get("topic") or d.get("title") or ""
@@ -97,6 +138,7 @@ def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
     # OBSERVE: emit frames for the independent vision/adversary step.
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     frames = _extract_frames(tmp, fdir)
+    issues.extend(_pixel_invariants(frames))  # invariants B + C on the real frames
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
