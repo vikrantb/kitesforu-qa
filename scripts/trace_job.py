@@ -525,7 +525,14 @@ const fmtTok = t => t==null?'—':(t>=1000?(t/1000).toFixed(1)+'k':t);
 
 /* ---- header ---- */
 topic.textContent = T.topic;
+// routing + cost knobs (manifest: content_purpose branches the whole DAG; quality_tier is the
+// load-bearing cost knob; allow_premium is the premium source of truth) — pulled from raw_doc
+const RD = T.raw_doc || {};
+const purpose = RD.content_purpose, qt = RD.quality_tier, prem = RD.allow_premium;
 hsub.innerHTML = `<span><b>${esc(T.format||T.content_type||'?')}</b></span>`
+  + (purpose?`<span>purpose <b>${esc(purpose)}</b></span>`:'')
+  + (qt?`<span>tier <b>${esc(qt)}</b></span>`:'')
+  + (prem===true?`<span><b style="color:var(--visuals)">premium</b></span>`:'')
   + `<span>status <b>${esc(T.status||'?')}</b></span>`
   + `<span class="mono">${esc(T.job_id)}</span>`
   + (T.created_at&&T.created_at!=='None'?`<span>${esc(T.created_at)}</span>`:'');
@@ -839,6 +846,25 @@ document.getElementById('btnData').addEventListener('click',()=>{
 });
 function jobDataView(){
   let h=`<div class="dh"><h2>Job data</h2></div>`;
+  // Creation & routing — the intake spine the pipeline grounds on (manifest §A/§B):
+  // idea -> outline -> episode profile -> creative intent, + the cost/routing knobs.
+  const RD=T.raw_doc||{};
+  const spine=[
+    ['idea (smart_create_context)', RD.smart_create_context],
+    ['plan outline (smart_create_outline)', RD.smart_create_outline],
+    ['episode_profile', RD.episode_profile],
+    ['creative_intent', RD.creative_intent],
+    ['angle_brief', RD.angle_brief],
+    ['scenario_tailoring', RD.scenario_tailoring],
+    ['content_spec', RD.content_spec],
+    ['personalization', RD.personalization],
+    ['credit_breakdown', RD.credit_breakdown],
+  ].filter(([,v])=>v!=null && !(typeof v==='object'&&!Object.keys(v||{}).length));
+  if(spine.length){
+    h+=`<div class="sec"><div class="st">Creation &amp; routing <span class="mono" style="color:var(--dim)">what the pipeline grounds on</span></div>`;
+    spine.forEach(([nm,v])=>{ h+=`<div style="margin-bottom:10px"><div class="pl" style="margin-bottom:4px;color:var(--mut);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em">${esc(nm)}</div>${jsonTree(v,'spine/'+nm)}</div>`; });
+    h+=`</div>`;
+  }
   // optimization ranking
   h+=`<div class="sec"><div class="st">Costliest stages <span class="mono" style="color:var(--dim)">$${(+T.totals.cost_usd).toFixed(2)}</span></div>${rank('cost_usd','var(--visuals)',fmtUsd)}</div>`;
   h+=`<div class="sec"><div class="st">Slowest stages <span class="mono" style="color:var(--dim)">${T.totals.duration_s||'?'}s</span></div>${rank('duration_ms','var(--main)',fmtMs)}</div>`;
