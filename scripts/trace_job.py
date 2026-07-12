@@ -842,6 +842,8 @@ function jobDataView(){
   // optimization ranking
   h+=`<div class="sec"><div class="st">Costliest stages <span class="mono" style="color:var(--dim)">$${(+T.totals.cost_usd).toFixed(2)}</span></div>${rank('cost_usd','var(--visuals)',fmtUsd)}</div>`;
   h+=`<div class="sec"><div class="st">Slowest stages <span class="mono" style="color:var(--dim)">${T.totals.duration_s||'?'}s</span></div>${rank('duration_ms','var(--main)',fmtMs)}</div>`;
+  // spend by provider · model — the cost/token hogs across the whole job
+  h+=modelSpend();
   if((T.milestones||[]).length)
     h+=`<div class="sec"><div class="st">Milestones</div>${jsonTree(T.milestones,'milestones')}</div>`;
   const blocks=[['costs',T.costs],['credit_breakdown',T.credit_breakdown],['budget_by_stage',T.budget_by_stage],
@@ -859,6 +861,24 @@ function rank(metric,color,fmt){
      <span class="on">${esc(s.name)}</span>
      <span class="ov mono">${fmt(s[metric])} <span class="sh">${Math.round(100*s[metric]/tot)}%</span></span>
      <div class="obar mb" style="--oc:${color}"><i style="width:${Math.max(4,100*s[metric]/mx)}%"></i></div></div>`).join('');
+}
+// aggregate every call across the job by provider · model — the token / $ hogs
+function modelSpend(){
+  const g={};
+  T.stages.forEach(s=>(s.calls||[]).forEach(c=>{
+    const k=(c.provider||'?')+' · '+(c.model||'?');
+    const e=g[k]||(g[k]={n:0,inTok:0,outTok:0,cost:0,fail:0});
+    e.n++; e.inTok+=c.in_tokens||0; e.outTok+=c.out_tokens||0; e.cost+=c.cost||0; if(!c.success)e.fail++;
+  }));
+  const rows=Object.entries(g).sort((a,b)=>(b[1].cost-a[1].cost)||(b[1].outTok-a[1].outTok));
+  if(!rows.length) return '';
+  const totCost=rows.reduce((a,[,e])=>a+e.cost,0), totTok=rows.reduce((a,[,e])=>a+e.outTok,0);
+  const mx=Math.max(...rows.map(([,e])=>e.cost||e.outTok||0))||1;
+  const body=rows.map(([k,e])=>`<div class="orow" style="cursor:default">
+     <span class="on">${esc(k)}${e.fail?` <span class="tag" style="--c:var(--crit)">${e.fail} fail</span>`:''}</span>
+     <span class="ov mono"><b>×${e.n}</b> <span class="sh">${fmtTok(e.outTok)} out${e.cost?' · '+fmtUsd(e.cost):''}</span></span>
+     <div class="obar mb" style="--oc:var(--llm)"><i style="width:${Math.max(4,100*(e.cost||e.outTok||0)/mx)}%"></i></div></div>`).join('');
+  return `<div class="sec"><div class="st">Spend by provider · model <span class="mono" style="color:var(--dim)">${rows.length} · ${fmtTok(totTok)} out tok${totCost?' · '+fmtUsd(totCost):''}</span></div>${body}</div>`;
 }
 
 /* ---- search ---- */
