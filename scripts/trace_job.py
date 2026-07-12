@@ -482,6 +482,25 @@ svg{width:100%;height:100%;display:block}
 .hintbar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:19;color:var(--dim);
   font-size:11px;background:color-mix(in srgb,var(--bg) 70%,transparent);padding:5px 12px;border-radius:20px}
 @media(max-width:760px){header .title{max-width:44vw}.legend,.hintbar{display:none}}
+/* wall-clock timeline (critical path) */
+#timeline{position:fixed;left:0;right:0;bottom:0;z-index:25;max-height:46vh;background:var(--bg2);
+  border-top:1px solid var(--line2);transform:translateY(102%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+  box-shadow:0 -14px 40px rgba(0,0,0,.4);display:flex;flex-direction:column}
+#timeline.on{transform:none}
+.tlhead{padding:9px 16px;border-bottom:1px solid var(--line);font-size:12.5px;display:flex;align-items:center;gap:12px}
+.tlhead .mono{color:var(--mut);font-size:11.5px}
+.tlclose{margin-left:auto;cursor:pointer;color:var(--mut);border:1px solid var(--line);border-radius:6px;width:24px;height:24px;display:grid;place-items:center}
+.tlclose:hover{color:var(--tx);border-color:var(--acc)}
+.tlbody{overflow:auto;padding:10px 16px 16px}
+.trow{display:grid;grid-template-columns:150px 1fr 62px;gap:8px;align-items:center;margin-bottom:5px;cursor:pointer}
+.trow:hover .tnm{color:var(--acc)}
+.tnm{font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;color:var(--mut)}
+.ttrack{position:relative;height:15px;background:var(--panel2);border-radius:4px}
+.ttrack>i{position:absolute;height:100%;border-radius:4px;top:0}
+.ttrack>i.crit{outline:1.5px solid var(--tx);outline-offset:-1px}
+.tdur{font-size:11px;text-align:right}
+.taxis{grid-column:2/3;position:relative;height:14px;color:var(--dim);font-size:9.5px;margin-bottom:4px}
+.taxis span{position:absolute;transform:translateX(-50%)}
 </style></head><body>
 <header>
   <div class="title" id="topic"></div>
@@ -491,11 +510,17 @@ svg{width:100%;height:100%;display:block}
   <div class="kpi"><span class="v" id="kdur"></span><span class="l">wall clock</span></div>
   <div class="kpi"><span class="v" id="kcost"></span><span class="l">cost</span></div>
   <div class="kpi"><span class="v" id="kcalls"></span><span class="l">llm calls</span></div>
+  <div class="btn" id="btnTimeline">⏱ timeline</div>
   <div class="btn" id="btnData">Job data</div>
   <div class="btn" onclick="toggleTheme()">◐</div>
 </header>
 <div id="stage"><svg id="svg"><g id="viewport"></g></svg></div>
 <div id="tip"></div>
+<div id="timeline">
+  <div class="tlhead"><b>Wall-clock timeline</b> <span id="tlmeta" class="mono"></span>
+    <span class="tlclose" onclick="toggleTimeline()">✕</span></div>
+  <div class="tlbody" id="tlbody"></div>
+</div>
 
 <div id="drawer">
   <div class="dbar">
@@ -929,6 +954,33 @@ window.addEventListener('keydown',e=>{
 });
 function toggleTheme(){const r=document.documentElement;
   r.setAttribute('data-theme',r.getAttribute('data-theme')==='light'?'dark':'light');}
+
+/* ---- wall-clock timeline (critical path & concurrency) ---- */
+function renderTimeline(){
+  const tl=T.stages.filter(s=>s.start && s.duration_ms).sort((a,b)=>a.start-b.start);
+  const body=document.getElementById('tlbody'), meta=document.getElementById('tlmeta');
+  if(!tl.length){body.innerHTML='<div class="empty" style="padding:8px">No per-stage wall-clock timestamps captured for this job.</div>';meta.textContent='';return;}
+  const t0=Math.min(...tl.map(s=>s.start)), t1=Math.max(...tl.map(s=>s.end||s.start));
+  const span=Math.max(1,t1-t0);
+  const critMs=Math.max(...tl.map(s=>s.duration_ms||0));
+  meta.textContent=`${tl.length} timed stages · span ${fmtMs(span*1000)} · slowest ${fmtMs(critMs)}`;
+  // axis ticks (0, 25, 50, 75, 100%)
+  let axis='<div class="taxis">'+[0,.25,.5,.75,1].map(f=>`<span style="left:${f*100}%">${fmtMs(f*span*1000)}</span>`).join('')+'</div>';
+  const rows=tl.map(s=>{
+    const L=100*(s.start-t0)/span, W=Math.max(0.8,100*(s.duration_ms/1000)/span);
+    const crit=(s.duration_ms===critMs)?' crit':'';
+    return `<div class="trow" onclick="openStage('${esc(s.id)}');toggleTimeline()">
+      <span class="tnm">${esc(s.name)}${s.lane!=='main'?` <span style="color:${PC[s.lane]}">·${s.lane[0]}</span>`:''}</span>
+      <div class="ttrack"><i class="${crit}" style="left:${L}%;width:${W}%;background:${PC[s.lane]||'var(--main)'};opacity:.9"></i></div>
+      <span class="tdur mono">${fmtMs(s.duration_ms)}</span></div>`;
+  }).join('');
+  body.innerHTML=`<div class="trow" style="cursor:default"><span></span>${axis}<span></span></div>`+rows;
+}
+function toggleTimeline(){
+  const el=document.getElementById('timeline'), on=el.classList.toggle('on');
+  if(on) renderTimeline();
+}
+document.getElementById('btnTimeline').addEventListener('click',toggleTimeline);
 
 fit();
 </script>
