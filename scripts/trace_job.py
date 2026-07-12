@@ -610,18 +610,26 @@ edges.forEach(([a,c,kind])=>{
   const p=el('path',{d,class:'edge'+(kind==='fork'?' fork':'')},vp);
   edgeEls.push({p,a:a.id,c:c.id});
 });
+// duplicate pretty-names -> show raw id to disambiguate
+const nameCount={}; T.stages.forEach(s=>nameCount[s.name]=(nameCount[s.name]||0)+1);
 // nodes
 T.stages.forEach(s=>{
+  const dup=nameCount[s.name]>1;
   const g=el('g',{class:'node','data-id':s.id,transform:`translate(${s._x},${s._y})`,style:`--pc:${PC[s.lane]||'var(--main)'}`},vp);
   el('rect',{class:'card',width:NW,height:NH,rx:12,x:0,y:0},g);
   el('rect',{class:'stripe',x:0,y:0,width:5,height:NH,rx:2,fill:PC[s.lane]||'var(--main)'},g);
   // status ring
   el('circle',{class:'ring',cx:NW-15,cy:16,r:5,stroke:SC[s.status]||'var(--dim)'},g);
-  const nm=el('text',{class:'nm',x:15,y:22},g); nm.textContent = clip(s.name,22);
-  const mt=el('text',{class:'mt',x:15,y:41},g);
+  // warning marker: any failed call (crit) or escalation (warn) in this stage
+  const nFail=(s.calls||[]).filter(c=>!c.success).length;
+  const nEsc=(s.calls||[]).filter(c=>c.escalation>0).length;
+  if(nFail||nEsc){const wt=el('text',{x:NW-27,y:20,'text-anchor':'end','font-size':10,'font-weight':700,fill:nFail?'var(--crit)':'var(--warn)'},g);wt.textContent=`⚠${nFail||nEsc}`;}
+  const nm=el('text',{class:'nm',x:15,y:20},g); nm.textContent = clip(s.name,22);
+  if(dup){const idt=el('text',{x:15,y:33,'font-size':9.5,fill:'var(--dim)',class:'mono'},g);idt.textContent=clip(s.id,26);}
+  const mt=el('text',{class:'mt',x:15,y:dup?46:41},g);
   mt.innerHTML=`<tspan>${fmtMs(s.duration_ms)}</tspan>`
     + (s.cost_usd?`<tspan dx="10" style="fill:var(--tx);font-weight:600">${fmtUsd(s.cost_usd)}</tspan>`:'');
-  if(s.n_calls){const bd=el('text',{class:'badge',x:15,y:56},g);bd.textContent=`${s.n_calls} call${s.n_calls>1?'s':''}`;}
+  if(s.n_calls){const bd=el('text',{class:'badge',x:15,y:dup?58:56},g);bd.textContent=`${s.n_calls} call${s.n_calls>1?'s':''}`;}
   // cost intensity bar along the bottom
   if(s.cost_usd>0){
     const w=Math.min(NW-30,(NW-30)*s.cost_usd/(Math.max(...T.stages.map(x=>x.cost_usd||0))||1));
@@ -712,6 +720,18 @@ function stageView(id){
   if(s.summary) h+=`<div class="summary">${esc(s.summary)}</div>`;
   // calls
   if((s.calls||[]).length){
+    // orchestra summary: group by purpose (legible when a stage fires 100s of cheap calls)
+    if(s.calls.length>8){
+      const gp={};
+      s.calls.forEach(c=>{const k=c.purpose||c.model||'call';const g=gp[k]||(gp[k]={n:0,tok:0,cost:0,ms:0,fail:0});g.n++;g.tok+=c.out_tokens||0;g.cost+=c.cost||0;g.ms+=c.duration_ms||0;if(!c.success)g.fail++;});
+      const rows=Object.entries(gp).sort((a,b)=>b[1].n-a[1].n);
+      h+=`<div class="sec"><div class="st">Orchestra <span class="mono" style="color:var(--dim)">${rows.length} kinds · ${s.calls.length} calls</span></div>`
+       +rows.map(([k,g])=>`<div class="orow" style="cursor:default">
+          <span class="on">${esc(k)}${g.fail?` <span class="tag" style="--c:var(--crit)">${g.fail} fail</span>`:''}</span>
+          <span class="ov mono"><b>×${g.n}</b> <span class="sh">${fmtTok(g.tok)} tok${g.cost?' · '+fmtUsd(g.cost):''}</span></span>
+          <div class="obar mb" style="--oc:${PC[s.lane]}"><i style="width:${Math.max(4,100*g.n/rows[0][1].n)}%"></i></div></div>`).join('')
+       +`</div>`;
+    }
     h+=`<div class="sec"><div class="st">Model calls <span class="mono" style="color:var(--dim)">${s.calls.length}</span></div>`
      +`<table class="calltbl"><thead><tr><th></th><th>provider · model</th><th>purpose</th><th>tok</th><th>ms</th><th>$</th></tr></thead><tbody>`
      +s.calls.map((c,i)=>`<tr onclick="openCall('${esc(id)}',${i})">
