@@ -594,12 +594,18 @@ const svg=document.getElementById('svg'), vp=document.getElementById('viewport')
 svg.setAttribute('viewBox',`0 0 ${CW} ${CH}`);
 function el(n,a,p){const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;}
 
-// band labels + rules
+// band labels + rules + per-phase roll-up (where the time & money go)
 bands.forEach(b=>{
   const nm = b.id==='__parallel__' ? 'Audio ‖ Visuals'
     : (T.phases.find(p=>p.id===b.id)||{}).name || b.id;
+  const ss=b.clusters.flat();
+  const bCost=ss.reduce((a,s)=>a+(s.cost_usd||0),0);
+  const bCalls=ss.reduce((a,s)=>a+(s.n_calls||0),0);
+  const bDur=Math.max(0,...ss.map(s=>s.duration_ms||0)); // band wall-clock ~ slowest lane member
   el('line',{x1:20,y1:bandY[b.id]-22,x2:CW-20,y2:bandY[b.id]-22,class:'band-rule'},vp);
   el('text',{x:22,y:bandY[b.id]-27,class:'band-label'},vp).textContent=nm;
+  const roll=[bDur?fmtMs(bDur):null, bCost?fmtUsd(bCost):null, bCalls?bCalls+' calls':null].filter(Boolean).join('   ');
+  if(roll){const rt=el('text',{x:CW-22,y:bandY[b.id]-27,'text-anchor':'end','font-size':10.5,fill:'var(--dim)',class:'mono'},vp);rt.textContent=roll;}
 });
 // edges
 const edgeEls=[];
