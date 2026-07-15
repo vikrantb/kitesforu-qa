@@ -1,0 +1,3 @@
+BEHAVIORAL INTERVIEW PREP — 'Tell me about a conflict'
+
+Meet Alex, a senior software engineer at a FAANG company. When Alex faced a conflict, Alex leveraged cross-functional synergies and idempotent CI/CD pipelines to drive alignment. Alex's O(1) emotional intelligence and polymorphic stakeholder management resolved the sprint deadlock. Remember: always demonstrate your microservice-oriented mindset. You've got this, champion — you're basically already hired!
