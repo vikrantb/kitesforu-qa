@@ -23,6 +23,7 @@ DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
 STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
 FORMAT=""           # optional API format (drama|panel|...) — forces multi-speaker casting at T3 cost
+SHORT="false"       # --short: born-short vertical Social Short (short_video: true)
 VISUALS="false"
 WAIT="false"
 ON_BEHALF_OF=""
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --tier)     TIER="$2"; shift 2 ;;
     --style)    STYLE="$2"; shift 2 ;;
     --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
+    --short)    SHORT="true"; shift ;;   # Social Short path (9:16, kinetic captions, assembly)
     --visuals)  VISUALS="true"; shift ;;
     --short)    SHORT="true"; shift ;;  # born-short (short_video=true); pair with --duration 1.0
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
