@@ -84,3 +84,29 @@ def test_takeaway_catches_thats_it_synthesis():
     sr = run_dimension(Artifact.from_doc(_doc(
         "blah blah about chaining and probing. That's it. Two strategies for the same problem. The right choice depends entirely on your use case and load.")), "content")
     assert not any("lands_takeaway" in i for i in sr.issues), sr.issues
+
+
+def test_duplicate_sentence_fails():
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "A B-tree is a database index that keeps keys sorted. The page is the unit of the index. "
+        "The page is the unit of the index. So a lookup touches only a few pages, not every row.",
+        topic="How a B-tree database index finds rows")), "content")
+    assert any("no_duplicate_sentences" in i for i in sr.issues), sr.issues
+
+
+def test_no_duplicate_sentence_passes():
+    sr = run_dimension(Artifact.from_doc(_doc(GOOD_TEXT)), "content")
+    assert not any("no_duplicate_sentences" in i for i in sr.issues), sr.issues
+
+
+def test_stray_date_stamp_fails():
+    sr = run_dimension(Artifact.from_doc(_doc(
+        "A B-tree is a database index. It's July 18th, 2026, and B-trees keep keys sorted so the "
+        "index finds rows fast without scanning every row.",
+        topic="How a B-tree database index finds rows")), "content")
+    assert any("no_stray_date_stamp" in i for i in sr.issues), sr.issues
+
+
+def test_no_date_stamp_passes():
+    sr = run_dimension(Artifact.from_doc(_doc(GOOD_TEXT)), "content")
+    assert not any("no_stray_date_stamp" in i for i in sr.issues), sr.issues
