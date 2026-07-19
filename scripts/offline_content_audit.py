@@ -23,6 +23,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=300)
     ap.add_argument("--genre", default=None, help="only this genre (e.g. educational)")
+    ap.add_argument("--min-words", type=int, default=0, help="skip short stubs below N script words (10s test jobs can't have a takeaway)")
     args = ap.parse_args()
 
     from google.cloud import firestore
@@ -54,6 +55,8 @@ def main() -> int:
         scanned += 1
         try:
             art = Artifact.from_doc(d)
+            if args.min_words and len((art.script_text or "").split()) < args.min_words:
+                continue
             sr = run_dimension(art, "content")
         except Exception:  # noqa: BLE001 — a job we can't build/audit just gets skipped
             continue
