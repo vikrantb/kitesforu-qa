@@ -153,3 +153,33 @@ def grounded_research_or_brief(art):
     has_research = bool(art.doc.get("research_results"))
     chars = (art.llm_brief or {}).get("brief_chars") or 0
     return (has_research or chars > 0), f"research_results={has_research}, llm_brief_chars={chars}"
+
+
+# ── generation-glitch detectors ($0 deterministic; the panel-audit 2026-07-19 found these
+# real defects that the content_craft judge misses entirely — content_craft PASS is 25%-precision) ──
+@check("explainer.no_duplicate_sentences", dimension="content", genre="explainer", severity="high")
+def no_duplicate_sentences(art):
+    "A verbatim back-to-back duplicated sentence is a raw generation glitch (panel found "
+    "'The unit of time in chess.' twice in a row on job a5db9658) — reads as broken production. "
+    "Deterministic $0: flag any adjacent sentence pair that is identical after normalization."
+    t = _text(art)
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", t) if len(s.strip()) > 12]
+    for a, b in zip(sents, sents[1:], strict=False):
+        na = re.sub(r"\s+", " ", a.lower()).strip(" .!?,’'\"")
+        nb = re.sub(r"\s+", " ", b.lower()).strip(" .!?,’'\"")
+        if na and na == nb:
+            return False, f"duplicated sentence back-to-back: {a[:60]!r}"
+    return True, "no back-to-back duplicated sentences"
+
+
+@check("explainer.no_stray_date_stamp", dimension="content", genre="explainer", severity="medium")
+def no_stray_date_stamp(art):
+    "A spoken absolute date-stamp ('It's July 18th, 2026') breaks immersion in evergreen educational "
+    "content (panel found this on job c87ea6d4). Deterministic $0: flag a spoken 'it is/it's <Month> "
+    "<day>, <year>' construction. (Historical dates in prose are fine — this targets the meta stamp.)"
+    t = _text(art)
+    bad = bool(re.search(
+        r"\bit'?s\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(st|nd|rd|th)?,?\s+\d{4}",
+        t, re.I,
+    ))
+    return not bad, "stray spoken date-stamp" if bad else "no stray date-stamp"
