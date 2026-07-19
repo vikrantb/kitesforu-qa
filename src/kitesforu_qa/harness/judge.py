@@ -152,6 +152,25 @@ def practical_examples(art):
     )
 
 
+@judge_check("explainer.citations_plausible", dimension="content", genre="explainer", severity="high")
+def citations_plausible(art):
+    "Are specific factual claims / citations real, or fabricated authority? (panel-audit 2026-07-19: "
+    "job b69436dd invented 'Sholes' 1873 drawings archived at the Milwaukee Public Museum' as false "
+    "authority — a trust/safety defect no other check catches)."
+    if not _is_explainer(art) or not art.script_text:
+        return None
+    return JudgePrompt(
+        question=("Does this piece state any specific factual claim, named source, institution, study, "
+                  "patent, or archive that reads as FABRICATED or invented-for-authority (an overly "
+                  "specific citation with no verifiable substance), or are all such specifics plausible "
+                  "and consistent with reality?"),
+        excerpt=art.script_text,
+        rubric=("FAIL if ANY named citation/source/institution/date is stated with false confidence but "
+                "reads invented or unverifiable-as-stated (educational content must not fabricate "
+                "authority). PASS only if every specific claim is plausible + internally consistent."),
+    )
+
+
 # ── FILE-BASED judge path (founder's "local cloud code" preference — no metered cloud API) ─────────
 
 

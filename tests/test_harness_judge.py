@@ -64,3 +64,12 @@ def test_judges_skip_when_evaluator_broken():
     results = run_judges(art, judge_checks_for(art), evaluator=_Broken())
     # an unavailable/flaky judge SKIPS — it's enrichment, not the gate
     assert results and all(r.skipped for r in results)
+
+
+def test_citations_plausible_registered_and_wellformed():
+    from kitesforu_qa.harness.judge import JudgePrompt
+    art = Artifact.from_doc(EXPLAINER)
+    checks = judge_checks_for(art)
+    assert "explainer.citations_plausible" in {c.id for c in checks}
+    jp = next(c.fn(art) for c in checks if c.id == "explainer.citations_plausible")
+    assert isinstance(jp, JudgePrompt) and jp.excerpt.strip() and "fabricat" in jp.question.lower()
