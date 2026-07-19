@@ -47,7 +47,10 @@ def opening_hooks(art):
 def surfaces_misconception(art):
     "A good explainer surfaces a WRONG model before correcting it (catalog exp-c-misconception)."
     t = _text(art).lower()
-    ok = bool(re.search(r"most people (think|assume|believe)|most people get\b.{0,25}\bwrong|(people|folks) (get|have) [\w\s]{0,20}wrong|you might (think|assume)|common misconception|it'?s tempting to|turns out|but actually|but that'?s not how it (works|happens)|the (common|biggest) (myth|mistake|misconception)|here'?s the (catch|twist)", t))
+    # Calibrated 2026-07-19 against 7 panel transcripts: the original regex false-FAILED clear
+    # myth-busts ("rumor… QWERTY was built to slow you down… the myth persists"), inflating the
+    # fail rate to 90%. Added the myth/rumor/supposedly/deliberately/contrary-to framings.
+    ok = bool(re.search(r"most people (think|assume|believe)|most people get\b.{0,25}\bwrong|(people|folks) (get|have) [\w\s]{0,20}wrong|you might (think|assume)|common misconception|it'?s tempting to|turns out|but actually|but that'?s not how it (works|happens)|the (common|biggest) (myth|mistake|misconception)|here'?s the (catch|twist)|rumou?r\b|\bmyth\b|supposedly|the story goes|deliberately (designed|made|built)|contrary to (popular|common|what)|conventional wisdom|you'?d think|we'?re taught|everyone (thinks|knows|assumes)|isn'?t (actually|really)|widely (thought|believed)", t))
     return ok, "surfaces a misconception" if ok else "no wrong-model-before-correction"
 
 
@@ -56,7 +59,12 @@ def lands_takeaway(art):
     "Lands a carry-away handle near the close (catalog exp-c-takeaway)."
     t = _text(art)
     close = " ".join(t.split()[-80:]).lower()
-    ok = bool(re.search(r"takeaway|next time (you|a|your|that|when|someone|it)\b|you can now|rule of thumb|remember this|if you remember nothing else|the one thing|that'?s it[.,]|now you know|the (whole|entire) (point|trick)|the key (idea|insight)|depends (entirely )?on|comes down to|the (right )?choice .{0,40}(shape|depend|matter)", close))
+    # Calibrated 2026-07-19: the original regex false-FAILED actionable-advice closes ("Play a
+    # developing move…", "Lay the groundwork…"), inflating the fail rate to 94%. Added takeaway
+    # phrasings + an imperative-advice fallback (a verb-first advice sentence IS a carry-away handle).
+    ok = bool(re.search(r"takeaway|next time (you|a|your|that|when|someone|it)\b|you can now|rule of thumb|remember this|if you remember nothing else|the one thing|that'?s it[.,]|now you know|the (whole|entire) (point|trick)|the key (idea|insight)|depends (entirely )?on|comes down to|the (right )?choice .{0,40}(shape|depend|matter)|so next time|the trick (is|to)|the answer (is|lies)|what (really )?matters|the point is|focus on|the real (reason|lesson)|boils down to|bottom line", close))
+    if not ok:
+        ok = bool(re.search(r"(?:^|[.!?]\s+)(play|lay|focus|remember|keep|use|start|avoid|aim|look for|don'?t|never|always|pick|choose|prioriti[sz]e|treat)\b", close))
     return ok, "lands a takeaway" if ok else "no carry-away handle near the close"
 
 
