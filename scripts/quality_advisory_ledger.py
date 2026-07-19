@@ -29,7 +29,7 @@ import argparse
 import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 PROJECT_ID = "kitesforu-dev"
 COLLECTION = "podcast_jobs"
@@ -42,7 +42,7 @@ ADVISORY_FIELDS = {
 }
 
 
-def _parse_advisory(raw: Any) -> List[str]:
+def _parse_advisory(raw: Any) -> list[str]:
     """"listening_qa_advisory: axis_a,axis_b" -> ["axis_a", "axis_b"]. Permissive:
     a missing/blank/malformed value yields []."""
     if not isinstance(raw, str) or ":" not in raw:
@@ -51,7 +51,7 @@ def _parse_advisory(raw: Any) -> List[str]:
     return [a.strip() for a in axes_part.split(",") if a.strip()]
 
 
-def _genre_of(doc: Dict[str, Any]) -> str:
+def _genre_of(doc: dict[str, Any]) -> str:
     """Best-effort genre for clustering — permissive across the shapes the
     pipeline uses (episode_profile.genre is the discovered one; preferences.genre
     the requested one). Falls back to content_type, then 'unknown'."""
@@ -65,7 +65,7 @@ def _genre_of(doc: Dict[str, Any]) -> str:
     )
 
 
-def _iter_recent_jobs(db: Any, limit: int, days: Optional[int]):
+def _iter_recent_jobs(db: Any, limit: int, days: int | None):
     """Recent podcast_jobs, newest first. Single-field order_by is auto-indexed;
     status/date are filtered in Python so no composite index is required."""
     from google.cloud import firestore
@@ -88,7 +88,7 @@ def _iter_recent_jobs(db: Any, limit: int, days: Optional[int]):
         yield snap.id, doc
 
 
-def collect(db: Any, limit: int, days: Optional[int]) -> Dict[str, Any]:
+def collect(db: Any, limit: int, days: int | None) -> dict[str, Any]:
     """Scan recent jobs; tally advisory signatures. Pure aggregation, no writes."""
     scanned = 0
     completed = 0
@@ -96,7 +96,7 @@ def collect(db: Any, limit: int, days: Optional[int]) -> Dict[str, Any]:
     by_gate_axis: Counter = Counter()
     by_gate_axis_genre: Counter = Counter()
     by_gate: Counter = Counter()
-    examples: Dict[str, str] = {}
+    examples: dict[str, str] = {}
 
     for job_id, doc in _iter_recent_jobs(db, limit, days):
         scanned += 1
@@ -130,11 +130,11 @@ def collect(db: Any, limit: int, days: Optional[int]) -> Dict[str, Any]:
     }
 
 
-def render_report(agg: Dict[str, Any]) -> str:
+def render_report(agg: dict[str, Any]) -> str:
     completed = agg["completed"]
     with_adv = agg["jobs_with_advisory"]
     pct = (100.0 * with_adv / completed) if completed else 0.0
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("=" * 72)
     lines.append("QUALITY-ADVISORY LEDGER — offline (ship-first QA, learn-offline half)")
     lines.append("=" * 72)
@@ -164,7 +164,7 @@ def render_report(agg: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _to_jsonable(agg: Dict[str, Any]) -> Dict[str, Any]:
+def _to_jsonable(agg: dict[str, Any]) -> dict[str, Any]:
     return {
         "scanned": agg["scanned"],
         "completed": agg["completed"],
@@ -178,7 +178,7 @@ def _to_jsonable(agg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=500, help="most-recent jobs to scan")
     ap.add_argument("--days", type=int, default=None, help="only jobs updated within N days")
