@@ -74,16 +74,43 @@ def main() -> int:
         if cc_pass is False and battery_pass:
             disagree["cc_fail_battery_pass"].append(snap.id[:8])
 
+    # 2026-07-20: a 10-agent per-signature LLM-judge workflow (ground-truthed by
+    # reading the actual scripts) proved the loose-regex "does the script HAVE
+    # quality X" checks are FALSE-POSITIVE machines: lands_takeaway 0/6,
+    # surfaces_misconception 0/6, has_example 1/6, grounded 1/6, opening_hooks 2/6,
+    # top_down 0/6 real. They flag GOOD organic writing as broken (a regex cannot
+    # detect the PRESENCE of an open-ended quality). Only mechanical / banned-literal
+    # checks are reliable deterministically; subjective quality needs the LLM JUDGE
+    # layer (judge.py). Partition the report so these advisory signals are no longer
+    # presented as reliable defects. See memory
+    # feedback_subjective_content_checks_are_false_positives.
+    unreliable = {
+        "explainer.lands_takeaway", "explainer.surfaces_misconception",
+        "explainer.has_example", "explainer.grounded_research_or_brief",
+        "explainer.opening_hooks_curiosity", "explainer.top_down_opening",
+        "explainer.defines_terms", "explainer.example_has_numbers",
+    }
+    reliable = [(c, n) for c, n in defect_counts.most_common() if c not in unreliable]
+    advisory = [(c, n) for c, n in defect_counts.most_common() if c in unreliable]
     print("=" * 66)
     print("OFFLINE CONTENT AUDIT — reliable deterministic battery vs content_craft")
     print("=" * 66)
     print(f"completed educational scanned={scanned}  audited={audited}")
-    print("\n── deterministic defects (reliable, $0) by frequency ──")
-    for cid, n in defect_counts.most_common():
+    print("\n── RELIABLE deterministic defects ($0; mechanical / banned-literal) ──")
+    for cid, n in reliable:
         print(f"  {n:4d}  {cid:42s}  e.g. {examples.get(cid,'')}")
-    if not defect_counts:
-        print("  (no deterministic content defects in the window)")
-    print("\n── content_craft vs battery DISAGREEMENT (the unreliability, made visible) ──")
+    if not reliable:
+        print("  (no reliable deterministic content defects in the window)")
+    print("\n── ADVISORY subjective signals (VALIDATED FALSE-POSITIVE 2026-07-20 — do")
+    print("   NOT drive fixes from these; a loose regex can't detect organic quality.")
+    print("   Use the LLM judge layer for these dimensions) ──")
+    for cid, n in advisory:
+        print(f"  {n:4d}  {cid:42s}  e.g. {examples.get(cid,'')}")
+    if not advisory:
+        print("  (none in the window)")
+    print("\n── content_craft vs battery DISAGREEMENT (NOTE: 'battery FAIL' is dominated")
+    print("   by the ADVISORY false-positives above — a content_craft PASS is often")
+    print("   CORRECT, not a false pass) ──")
     print(f"  content_craft PASS but battery FAIL: {len(disagree['cc_pass_battery_fail'])}  {disagree['cc_pass_battery_fail'][:10]}")
     print(f"  content_craft FAIL but battery PASS: {len(disagree['cc_fail_battery_pass'])}  {disagree['cc_fail_battery_pass'][:10]}")
     print("=" * 66)
