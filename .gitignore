@@ -32,6 +32,9 @@ wheels/
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Fleet drift sentinel output (generated reports + baseline — never committed)
+scratch/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
