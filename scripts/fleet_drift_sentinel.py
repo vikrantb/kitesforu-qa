@@ -15,6 +15,30 @@ mechanically visible:
 * TRANSITION DATE   — for each flagged metric, daily buckets are bisected to the first collapsed
   day and correlated against Cloud Run worker deploy timestamps → 2-3 suspect revisions.
 
+SEVERITY IS DIRECTIONALITY-AWARE. For BAD-SIGNAL families (failure_reason:* except "none",
+status:failed*, retried:*, gate:*, clips_all_same_hash) a COLLAPSE is an IMPROVEMENT →
+severity INFO, never exit 1 (stripping a prevalent failure must not gate deploys for a week);
+their SPIKES are CRITICAL (a failure family exploding IS the incident). Good-signal collapses
+stay CRITICAL. Cost spikes (cost_usd / credits_used mean or p95 >= 2.5x with volume) are
+CRITICAL too — a fleet-wide burn must gate the round, not rot in an unread report.
+
+COST DILUTION LIMIT (honest): ONE burned job among ~70 moves neither the window mean nor the
+p95 (p95 needs roughly n/20 affected jobs to shift). The max-vs-prior-p95 OUTLIER channel
+(trailing max >= 10x prior p95 → WARNING, non-gating) exists for exactly that single-job case;
+per-job spend caps remain the pipeline cost guardrails' job, not this fleet-level sentinel's.
+
+EXPECTED CHANGES ACK: deliberate flips (feature removals, flag changes, QA campaigns) are muted
+via scratch/reports/drift/ack.json — {"acks": [{"metric": "motion:parallax", "until":
+"2026-08-01", "segment": "short", "note": "flag flip PR #123"}]}. Metric supports fnmatch
+globs; segment/note optional. A matching, unexpired ack demotes the finding to INFO (still
+reported + marked acked, never exit 1). Entries expire automatically after their date.
+
+APPLICABILITY: output-shaped features only count where they CAN occur — motion:* and
+video_url_present are computed only over clip-bearing jobs (clips_present is the denominator),
+so an audio-only/QA-campaign mix shift shows as ONE mix-level clips_present finding instead of
+a false motion collapse fan-out. podcast_all findings that duplicate an identical short/episode
+finding are deduped (podcast_all only surfaces what per-segment volume guards would hide).
+
 TENET-9 / COST: strictly read-only + $0 — Firestore field PROJECTIONS (`.select`, never full
 1MiB docs) over data the pipeline already wrote, plus (optional) `gcloud run revisions list`.
 No LLM calls, no generation, no job mutation. Fully deterministic.
@@ -41,7 +65,9 @@ thin injected adapters at the bottom of this file.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
+import math
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator
@@ -53,6 +79,12 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_DIR = REPO_ROOT / "scratch" / "reports" / "drift"
 BASELINE_FILENAME = "baseline.json"
+ACK_FILENAME = "ack.json"
+
+# Cost-family numerics: a SPIKE here (mean or p95) is CRITICAL — fleet-wide burn gates deploys.
+COST_METRICS = ("cost_usd", "credits_used")
+
+_SEVERITY_RANK = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
 
 # Cloud Run services whose deploy timestamps are correlated against transition dates. The 12
 # podcast workers share ONE image (one deploy round updates all), so a representative subset
@@ -122,6 +154,7 @@ class DriftConfig:
     gate_min_gated: int = 8           # gate-meta volume guard
     min_daily_volume: int = 3         # daily buckets below this are ignored by the bisect
     numeric_prior_floor: float = 1e-9  # guard against div-by-~0 on numeric means
+    cost_outlier_ratio: float = 10.0  # trailing max >= this x prior p95 → single-job burn
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -246,22 +279,26 @@ def extract_job_features(doc: dict) -> dict | None:
         numerics["cost_usd"] = cost
 
     # Output-shaped features are only APPLICABLE on completed jobs (a failed job carrying no
-    # clips is not a dark feature) — applicability = key presence in `flags`.
+    # clips is not a dark feature) — applicability = key presence in `flags`. Within completed
+    # jobs, motion:*/video_url_present/clip metrics are applicable ONLY on CLIP-BEARING jobs:
+    # an audio-only job (wants_visuals=false — routine on QA-campaign weeks) can never have
+    # motion, so it must not dilute those denominators. clips_present is the single MIX-LEVEL
+    # signal for "the fleet stopped producing clips at all".
     if completed:
         clips = _clips(doc)
-        modes = [str(c.get("render_mode") or "").strip().lower() for c in clips]
         flags["clips_present"] = bool(clips)
-        for mode in MOTION_RENDER_MODES:
-            flags[f"motion:{mode}"] = mode in modes
-        flags["motion:any"] = any(m in MOTION_RENDER_MODES for m in modes)
-        hashes = {str(c.get("content_hash") or "").strip() for c in clips}
-        hashes.discard("")
         if clips:
+            modes = [str(c.get("render_mode") or "").strip().lower() for c in clips]
+            for mode in MOTION_RENDER_MODES:
+                flags[f"motion:{mode}"] = mode in modes
+            flags["motion:any"] = any(m in MOTION_RENDER_MODES for m in modes)
+            hashes = {str(c.get("content_hash") or "").strip() for c in clips}
+            hashes.discard("")
             numerics["clip_count"] = float(len(clips))
             numerics["distinct_content_hashes"] = float(len(hashes))
             flags["clips_all_same_hash"] = len(clips) >= 3 and len(hashes) == 1
-        video_url = _get(doc, "visual", "video_url")
-        flags["video_url_present"] = bool(isinstance(video_url, str) and video_url.strip())
+            video_url = _get(doc, "visual", "video_url")
+            flags["video_url_present"] = bool(isinstance(video_url, str) and video_url.strip())
         dropped = _music_dropped(doc)
         if dropped is not None:
             flags["music_delivered"] = not dropped
@@ -366,15 +403,23 @@ def window_feature_stats(rows: list[dict]) -> dict[str, dict[str, float]]:
     return stats
 
 
+def _p95(values: list[float]) -> float:
+    """Nearest-rank p95 (deterministic, no numpy). NOTE the dilution limit: one outlier among
+    ~70 values does NOT move p95 — it takes roughly n/20 affected values to shift it."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
+
+
 def window_numeric_stats(rows: list[dict]) -> dict[str, dict[str, float]]:
-    """{metric: {mean, n}} over rows where the metric is present."""
-    total: dict[str, float] = {}
-    n: dict[str, int] = {}
+    """{metric: {mean, n, p95, max}} over rows where the metric is present."""
+    vals: dict[str, list[float]] = {}
     for r in rows:
         for name, v in r["numerics"].items():
-            total[name] = total.get(name, 0.0) + v
-            n[name] = n.get(name, 0) + 1
-    return {name: {"mean": total[name] / n[name], "n": n[name]} for name in n}
+            vals.setdefault(name, []).append(v)
+    return {
+        name: {"mean": sum(v) / len(v), "n": len(v), "p95": _p95(v), "max": max(v)}
+        for name, v in vals.items()
+    }
 
 
 def _stat_for(stats: dict, name: str) -> dict[str, float] | None:
@@ -392,6 +437,22 @@ def _stat_for(stats: dict, name: str) -> dict[str, float] | None:
 # ────────────────────────────────────────────────────────────────────────────
 # 3. DETECTION (pure)
 # ────────────────────────────────────────────────────────────────────────────
+
+def is_bad_signal_metric(name: str) -> bool:
+    """True when HIGHER prevalence of this metric is WORSE (failure/retry/gate-fail families).
+
+    Directionality contract: a bad signal COLLAPSING is an improvement (a fix landed, a failure
+    got stripped) → INFO, never a deploy-gating CRITICAL; a bad signal SPIKING is the incident
+    itself → CRITICAL. `failure_reason:none` and `status:completed` are GOOD complements and
+    stay on the good-signal path (their collapse = more failures = CRITICAL)."""
+    if name.startswith("failure_reason:"):
+        return name != "failure_reason:none"
+    if name.startswith("status:"):
+        return name.split(":", 1)[1].startswith("failed")
+    if name == "clips_all_same_hash":  # monotony marker: collapsing = variety returned
+        return True
+    return name.startswith(("retried:", "gate:"))
+
 
 def _finding(kind: str, severity: str, segment: str, metric: str, metric_kind: str,
              prior_value: float, trailing_value: float, prior_n: float, trailing_n: float,
@@ -419,15 +480,21 @@ def detect_prevalence_drift(trailing: dict, prior: dict, cfg: DriftConfig, segme
         if t["n"] < cfg.min_jobs_per_window or p["n"] < cfg.min_jobs_per_window:
             continue
         pp, tp = p["p"], t["p"]
+        bad = is_bad_signal_metric(name)
         if pp >= cfg.collapse_min_prior and pp > 0 and (pp - tp) / pp >= cfg.collapse_rel_drop:
+            # Directionality: a BAD signal collapsing is an IMPROVEMENT — report it (INFO,
+            # never exit-1), don't gate deploys for a week because a failure got fixed.
             findings.append(_finding(
-                "collapse", "CRITICAL", segment, name, "prevalence", pp, tp, p["n"], t["n"],
-                (pp - tp) / pp, prior_source,
-                f"prevalence {pp:.0%} → {tp:.0%} ({(pp - tp) / pp:.0%} relative drop)"))
+                "collapse", "INFO" if bad else "CRITICAL", segment, name, "prevalence",
+                pp, tp, p["n"], t["n"], (pp - tp) / pp, prior_source,
+                f"prevalence {pp:.0%} → {tp:.0%} ({(pp - tp) / pp:.0%} relative drop)"
+                + (" — bad-signal collapse = improvement" if bad else "")))
         elif pp > 0 and tp / pp >= cfg.spike_ratio and t["pos"] >= cfg.spike_min_positive:
+            # Directionality: a BAD signal spiking IS the incident → CRITICAL (exit 1).
             findings.append(_finding(
-                "spike", "WARNING", segment, name, "prevalence", pp, tp, p["n"], t["n"],
-                tp / pp, prior_source, f"prevalence {pp:.0%} → {tp:.0%} ({tp / pp:.1f}x)"))
+                "spike", "CRITICAL" if bad else "WARNING", segment, name, "prevalence",
+                pp, tp, p["n"], t["n"], tp / pp, prior_source,
+                f"prevalence {pp:.0%} → {tp:.0%} ({tp / pp:.1f}x)"))
         elif pp == 0 and tp >= cfg.new_signal_min_prev and t["pos"] >= cfg.spike_min_positive:
             findings.append(_finding(
                 "new_signal", "WARNING", segment, name, "prevalence", pp, tp, p["n"], t["n"],
@@ -438,6 +505,12 @@ def detect_prevalence_drift(trailing: dict, prior: dict, cfg: DriftConfig, segme
 
 def detect_numeric_drift(trailing: dict, prior: dict, cfg: DriftConfig, segment: str,
                          prior_source: str = "window") -> list[dict]:
+    """Mean collapse/spike per metric, plus TWO cost-only channels the mean dilutes away:
+
+    * p95 spike (CRITICAL) — a burned COHORT (~n/20+ jobs) the mean averages down.
+    * max-vs-prior-p95 outlier (WARNING, non-gating) — a SINGLE burned job among ~70, which
+      moves neither the mean nor the p95 (the honest dilution limit of both aggregates).
+    Cost-family MEAN spikes are CRITICAL: fleet-wide burn must gate the deploy round."""
     findings: list[dict] = []
     for name in sorted(set(trailing) | set(prior)):
         t, p = trailing.get(name), prior.get(name)
@@ -445,6 +518,7 @@ def detect_numeric_drift(trailing: dict, prior: dict, cfg: DriftConfig, segment:
             continue
         if t["n"] < cfg.min_jobs_per_window or p["n"] < cfg.min_jobs_per_window:
             continue
+        is_cost = name in COST_METRICS
         pm, tm = p["mean"], t["mean"]
         if pm <= cfg.numeric_prior_floor:
             if tm > cfg.numeric_prior_floor and t["n"] >= cfg.min_jobs_per_window:
@@ -452,15 +526,40 @@ def detect_numeric_drift(trailing: dict, prior: dict, cfg: DriftConfig, segment:
                     "new_signal", "WARNING", segment, name, "mean", pm, tm, p["n"], t["n"],
                     None, prior_source, f"mean {pm:.4g} → {tm:.4g} (was ~0)"))
             continue
+        mean_spiked = False
         if (pm - tm) / pm >= cfg.collapse_rel_drop:
             findings.append(_finding(
                 "collapse", "CRITICAL", segment, name, "mean", pm, tm, p["n"], t["n"],
                 (pm - tm) / pm, prior_source,
                 f"mean {pm:.4g} → {tm:.4g} ({(pm - tm) / pm:.0%} relative drop)"))
         elif tm / pm >= cfg.spike_ratio:
+            mean_spiked = True
             findings.append(_finding(
-                "spike", "WARNING", segment, name, "mean", pm, tm, p["n"], t["n"],
-                tm / pm, prior_source, f"mean {pm:.4g} → {tm:.4g} ({tm / pm:.1f}x)"))
+                "spike", "CRITICAL" if is_cost else "WARNING", segment, name, "mean",
+                pm, tm, p["n"], t["n"], tm / pm, prior_source,
+                f"mean {pm:.4g} → {tm:.4g} ({tm / pm:.1f}x)"
+                + (" — fleet-wide cost burn" if is_cost else "")))
+        if not is_cost:
+            continue
+        # p95 channel: a burned cohort the mean dilutes (baseline priors may lack p95/max).
+        t95, p95 = t.get("p95"), p.get("p95")
+        if (not mean_spiked and t95 and p95 and p95 > cfg.numeric_prior_floor
+                and t95 / p95 >= cfg.spike_ratio):
+            findings.append(_finding(
+                "spike", "CRITICAL", segment, name, "p95", p95, t95, p["n"], t["n"],
+                t95 / p95, prior_source,
+                f"p95 {p95:.4g} → {t95:.4g} ({t95 / p95:.1f}x) — burned cohort the "
+                f"mean dilutes"))
+        # max-outlier channel: ONE burned job (invisible to mean AND p95 at fleet volume).
+        tmax = t.get("max")
+        if (tmax and p95 and p95 > cfg.numeric_prior_floor
+                and tmax >= cfg.cost_outlier_ratio * p95):
+            findings.append(_finding(
+                "outlier", "WARNING", segment, name, "max", p95, tmax, p["n"], t["n"],
+                tmax / p95, prior_source,
+                f"single-job burn: trailing max {tmax:.4g} >= "
+                f"{cfg.cost_outlier_ratio:.0f}x prior p95 {p95:.4g} — mean/p95 would "
+                f"dilute this"))
     return findings
 
 
@@ -605,9 +704,48 @@ def group_by_segment(rows: Iterable[dict]) -> dict[str, list[dict]]:
     return by
 
 
+def apply_acks(findings: list[dict], acks: list[dict], now: datetime) -> int:
+    """Mute DELIBERATE changes (feature removal, flag flip, QA campaign): a finding whose
+    metric fnmatch-es an unexpired ack entry (optionally segment-scoped) is demoted to INFO —
+    still reported + marked acked, but never exit-1. Returns the number muted. Malformed or
+    expired entries are skipped (fail-open: a broken ack must never mute OR crash)."""
+    today = now.date()
+    muted = 0
+    for f in findings:
+        for a in acks:
+            if not isinstance(a, dict):
+                continue
+            until = parse_ts(a.get("until"))  # date-only ISO ok; inclusive through that day
+            if until is None or today > until.date():
+                continue
+            if a.get("segment") and a["segment"] != f["segment"]:
+                continue
+            pattern = str(a.get("metric") or "")
+            if not pattern or not fnmatch.fnmatchcase(f["metric"], pattern):
+                continue
+            f["severity"] = "INFO"
+            f["acked"] = True
+            note = str(a.get("note") or "").strip()
+            f["detail"] += f" [ACKED until {a['until']}" + (f": {note}]" if note else "]")
+            muted += 1
+            break
+    return muted
+
+
+def dedupe_podcast_all(findings: list[dict]) -> list[dict]:
+    """Drop podcast_all findings that duplicate an identical short/episode finding —
+    podcast_all exists only to surface fleet-wide drift that per-segment volume guards hide."""
+    covered = {(f["kind"], f["metric"], f["metric_kind"])
+               for f in findings if f["segment"] in ("short", "episode")}
+    return [f for f in findings
+            if not (f["segment"] == "podcast_all"
+                    and (f["kind"], f["metric"], f["metric_kind"]) in covered)]
+
+
 def run_sentinel(rows: list[dict], now: datetime, cfg: DriftConfig,
                  revisions: list[dict] | None = None,
-                 baseline: dict | None = None) -> dict:
+                 baseline: dict | None = None,
+                 acks: list[dict] | None = None) -> dict:
     """The whole detection pass over pre-extracted rows. Pure: no I/O, fully synthetic-testable."""
     revisions = revisions or []
     findings: list[dict] = []
@@ -641,14 +779,18 @@ def run_sentinel(rows: list[dict], now: datetime, cfg: DriftConfig,
         findings.extend(detect_numeric_drift(t_nums, p_nums, cfg, segment, prior_source))
         findings.extend(detect_gate_meta(trailing, cfg, segment))
 
+    findings = dedupe_podcast_all(findings)
+    acked_count = apply_acks(findings, acks or [], now)
     attach_transitions(findings, rows_by_segment, revisions, cfg)
-    findings.sort(key=lambda f: (f["severity"] != "CRITICAL", f["segment"], f["metric"]))
+    findings.sort(key=lambda f: (_SEVERITY_RANK.get(f["severity"], 3),
+                                 f["segment"], f["metric"]))
     return {
         "generated_at": now.isoformat(),
         "window_days": cfg.window_days,
         "segments": segments_meta,
         "findings": findings,
         "critical_count": sum(1 for f in findings if f["severity"] == "CRITICAL"),
+        "acked_count": acked_count,
     }
 
 
@@ -697,12 +839,24 @@ def render_markdown(result: dict) -> str:
         "",
         "## Reading this report",
         "",
-        "* **collapse** (CRITICAL) — a feature the fleet used to produce went dark "
-        "(prior >= 30% prevalence, >= 60% relative drop). The exit code is 1: treat it as a "
+        "* **collapse of a GOOD signal** (CRITICAL) — a feature the fleet used to produce went "
+        "dark (prior >= 30% prevalence, >= 60% relative drop). Exit code 1: treat it as a "
         "deploy-round gate.",
-        "* **spike** (WARNING) — a failure/retry/cost signal grew >= 2.5x.",
+        "* **collapse of a BAD signal** (INFO) — a failure_reason/status:failed*/retried:*/"
+        "gate:* family collapsing is an IMPROVEMENT (a fix landed); reported, never gates.",
+        "* **spike** — a BAD-signal family or cost (mean or p95) growing >= 2.5x is CRITICAL "
+        "(exit 1); other spikes are WARNING.",
+        "* **outlier** (WARNING, non-gating) — trailing max cost >= 10x prior p95: a SINGLE "
+        "burned job. Dilution limit, honestly: one job among ~70 moves neither the mean nor "
+        "the p95 (p95 needs ~n/20 affected jobs) — this channel exists for exactly that case.",
         "* **gate_meta** (CRITICAL) — a QA gate axis failing >= 80% of gated jobs: the gate is "
         "punishing a symptom the pipeline manufactures; read the gate, then fix the pipeline.",
+        "* **applicability** — motion:*/video_url_present count only clip-bearing jobs; "
+        "`clips_present` is the single mix-level signal (audio-only/QA-campaign weeks shift "
+        "the mix without faking a motion collapse).",
+        "* **[ACKED …]** — expected change muted to INFO via ack.json "
+        '(`{"acks": [{"metric", "until", "segment?", "note?"}]}` next to this report; '
+        "metric accepts fnmatch globs; entries expire after their date).",
         "* **transition/suspects** — first persistently-collapsed daily bucket, correlated "
         "against Cloud Run worker revision deploy times (2-3 nearest).",
         "",
@@ -735,6 +889,20 @@ def load_baseline(out_dir: Path) -> dict | None:
         return (json.loads(path.read_text()) or {}).get("battery") or None
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def load_acks(out_dir: Path) -> list[dict]:
+    """scratch/reports/drift/ack.json — {"acks": [{metric, until, segment?, note?}]} or a bare
+    list. Missing/malformed file → [] (fail-open: never crash, never silently mute)."""
+    path = out_dir / ACK_FILENAME
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    entries = data.get("acks") if isinstance(data, dict) else data
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -854,12 +1022,13 @@ def main(argv: list[str] | None = None) -> int:
 
     revisions = [] if args.skip_revisions else fetch_worker_revisions(
         [s for s in args.services.split(",") if s], args.region, args.project)
-    result = run_sentinel(rows, now, cfg, revisions, baseline=load_baseline(args.out_dir))
+    result = run_sentinel(rows, now, cfg, revisions, baseline=load_baseline(args.out_dir),
+                          acks=load_acks(args.out_dir))
     md_path, json_path = write_reports(args.out_dir, result)
 
     if not args.quiet:
         print(f"jobs analyzed: {len(rows)} | findings: {len(result['findings'])} "
-              f"({result['critical_count']} CRITICAL)")
+              f"({result['critical_count']} CRITICAL, {result['acked_count']} acked)")
         for f in result["findings"]:
             print(f"  [{f['severity']}] {f['kind']} {f['segment']}/{f['metric']} — "
                   f"{f['detail']}"

@@ -2,6 +2,21 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-07-25 — Fleet Drift Sentinel severity/denominator hardening (cost-NEUTRAL, $0)
+
+**Files:** `scripts/fleet_drift_sentinel.py`, `tests/test_fleet_drift_sentinel.py`, README.
+
+**Context:** closes the three review blockers on the sentinel: (1) directionality-aware
+severity (bad-signal collapse = improvement → INFO, never exit 1; bad-signal + cost spikes →
+CRITICAL) plus an expected-changes ack file (`scratch/reports/drift/ack.json`); (2)
+applicability denominators (motion/video_url over clip-bearing jobs only — kills the
+QA-campaign false-positive class); (3) cost-spike gating (mean/p95 >= 2.5x → CRITICAL exit 1)
++ max-vs-prior-p95 single-job-burn outlier channel, dilution limit documented honestly.
+
+**Per-unit $ delta: $0.** Pure detection-logic change over the same projected reads; no new
+LLM/API/generation call. The IMPROVED cost story: fleet-wide cost burns now gate the deploy
+round instead of rotting in an unread report. No pricing-page implication.
+
 ## 2026-07-25 — Fleet Drift Sentinel (cost-NEUTRAL, $0)
 
 **Files:** `scripts/fleet_drift_sentinel.py` (new), `tests/test_fleet_drift_sentinel.py` (new),

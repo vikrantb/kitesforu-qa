@@ -151,6 +151,18 @@ def test_extract_all_same_hash_monotony_flag(fds) -> None:
     assert row["numerics"]["distinct_content_hashes"] == 1.0
 
 
+def test_extract_audio_only_job_motion_not_applicable(fds) -> None:
+    """wants_visuals=false jobs (routine on QA-campaign weeks) must NOT enter the motion or
+    video_url denominators — clips_present stays the single mix-level signal."""
+    row = fds.extract_job_features(job_doc(_days_ago(1), clips=[], video_url=None))
+    assert row is not None
+    assert row["flags"]["clips_present"] is False
+    assert "motion:any" not in row["flags"]
+    assert "motion:parallax" not in row["flags"]
+    assert "video_url_present" not in row["flags"]
+    assert "clip_count" not in row["numerics"]
+
+
 def test_extract_gate_axes(fds) -> None:
     doc = job_doc(_days_ago(1), gates={"quality_gate": False, "content_craft": True},
                   retries={"visual_gate_retry_count": 2})
@@ -260,10 +272,15 @@ def test_spike_detected_and_ratio_guard(fds) -> None:
     trailing = _stats(fds, {"failure_reason:oom": (8, 20)})  # 40% = 4x
     found = fds.detect_prevalence_drift(trailing, prior, cfg, "episode")
     assert [f["kind"] for f in found] == ["spike"]
-    assert found[0]["severity"] == "WARNING"
+    assert found[0]["severity"] == "CRITICAL"  # a BAD signal spiking IS the incident
     # 2x is under the 2.5x threshold
     trailing2 = _stats(fds, {"failure_reason:oom": (4, 20)})
     assert fds.detect_prevalence_drift(trailing2, prior, cfg, "episode") == []
+    # a GOOD-signal spike stays WARNING (unusual, but not a gating incident)
+    prior_g = _stats(fds, {"motion:video": (2, 20)})
+    trailing_g = _stats(fds, {"motion:video": (8, 20)})
+    found_g = fds.detect_prevalence_drift(trailing_g, prior_g, cfg, "short")
+    assert [f["severity"] for f in found_g] == ["WARNING"]
 
 
 def test_new_signal_from_zero_prior(fds) -> None:
@@ -288,7 +305,7 @@ def test_volume_guard_blocks_small_windows(fds) -> None:
 def test_numeric_collapse_and_spike(fds) -> None:
     cfg = fds.DriftConfig()
     prior = {"distinct_content_hashes": {"mean": 5.0, "n": 20},
-             "cost_usd": {"mean": 0.02, "n": 20}}
+             "cost_usd": {"mean": 0.02, "n": 20}}     # baseline-shaped: no p95/max — tolerated
     trailing = {"distinct_content_hashes": {"mean": 1.0, "n": 20},   # 80% drop
                 "cost_usd": {"mean": 0.06, "n": 20}}                 # 3x
     found = fds.detect_numeric_drift(trailing, prior, cfg, "short")
@@ -296,6 +313,7 @@ def test_numeric_collapse_and_spike(fds) -> None:
     assert kinds == {"distinct_content_hashes": "collapse", "cost_usd": "spike"}
     sev = {f["metric"]: f["severity"] for f in found}
     assert sev["distinct_content_hashes"] == "CRITICAL"
+    assert sev["cost_usd"] == "CRITICAL"  # fleet-wide cost burn gates the deploy round
 
 
 def test_numeric_volume_guard(fds) -> None:
@@ -303,6 +321,179 @@ def test_numeric_volume_guard(fds) -> None:
     prior = {"cost_usd": {"mean": 0.02, "n": 5}}      # n < 8
     trailing = {"cost_usd": {"mean": 0.2, "n": 20}}
     assert fds.detect_numeric_drift(trailing, prior, cfg, "short") == []
+
+
+# ── directionality-aware severity (bad signals) ───────────────────────────────
+
+def test_is_bad_signal_metric(fds) -> None:
+    assert fds.is_bad_signal_metric("failure_reason:mix_truncated")
+    assert fds.is_bad_signal_metric("status:failed_qa")
+    assert fds.is_bad_signal_metric("status:failed")
+    assert fds.is_bad_signal_metric("retried:qa_auto_retry_count")
+    assert fds.is_bad_signal_metric("gate:short_visual_gate")
+    assert fds.is_bad_signal_metric("clips_all_same_hash")
+    # good complements / good signals
+    assert not fds.is_bad_signal_metric("failure_reason:none")
+    assert not fds.is_bad_signal_metric("status:completed")
+    assert not fds.is_bad_signal_metric("motion:any")
+    assert not fds.is_bad_signal_metric("clips_present")
+    assert not fds.is_bad_signal_metric("completed")
+
+
+def test_bad_signal_collapse_is_info_improvement(fds) -> None:
+    """The reviewer's SIM: stripping mix_truncated (35% → 0%) must NOT gate deploys."""
+    cfg = fds.DriftConfig()
+    for metric in ("failure_reason:mix_truncated", "status:failed_qa",
+                   "retried:qa_auto_retry_count"):
+        prior = _stats(fds, {metric: (7, 20)})       # 35%
+        trailing = _stats(fds, {metric: (0, 20)})    # fixed!
+        found = fds.detect_prevalence_drift(trailing, prior, cfg, "short")
+        assert [f["kind"] for f in found] == ["collapse"], metric
+        assert found[0]["severity"] == "INFO", metric
+        assert "improvement" in found[0]["detail"]
+
+
+def test_failure_reason_none_collapse_stays_critical(fds) -> None:
+    """failure_reason:none collapsing = MORE failures — the good complement still gates."""
+    cfg = fds.DriftConfig()
+    prior = _stats(fds, {"failure_reason:none": (18, 20)})
+    trailing = _stats(fds, {"failure_reason:none": (2, 20)})
+    found = fds.detect_prevalence_drift(trailing, prior, cfg, "short")
+    assert [f["severity"] for f in found] == ["CRITICAL"]
+
+
+def test_improvement_only_week_exits_zero(fds) -> None:
+    """End-to-end: a week whose only drift is a stripped failure must not exit 1."""
+    cfg = fds.DriftConfig()
+    docs = []
+    for d in range(8, 14):   # prior: 35%+ of jobs fail with mix_truncated
+        docs += [job_doc(_days_ago(d + 0.1)) for _ in range(2)]
+        docs.append(job_doc(_days_ago(d + 0.1), status="failed_qa",
+                            failure_reason="mix_truncated"))
+    for d in range(0, 6):    # trailing: the fix landed — all healthy
+        docs += [job_doc(_days_ago(d + 0.1)) for _ in range(3)]
+    result = fds.run_sentinel(_rows(fds, docs), NOW, cfg)
+    assert not fds.has_critical(result)  # exit 0
+    info = [f for f in result["findings"] if f["severity"] == "INFO"]
+    assert any(f["metric"] == "failure_reason:mix_truncated" for f in info)
+    assert all(f["severity"] != "CRITICAL" for f in result["findings"])
+
+
+# ── expected-changes ack file ─────────────────────────────────────────────────
+
+def _one_critical(fds, metric="motion:parallax", segment="short") -> list[dict]:
+    cfg = fds.DriftConfig()
+    prior = _stats(fds, {metric: (18, 20)})
+    trailing = _stats(fds, {metric: (0, 20)})
+    return fds.detect_prevalence_drift(trailing, prior, cfg, segment)
+
+
+def test_apply_acks_mutes_unexpired(fds) -> None:
+    findings = _one_critical(fds)
+    acks = [{"metric": "motion:parallax", "until": "2026-08-01", "note": "flag flip PR #123"}]
+    assert fds.apply_acks(findings, acks, NOW) == 1
+    assert findings[0]["severity"] == "INFO"
+    assert findings[0]["acked"] is True
+    assert "ACKED until 2026-08-01" in findings[0]["detail"]
+    assert "flag flip PR #123" in findings[0]["detail"]
+
+
+def test_apply_acks_expired_and_mismatch_do_not_mute(fds) -> None:
+    findings = _one_critical(fds)
+    expired = [{"metric": "motion:parallax", "until": "2026-07-24"}]        # NOW is 07-25
+    wrong_seg = [{"metric": "motion:parallax", "until": "2026-08-01", "segment": "episode"}]
+    wrong_metric = [{"metric": "music_delivered", "until": "2026-08-01"}]
+    malformed = [{"metric": "motion:parallax"}, {"until": "2026-08-01"}, "junk"]
+    for acks in (expired, wrong_seg, wrong_metric, malformed):
+        assert fds.apply_acks(findings, acks, NOW) == 0
+        assert findings[0]["severity"] == "CRITICAL"
+
+
+def test_apply_acks_glob_and_until_day_inclusive(fds) -> None:
+    findings = _one_critical(fds)
+    assert fds.apply_acks(findings, [{"metric": "motion:*", "until": "2026-07-25"}], NOW) == 1
+    assert findings[0]["severity"] == "INFO"
+
+
+def test_run_sentinel_ack_mutes_deliberate_flip(fds) -> None:
+    """A deliberate motion flag-off, acked → INFO everywhere, exit 0, still visible."""
+    cfg = fds.DriftConfig()
+    docs = [job_doc(_days_ago(d + 0.1)) for d in range(8, 14) for _ in range(3)]
+    no_motion = [_clip("still", "a"), _clip("still", "b"), _clip("still", "c")]
+    docs += [job_doc(_days_ago(d + 0.1), clips=no_motion) for d in range(0, 6) for _ in range(3)]
+    acks = [{"metric": "motion:*", "until": "2026-08-09", "note": "motion flag off, PR #9"}]
+    result = fds.run_sentinel(_rows(fds, docs), NOW, cfg, acks=acks)
+    motion = [f for f in result["findings"] if f["metric"].startswith("motion:")]
+    assert motion and all(f["severity"] == "INFO" and f.get("acked") for f in motion)
+    assert not any(f["severity"] == "CRITICAL" and f["metric"].startswith("motion:")
+                   for f in result["findings"])
+    assert result["acked_count"] == len(motion)
+    # unrelated CRITICALs (none here besides motion) — exit is clean
+    assert not fds.has_critical(result)
+
+
+def test_load_acks_shapes_and_fail_open(fds, tmp_path: Path) -> None:
+    assert fds.load_acks(tmp_path) == []                       # missing
+    (tmp_path / "ack.json").write_text("not json {")
+    assert fds.load_acks(tmp_path) == []                       # malformed → fail-open
+    (tmp_path / "ack.json").write_text(json.dumps(
+        {"acks": [{"metric": "m", "until": "2026-08-01"}, "junk"]}))
+    assert fds.load_acks(tmp_path) == [{"metric": "m", "until": "2026-08-01"}]
+    (tmp_path / "ack.json").write_text(json.dumps([{"metric": "m2", "until": "2026-08-01"}]))
+    assert fds.load_acks(tmp_path) == [{"metric": "m2", "until": "2026-08-01"}]
+
+
+# ── cost channels: CRITICAL spikes, p95 cohort, max single-job outlier ────────
+
+def test_cost_mean_spike_is_critical_and_gates(fds) -> None:
+    """The reviewer's SIM: a 4x systematic cost spike must exit 1, not rot in a report."""
+    cfg = fds.DriftConfig()
+    docs = [job_doc(_days_ago(d + 0.1), cost=0.03) for d in range(8, 14) for _ in range(3)]
+    docs += [job_doc(_days_ago(d + 0.1), cost=0.12) for d in range(0, 6) for _ in range(3)]
+    result = fds.run_sentinel(_rows(fds, docs), NOW, cfg)
+    cost = [f for f in result["findings"] if f["metric"] == "cost_usd"]
+    assert cost and all(f["severity"] == "CRITICAL" and f["kind"] == "spike" for f in cost)
+    assert fds.has_critical(result)  # exit 1
+
+
+def test_cost_p95_catches_burned_cohort_mean_dilutes(fds) -> None:
+    """~9% of jobs burning 10x: mean ratio stays under 2.5x, p95 fires CRITICAL."""
+    cfg = fds.DriftConfig()
+    prior_vals = [0.03] * 70
+    trailing_vals = [0.02] * 64 + [0.3] * 6      # mean 0.044 (1.5x) — p95 0.3 (10x)
+    prior = {"cost_usd": dict(fds.window_numeric_stats(
+        [{"numerics": {"cost_usd": v}} for v in prior_vals])["cost_usd"])}
+    trailing = {"cost_usd": dict(fds.window_numeric_stats(
+        [{"numerics": {"cost_usd": v}} for v in trailing_vals])["cost_usd"])}
+    found = fds.detect_numeric_drift(trailing, prior, cfg, "short")
+    p95_hits = [f for f in found if f["metric_kind"] == "p95"]
+    assert len(p95_hits) == 1
+    assert p95_hits[0]["severity"] == "CRITICAL" and p95_hits[0]["kind"] == "spike"
+    assert not any(f["metric_kind"] == "mean" and f["kind"] == "spike" for f in found)
+
+
+def test_cost_single_burned_job_visible_via_max_outlier(fds) -> None:
+    """ONE $2 job among 70 x $0.03: invisible to mean AND p95 (the honest dilution limit) —
+    the max-vs-prior-p95 outlier channel surfaces it as a non-gating WARNING."""
+    cfg = fds.DriftConfig()
+    prior = {"cost_usd": dict(fds.window_numeric_stats(
+        [{"numerics": {"cost_usd": 0.03}} for _ in range(70)])["cost_usd"])}
+    trailing_vals = [0.03] * 69 + [2.0]
+    trailing = {"cost_usd": dict(fds.window_numeric_stats(
+        [{"numerics": {"cost_usd": v}} for v in trailing_vals])["cost_usd"])}
+    assert trailing["cost_usd"]["p95"] == pytest.approx(0.03)   # p95 dilution: unmoved
+    found = fds.detect_numeric_drift(trailing, prior, cfg, "short")
+    assert [f["kind"] for f in found] == ["outlier"]
+    f = found[0]
+    assert f["severity"] == "WARNING" and f["metric_kind"] == "max"
+    assert "single-job burn" in f["detail"]
+    assert not any(x["severity"] == "CRITICAL" for x in found)  # visible, not gating
+
+
+def test_p95_nearest_rank(fds) -> None:
+    assert fds._p95([float(v) for v in range(1, 101)]) == 95.0
+    assert fds._p95([0.03] * 69 + [2.0]) == pytest.approx(0.03)  # documented dilution limit
+    assert fds._p95([1.0]) == 1.0
 
 
 # ── gate-meta ─────────────────────────────────────────────────────────────────
@@ -411,6 +602,53 @@ def test_run_sentinel_motion_incident(fds) -> None:
     assert fds.has_critical(result)
     # CRITICAL findings sort first
     assert result["findings"][0]["severity"] == "CRITICAL"
+
+
+def test_run_sentinel_qa_mix_week_no_motion_false_positives(fds) -> None:
+    """The reviewer's SIM: a QA-campaign week 70% audio-only (wants_visuals=false) must NOT
+    fire motion:*/video_url_present CRITICALs — clips_present is the single mix-level signal."""
+    cfg = fds.DriftConfig()
+    docs = [job_doc(_days_ago(d + 0.1)) for d in range(8, 14) for _ in range(3)]  # 18 w/ clips
+    for d in range(0, 6):   # trailing: 14 audio-only QA jobs + 6 healthy clip-bearing
+        docs.append(job_doc(_days_ago(d + 0.1)))
+    for i in range(14):
+        docs.append(job_doc(_days_ago((i % 6) + 0.2), clips=[], video_url=None))
+    result = fds.run_sentinel(_rows(fds, docs), NOW, cfg)
+    assert not any(f["metric"].startswith("motion:") for f in result["findings"])
+    assert not any(f["metric"] == "video_url_present" for f in result["findings"])
+    mix = [f for f in result["findings"] if f["metric"] == "clips_present"]
+    assert len(mix) == 1 and mix[0]["kind"] == "collapse" and mix[0]["segment"] == "short"
+
+
+def test_dedupe_podcast_all_keeps_only_guard_hidden_findings(fds) -> None:
+    cfg = fds.DriftConfig()
+    # 3 shorts + 3 episodes per day: each segment window n=18, podcast_all n=36. A motion
+    # collapse in BOTH segments must appear once per segment, never duplicated in podcast_all.
+    docs = []
+    still = [_clip("still", "a"), _clip("still", "b"), _clip("still", "c")]
+    for d in range(8, 14):
+        docs += [job_doc(_days_ago(d + 0.1)) for _ in range(3)]
+        docs += [job_doc(_days_ago(d + 0.1), fmt="dialogue") for _ in range(3)]
+    for d in range(0, 6):
+        docs += [job_doc(_days_ago(d + 0.1), clips=still) for _ in range(3)]
+        docs += [job_doc(_days_ago(d + 0.1), fmt="dialogue", clips=still) for _ in range(3)]
+    result = fds.run_sentinel(_rows(fds, docs), NOW, cfg)
+    segs = [f["segment"] for f in result["findings"] if f["metric"] == "motion:any"]
+    assert sorted(segs) == ["episode", "short"]  # podcast_all duplicate removed
+
+    # But when per-segment volume guards hide the drift (5 shorts + 5 episodes per window,
+    # each < 8), the fleet-wide podcast_all (10 >= 8) finding survives — its whole purpose.
+    small = []
+    for d in range(8, 13):
+        small.append(job_doc(_days_ago(d + 0.1)))
+        small.append(job_doc(_days_ago(d + 0.1), fmt="dialogue"))
+    for d in range(0, 5):
+        small.append(job_doc(_days_ago(d + 0.1), clips=still))
+        small.append(job_doc(_days_ago(d + 0.1), fmt="dialogue", clips=still))
+    result_small = fds.run_sentinel(_rows(fds, small), NOW, cfg)
+    segs_small = {f["segment"] for f in result_small["findings"]
+                  if f["metric"] == "motion:any"}
+    assert segs_small == {"podcast_all"}
 
 
 def test_run_sentinel_healthy_fleet_quiet(fds) -> None:

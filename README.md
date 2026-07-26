@@ -168,15 +168,29 @@ kqa run --audio audio.mp3 --request "..." --language es
 deterministic, read-only battery over `podcast_jobs` + `writeups` (Firestore field projections —
 never full 1MiB docs) that compares the trailing 7 days against the prior 7 days and alerts on:
 
-- **collapse** (CRITICAL) — a feature the fleet used to produce went dark (prior >= 30%
-  prevalence, >= 60% relative drop): motion clips (parallax/kenburns/video), music delivery,
-  surfaced `video_url`, clip variety, writeup figures/SEO/sources, completion rate, cost rollups.
-- **spike** (WARNING) — a failure reason / retry counter / cost mean grew >= 2.5x.
+- **collapse of a GOOD signal** (CRITICAL, exit 1) — a feature the fleet used to produce went
+  dark (prior >= 30% prevalence, >= 60% relative drop): motion clips (parallax/kenburns/video),
+  music delivery, surfaced `video_url`, clip variety, writeup figures/SEO/sources, completion
+  rate, cost rollups. Severity is **directionality-aware**: a BAD-signal family
+  (`failure_reason:*` except none, `status:failed*`, `retried:*`, `gate:*`) collapsing is an
+  IMPROVEMENT → INFO, never exit 1; those families **spiking** >= 2.5x is CRITICAL.
+- **cost spikes are CRITICAL** — `cost_usd`/`credits_used` mean or p95 growing >= 2.5x (with
+  volume) exits 1; a **single burned job** among ~70 (invisible to mean AND p95 — the honest
+  dilution limit) surfaces via the max-vs-prior-p95 **outlier** channel (WARNING, non-gating).
+- **applicability-aware denominators** — `motion:*`/`video_url_present` count only clip-bearing
+  jobs; `clips_present` is the single mix-level signal, so audio-only/QA-campaign weeks
+  (`wants_visuals: false`) can't fake a motion collapse.
+- **expected-changes ack** — deliberate flips (flag off, feature removal, QA campaign) are muted
+  to INFO via `scratch/reports/drift/ack.json`:
+  `{"acks": [{"metric": "motion:*", "until": "2026-08-01", "segment": "short", "note": "…"}]}`
+  (fnmatch metric globs; entries expire after their date; malformed file fail-opens to no acks).
 - **gate-meta** (CRITICAL) — a QA gate axis failing >= 80% of gated jobs: the gate is punishing
   a symptom the pipeline manufactures (the 2026-07 motion incident: a 100%-failing visual gate
   was itself an unread alarm). Minimum-volume guards (>= 8 jobs/window/segment) everywhere.
 - **transition + suspects** — each flagged metric is bisected to its first collapsed daily
   bucket and correlated against `gcloud run revisions list` deploy times (2-3 nearest suspects).
+  `podcast_all` findings duplicating an identical short/episode finding are deduped —
+  `podcast_all` only surfaces fleet-wide drift the per-segment volume guards would hide.
 
 ```bash
 python3 scripts/fleet_drift_sentinel.py                  # 7d vs prior 7d → report + exit code
