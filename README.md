@@ -162,6 +162,35 @@ Currently optimized for:
 kqa run --audio audio.mp3 --request "..." --language es
 ```
 
+## Fleet Drift Sentinel (dark-feature detector)
+
+`scripts/fleet_drift_sentinel.py` is the standing **dark-feature / fleet-drift detector**: a $0,
+deterministic, read-only battery over `podcast_jobs` + `writeups` (Firestore field projections —
+never full 1MiB docs) that compares the trailing 7 days against the prior 7 days and alerts on:
+
+- **collapse** (CRITICAL) — a feature the fleet used to produce went dark (prior >= 30%
+  prevalence, >= 60% relative drop): motion clips (parallax/kenburns/video), music delivery,
+  surfaced `video_url`, clip variety, writeup figures/SEO/sources, completion rate, cost rollups.
+- **spike** (WARNING) — a failure reason / retry counter / cost mean grew >= 2.5x.
+- **gate-meta** (CRITICAL) — a QA gate axis failing >= 80% of gated jobs: the gate is punishing
+  a symptom the pipeline manufactures (the 2026-07 motion incident: a 100%-failing visual gate
+  was itself an unread alarm). Minimum-volume guards (>= 8 jobs/window/segment) everywhere.
+- **transition + suspects** — each flagged metric is bisected to its first collapsed daily
+  bucket and correlated against `gcloud run revisions list` deploy times (2-3 nearest suspects).
+
+```bash
+python3 scripts/fleet_drift_sentinel.py                  # 7d vs prior 7d → report + exit code
+python3 scripts/fleet_drift_sentinel.py --once-baseline  # cold start: persist current battery
+python3 scripts/fleet_drift_sentinel.py --quiet          # cron mode (files + exit code only)
+```
+
+**When to run:** once per deploy round — it exits 1 on any CRITICAL finding, so it can gate the
+round — and it is cron/loop-schedulable for a standing watch (scheduling infra is a founder
+follow-up). Reports land in `scratch/reports/drift/YYYY-MM-DD.{md,json}`. Detection logic is
+pure-function and unit-tested with synthetic docs (`tests/test_fleet_drift_sentinel.py`); the
+Firestore/gcloud readers are thin adapters. No LLM calls, no generation, no job mutation
+(Tenet 9).
+
 ## Improvement Feedback (Beta)
 
 When QA stages fail, the system generates actionable improvement feedback that can be used to create a feedback loop for continuous improvement.

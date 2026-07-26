@@ -2,6 +2,23 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-07-25 — Fleet Drift Sentinel (cost-NEUTRAL, $0)
+
+**Files:** `scripts/fleet_drift_sentinel.py` (new), `tests/test_fleet_drift_sentinel.py` (new),
+README section.
+
+**Context:** standing dark-feature detector born from the 2026-07 motion incident (zero jobs
+surfaced parallax/kenburns for ~2 days and nothing alerted; the visual gate hard-failing ~100%
+of shorts was itself an unread alarm). Trailing-vs-prior-window prevalence battery over
+`podcast_jobs` + `writeups` with collapse/spike/gate-meta detection, transition-date bisection,
+and deploy-revision correlation.
+
+**Per-unit $ delta: $0.** No LLM/judge/generation call anywhere — Firestore field PROJECTIONS
+(`.select`, never full docs) over data the pipeline already wrote, plus optional
+`gcloud run revisions list` (free API reads). Read-only by construction (Tenet 9); exit code 1
+on CRITICAL findings lets it gate a deploy round at zero verification spend. No pricing-page
+implication.
+
 ## 2026-07-09 — Measured Quality Engine: EPISODES + COURSES extension (cost-NEUTRAL)
 
 **Files:** `src/kitesforu_qa/harness/quality_matrix.py`, `scripts/quality_matrix.py` (new
