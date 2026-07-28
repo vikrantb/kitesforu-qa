@@ -1334,3 +1334,79 @@ def motion_not_silently_dead(art):
         f"the silent-feature-death class, not a config choice — check the flag-to-effect "
         f"path, not the flag."
     )
+
+
+# ── VISUAL MONOTONY — "the same image dancing" ───────────────────────────────────
+# Founder, 2026-07-27, on job eaf99101: "the visuals were horrible, a boring screen and
+# same image dancing. havent i told u i need to see a new fresh beautiful image every 2
+# seconds or zoom to some other part."
+#
+# WHY DURATION ALONE (visual.cadence, above) CANNOT SEE THIS. eaf99101's 67-second beat WAS
+# correctly re-cut into 8 sub-windows of ~8.4s each. Every per-clip duration therefore looks
+# healthy. The problem is that all 8 sub-windows show THE SAME PICTURE. Cadence measures how
+# long a CLIP lasts; monotony measures how long an IMAGE lasts. A job can pass cadence and
+# still be one diagram for two minutes.
+#
+# MEASURED FLEET BASELINE (2026-07-27, n=85 completed jobs with >=5 clips and >=30s runtime,
+# counting ONLY clips that actually carry a picture):
+#     median top-1 asset share = 49% of runtime
+#     median top-3 asset share = 95%
+#     median distinct assets/min = 3.2
+#     8+ jobs had top-1 share = 100% -- ONE image for the entire video
+#     (6f7a697b 68s, dbcf37b8 77s, 831123a1 52s -- each exactly ONE real asset)
+# A separate 3 jobs are worse still and are NOT monotony: every clip failed with
+# skipped_no_asset, yet the job is `completed` with visuals_quality 40 and zero delivered
+# pictures (a14129ec). Keying on `str(hash or uri)` would map those to the string "None" and
+# report a tidy "1 unique image" -- which is why _asset_key returns "" and this check skips
+# them outright. Never let "no images" masquerade as "one image".
+# eaf99101 itself measured top-1 = 28%, 29 unique, 4.8/min -- i.e. BETTER than the median job.
+# The founder complained about an above-average episode; the fleet is worse.
+#
+# THRESHOLDS ARE DELIBERATELY NOT SET FROM THAT DISTRIBUTION. Calibrating to the median would
+# bless the defect -- half the fleet would "pass" while showing one image for half the runtime.
+# They are set from the FOUNDER'S STANDARD, loosened to a floor a reasonable episode clears:
+# his stated want is a fresh image every ~2s (30/min); these fire only at genuine monotony.
+# Expect most CURRENT jobs to fail. That is the correct, actionable signal, not a mis-set gate.
+_MONOTONY_TOP1_MAX = 0.25    # no single image may own more than a quarter of the runtime
+_MONOTONY_TOP3_MAX = 0.60    # nor three images more than 60%
+_MONOTONY_MIN_PER_MIN = 6.0  # at least one fresh image every ~10s on average
+
+
+def _asset_key(c: dict[str, Any]) -> str:
+    """Identity of the PICTURE a clip shows. content_hash is authoritative (two clips rendering
+    identical specs dedupe to the same hash and therefore the same pixels); asset_uri is the
+    fallback for clips that predate hashing."""
+    return str(c.get("content_hash") or c.get("asset_uri") or "")
+
+
+@check("visual.monotony", dimension=_DIMENSION, severity="high")
+def monotony(art):
+    "No small set of images may own the runtime — the 'same image dancing' defect."
+    clips = _require_clips(art)
+    secs: dict[str, float] = {}
+    for c in clips:
+        key = _asset_key(c)
+        if not key:
+            continue
+        secs[key] = secs.get(key, 0.0) + _clip_seconds(c)
+    total = sum(secs.values())
+    if total <= 0 or not secs:
+        skip("no per-clip durations or asset identities on this artifact")
+    ranked = sorted(secs.values(), reverse=True)
+    top1 = ranked[0] / total
+    top3 = sum(ranked[:3]) / total
+    per_min = len(secs) / (total / 60.0)
+
+    problems: list[str] = []
+    if top1 > _MONOTONY_TOP1_MAX:
+        problems.append(f"one image owns {top1:.0%} of runtime (max {_MONOTONY_TOP1_MAX:.0%})")
+    if top3 > _MONOTONY_TOP3_MAX and len(secs) > 3:
+        problems.append(f"top-3 own {top3:.0%} (max {_MONOTONY_TOP3_MAX:.0%})")
+    if per_min < _MONOTONY_MIN_PER_MIN:
+        problems.append(f"{per_min:.1f} distinct images/min (min {_MONOTONY_MIN_PER_MIN:.0f})")
+
+    return not problems, (
+        f"{len(secs)} distinct images over {total:.0f}s · {per_min:.1f}/min · "
+        f"top-1 {top1:.0%} · top-3 {top3:.0%}"
+        + (f" — {'; '.join(problems)}" if problems else "")
+    )
