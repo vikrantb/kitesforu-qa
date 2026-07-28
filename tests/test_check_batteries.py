@@ -844,3 +844,98 @@ def test_scorecard_fully_loaded_artifact_passes(tmp_path):
     for d in ("audio-mix", "visual-images", "video-sync", "music-sfx"):
         assert summary["dimensions"][d]["passed"], (d, summary["all_issues"])
     assert summary["passed"], summary["all_issues"]
+
+
+# ── visual.pictorial_share — depiction vs typography ─────────────────────────────
+# Founder, 2026-07-27: "pass means its not just if things just work, check a couple
+# quality as well". Counting DISTINCT assets passed a born-short whose every frame was
+# narration set in type. These pins use the REAL measured colour bands from job
+# 6115ced2 / eaf99101 renders: cards 480-900 distinct colours, depictions 1000-1250.
+
+def _typography_card(path: str) -> str:
+    """A flat navy gradient + a few glyph-ish strokes — what a key-term card really is."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (720, 1280), (11, 16, 32))
+    d = ImageDraw.Draw(img)
+    for y in range(1280):                      # gentle vertical gradient, few colours
+        d.line([(0, y), (720, y)], fill=(11, 16 + y // 160, 32 + y // 80))
+    for i in range(6):                         # "text" strokes, all one ink colour
+        d.rectangle([80, 300 + i * 70, 640, 330 + i * 70], fill=(232, 236, 245))
+    img.save(path)
+    return path
+
+
+def _depiction_figure(path: str) -> str:
+    """A drawn figure — many distinct hues, as a mermaid/chart render produces."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (720, 1280), (11, 16, 32))
+    d = ImageDraw.Draw(img)
+    for i in range(40):
+        c = ((i * 37) % 256, (i * 91) % 256, (i * 53) % 256)
+        d.ellipse([40 + (i % 5) * 130, 80 + (i // 5) * 140,
+                   150 + (i % 5) * 130, 190 + (i // 5) * 140], fill=c, outline=(255, 255, 255))
+    img.save(path)
+    return path
+
+
+def _pictorial_doc(n_cards: int, n_figs: int) -> dict:
+    doc = _base_doc()
+    clips = []
+    for i in range(n_cards):
+        clips.append({"beat_index": i, "modality": "diagram", "render_mode": "image",
+                      "aspect_ratio": "9:16", "asset_uri": f"gs://x/card{i}.png"})
+    for j in range(n_figs):
+        clips.append({"beat_index": n_cards + j, "modality": "diagram", "render_mode": "image",
+                      "aspect_ratio": "9:16", "asset_uri": f"gs://x/fig{j}.png"})
+    doc["visual"] = {"clips": clips}
+    return doc
+
+
+def _pictorial_result(art):
+    _sr, by = _gating_results(art, "visual-images")
+    return by["visual.pictorial_share"]
+
+
+def test_pictorial_share_fails_a_wall_of_text_cards(tmp_path):
+    """The witness: many DISTINCT assets that are all typography must NOT pass."""
+    doc = _pictorial_doc(n_cards=8, n_figs=1)
+    paths = [_typography_card(str(tmp_path / f"card{i}.png")) for i in range(8)]
+    paths.append(_depiction_figure(str(tmp_path / "fig0.png")))
+    r = _pictorial_result(Artifact.from_doc(doc, image_paths=paths))
+    assert not r["skipped"], r["evidence"]
+    assert not r["passed"], f"8 text cards + 1 figure must FAIL pictorial share: {r['evidence']}"
+
+
+def test_pictorial_share_passes_when_a_majority_depict(tmp_path):
+    doc = _pictorial_doc(n_cards=2, n_figs=6)
+    paths = [_typography_card(str(tmp_path / f"card{i}.png")) for i in range(2)]
+    paths += [_depiction_figure(str(tmp_path / f"fig{j}.png")) for j in range(6)]
+    r = _pictorial_result(Artifact.from_doc(doc, image_paths=paths))
+    assert not r["skipped"], r["evidence"]
+    assert r["passed"], f"6 figures vs 2 cards must PASS: {r['evidence']}"
+
+
+def test_pictorial_share_separates_the_two_real_colour_bands(tmp_path):
+    """Premise pin: the proxy must actually separate a card from a figure. If a future
+    card style gets richer (or the threshold drifts), this fails loudly rather than the
+    gate silently passing everything."""
+    from PIL import Image
+
+    from kitesforu_qa.harness.checks.visual import (
+        _PICTORIAL_MIN_COLOURS,
+        _colour_variety,
+    )
+    with Image.open(_typography_card(str(tmp_path / "c.png"))) as im:
+        card_n = _colour_variety(im)
+    with Image.open(_depiction_figure(str(tmp_path / "f.png"))) as im:
+        fig_n = _colour_variety(im)
+    assert card_n < _PICTORIAL_MIN_COLOURS <= fig_n, (
+        f"proxy no longer separates the bands: card={card_n} figure={fig_n} "
+        f"threshold={_PICTORIAL_MIN_COLOURS}"
+    )
+
+
+def test_pictorial_share_skips_rather_than_lies_when_no_assets(tmp_path):
+    """Offline docs with no downloaded renders must SKIP, never silently pass."""
+    r = _pictorial_result(Artifact.from_doc(_pictorial_doc(2, 2), image_paths=[]))
+    assert r["skipped"], f"no assets must SKIP, got: {r['evidence']}"
