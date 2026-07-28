@@ -857,6 +857,8 @@ _FIXTURES = Path(__file__).parent / "fixtures" / "pictorial"
 REAL_TEXT_CARD = str(_FIXTURES / "real_text_card.png")        # narration set in type
 REAL_HEADLINE_CARD = str(_FIXTURES / "real_headline_card.png")  # bold full-width headline
 REAL_FLOWCHART = str(_FIXTURES / "real_flowchart.png")        # Prompt -> AI -> Output
+# A 16:9 EPISODE diagram — the case a horizontal-only signal misgraded (see below).
+REAL_SEQ_16X9 = str(_FIXTURES / "real_sequence_diagram_16x9.png")
 
 
 def _pictorial_doc(cards: int, figs: int) -> dict:
@@ -939,3 +941,37 @@ def test_pictorial_share_passes_when_a_majority_depict(tmp_path):
 def test_pictorial_share_skips_rather_than_lies_when_no_assets():
     r = _pictorial_result(Artifact.from_doc(_pictorial_doc(2, 2), image_paths=[]))
     assert r["skipped"], f"no assets must SKIP, got: {r['evidence']}"
+
+
+def test_pictorial_scores_both_axes_not_just_width():
+    """REGRESSION (2026-07-28): the first stroke version scored HORIZONTAL runs only.
+    It was calibrated on 9:16 born-shorts, where a box border spans most of the width.
+    On a 16:9 EPISODE the same diagram is proportionally narrower, so this real sequence
+    diagram (tele -> model -> alert -> play -> contain, labelled arrows) scored 0.178
+    horizontally and was called TYPOGRAPHY — while its lifelines ran 0.517 of the HEIGHT.
+    Scoring max(h, v) fixes it; caught by LOOKING at a frame the check had misgraded."""
+    from PIL import Image
+
+    from kitesforu_qa.harness.checks.visual import (
+        _PICTORIAL_MIN_STROKE,
+        _max_ink_run_frac,
+    )
+    with Image.open(REAL_SEQ_16X9) as im:
+        score = _max_ink_run_frac(im)
+    assert score >= _PICTORIAL_MIN_STROKE, (
+        f"a real 16:9 sequence diagram must read as a depiction; got {score:.3f}. "
+        f"A width-only signal scores it 0.178 and misgrades every landscape diagram."
+    )
+
+
+def test_landscape_fix_does_not_disturb_portrait_calibration():
+    """max(h, v) must not turn a portrait text card into a depiction."""
+    from PIL import Image
+
+    from kitesforu_qa.harness.checks.visual import (
+        _PICTORIAL_MIN_STROKE,
+        _max_ink_run_frac,
+    )
+    for path in (REAL_TEXT_CARD, REAL_HEADLINE_CARD):
+        with Image.open(path) as im:
+            assert _max_ink_run_frac(im) < _PICTORIAL_MIN_STROKE, path
