@@ -708,12 +708,41 @@ def _non_bg_fraction(img) -> float:
     return ink / (w * h)
 
 
+def _job_usable_height_frac(art) -> float:
+    """The fraction of frame height this job's engines were ALLOWED to paint.
+
+    Read from the workers' per-clip `usable_height_frac` stamp (workers #1897, declared in
+    kitesforu-schemas 2.56.0). Every clip in a job shares one render aspect, so one value describes
+    the job. Returns 1.0 when NO clip carries the stamp — every legacy clip, making the caller
+    byte-identical to its pre-stamp behaviour. Never raises."""
+    try:
+        for c in _clips(art):
+            v = c.get("usable_height_frac") if isinstance(c, dict) else None
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 < float(v) <= 1.0:
+                return float(v)
+    except Exception:  # noqa: BLE001 — a missing stamp must never break the check
+        pass
+    return 1.0
+
+
 @check("visual.diagram_fills_frame", dimension=_DIMENSION, severity="critical")
 def diagram_fills_frame(art):
     "Diagrams must FILL the frame (>20% painted) — catches the inline-block 'tiny strip' regression."
     _require_visuals(art)
     paths = _require_diagram_paths(art)
     from PIL import Image
+    # DIVIDE BY THE REGION THE ENGINE WAS ALLOWED TO PAINT, not the whole frame.
+    # On a 9:16 short the burned kinetic caption owns a fixed lower band, so
+    # `render.safe_area.usable_diagram_height` caps a diagram's drawing area at
+    # `caption_band_top_frac()` (~0.62) and every engine honours that cap. Measured on a real
+    # schematic: it fills 84% of its usable region and only 52% of the FRAME — against a flat
+    # 20%-of-frame floor that reads as "fine", and against any raised floor it would read as thin.
+    # Painted-area/full-frame is simply the wrong question for portrait.
+    # The workers stamp `usable_height_frac` per clip (workers #1897, schemas 2.56.0) precisely so
+    # this consumer reads what the render ACTUALLY used instead of re-deriving a constant it cannot
+    # import — a hardcoded 0.62 here would drift the moment the caption band is tuned.
+    # ABSENT (every legacy clip, and any non-stamped path) -> 1.0 -> BYTE-IDENTICAL to today.
+    usable = _job_usable_height_frac(art)
     thin = []
     worst = 1.0
     for p in paths:
@@ -722,10 +751,15 @@ def diagram_fills_frame(art):
                 frac = _non_bg_fraction(img)
         except Exception:  # noqa: BLE001
             continue
+        # Fraction OF THE ALLOWED REGION. usable == 1.0 leaves this exactly as before.
+        frac = min(1.0, frac / usable) if usable > 0 else frac
         worst = min(worst, frac)
         if frac < _FILL_MIN_FRAC:
             thin.append(f"{p.rsplit('/', 1)[-1]}({frac:.0%})")
-    return not thin, f"{len(thin)} diagram(s) fill <{_FILL_MIN_FRAC:.0%} (worst {worst:.0%}): {thin[:3]}"
+    _note = "" if usable >= 1.0 else f" [of usable {usable:.0%} of frame]"
+    return not thin, (
+        f"{len(thin)} diagram(s) fill <{_FILL_MIN_FRAC:.0%} (worst {worst:.0%}){_note}: {thin[:3]}"
+    )
 
 
 @check("visual.diagram_not_blank", dimension=_DIMENSION, severity="critical")
