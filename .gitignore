@@ -107,3 +107,6 @@ docker/output/
 
 # Vision Vault — visual assets sit at kitesforu/.vision_vault/ (7-day prune)
 .vision_vault/
+
+.worktrees/
+.claude/worktrees/
