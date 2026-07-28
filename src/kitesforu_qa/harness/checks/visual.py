@@ -1154,7 +1154,16 @@ _STROKE_INK_TOL = 40
 
 
 def _max_ink_run_frac(img) -> float:
-    """Longest horizontal run of contiguous ink, as a fraction of width. Pure PIL+numpy."""
+    """Longest contiguous ink run in EITHER axis, as a fraction of that axis. Pure PIL+numpy.
+
+    BOTH axes, and that is load-bearing (found by looking at a misgraded frame, 2026-07-28).
+    A horizontal-only version was calibrated on 9:16 born-shorts, where a box border spans
+    most of the width. On a 16:9 EPISODE the same diagram is proportionally narrower, so a
+    real sequence diagram (tele -> model -> alert -> play -> contain, labelled arrows)
+    scored 0.178 horizontally and was called typography — while its lifelines ran 0.517 of
+    the HEIGHT. Scoring max(h, v) classifies it correctly and leaves every portrait case
+    unchanged (typography 0.058/0.189, flowchart 0.589 either way).
+    """
     import numpy as np
 
     small = img.convert("RGB").resize((360, 640))
@@ -1162,17 +1171,21 @@ def _max_ink_run_frac(img) -> float:
     vals, counts = np.unique(a.reshape(-1, 3), axis=0, return_counts=True)
     bg = vals[counts.argmax()]
     ink = np.abs(a - bg).max(axis=2) > _STROKE_INK_TOL
-    width = ink.shape[1]
-    best = 0
-    for row in ink:
-        edges = np.flatnonzero(
-            np.diff(np.concatenate(([0], row.view(np.int8), [0])))
-        )
-        if edges.size:
-            runs = edges[1::2] - edges[0::2]
-            if runs.size:
-                best = max(best, int(runs.max()))
-    return best / float(width or 1)
+
+    def _longest(mask) -> int:
+        best = 0
+        for row in mask:
+            edges = np.flatnonzero(
+                np.diff(np.concatenate(([0], row.view(np.int8), [0])))
+            )
+            if edges.size:
+                runs = edges[1::2] - edges[0::2]
+                if runs.size:
+                    best = max(best, int(runs.max()))
+        return best
+
+    h, w = ink.shape
+    return max(_longest(ink) / float(w or 1), _longest(ink.T) / float(h or 1))
 
 
 @check("visual.pictorial_share", dimension=_DIMENSION, severity="high")
