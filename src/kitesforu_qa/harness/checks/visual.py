@@ -1121,3 +1121,84 @@ def text_in_safe_area(art):
     ok = not outside
     return ok, (f"{len(outside)} word(s) outside the {_TEXT_SAFE_MARGIN_FRAC:.0%} safe area over "
                 f"{assessed} beat(s) sampled: {outside[:5]}")
+
+
+# ── PICTORIAL SHARE — does a "diagram" DEPICT, or is it type? (stroke-based) ──────
+# Founder, 2026-07-27: "pass means its not just if things just work, check a couple
+# quality as well". Counting DISTINCT assets is not enough — twelve different TEXT
+# CARDS are twelve distinct assets and still a wall of typography.
+#
+# ⚠️ THE FIRST ATTEMPT AT THIS CHECK WAS WRONG AND WAS REVERTED (#80 -> #81). It scored
+# COLOUR VARIETY, assuming "card = flat gradient, figure = rich". Our renderers are the
+# OPPOSITE: the card renderer paints a purple gradient + watermark leaf (many colours),
+# the diagram renderer uses a flat studio palette (few). It measured gradient smoothness
+# and was inverted in BOTH directions — its top-scoring "depiction" was narration set in
+# type; its bottom-scoring "typography" was a real flowchart. Do NOT reintroduce a
+# colour-variety gate.
+#
+# What actually separates the two is STROKE GEOMETRY, which no palette choice affects: a
+# box border or an arrow is a LONG CONTINUOUS run of ink across a row; a glyph never is.
+# "Ink" is measured against each frame's OWN modal background colour, so the check is
+# palette-independent by construction — the exact property the reverted version lacked.
+#
+# CALIBRATED on 15 hand-labelled real renders from job 38e591f2 (each one VIEWED):
+#     typography  0.042 - 0.189   (11 frames, incl. a bold full-width headline)
+#     depictions  0.589 - 0.856   (4 frames: wired flowcharts)
+# The gap between 0.189 and 0.589 is empty; the threshold sits in the middle of it.
+# A photographic scene render scores HIGH (most of the frame differs from its modal
+# colour) — correct, a photo depicts. A near-blank frame scores low; blankness is
+# already covered by ``visual.diagram_not_blank``.
+_PICTORIAL_MIN_STROKE = 0.35
+_PICTORIAL_MIN_SHARE = 0.50
+_STROKE_INK_TOL = 40
+
+
+def _max_ink_run_frac(img) -> float:
+    """Longest horizontal run of contiguous ink, as a fraction of width. Pure PIL+numpy."""
+    import numpy as np
+
+    small = img.convert("RGB").resize((360, 640))
+    a = np.asarray(small).astype(int)
+    vals, counts = np.unique(a.reshape(-1, 3), axis=0, return_counts=True)
+    bg = vals[counts.argmax()]
+    ink = np.abs(a - bg).max(axis=2) > _STROKE_INK_TOL
+    width = ink.shape[1]
+    best = 0
+    for row in ink:
+        edges = np.flatnonzero(
+            np.diff(np.concatenate(([0], row.view(np.int8), [0])))
+        )
+        if edges.size:
+            runs = edges[1::2] - edges[0::2]
+            if runs.size:
+                best = max(best, int(runs.max()))
+    return best / float(width or 1)
+
+
+@check("visual.pictorial_share", dimension=_DIMENSION, severity="high")
+def pictorial_share(art):
+    "A majority of structural visuals must DEPICT something, not just set text."
+    _require_visuals(art)
+    paths = _require_diagram_paths(art)
+    from PIL import Image
+    typography: list[str] = []
+    depicting = 0
+    assessed = 0
+    for p in paths:
+        try:
+            with Image.open(p) as img:
+                stroke = _max_ink_run_frac(img)
+        except Exception:  # noqa: BLE001 — unreadable file; other assets still assessed
+            continue
+        assessed += 1
+        if stroke >= _PICTORIAL_MIN_STROKE:
+            depicting += 1
+        else:
+            typography.append(f"{p.rsplit('/', 1)[-1]}({stroke:.2f})")
+    if assessed == 0:
+        skip("no readable structural renders to assess")
+    share = depicting / assessed
+    return share >= _PICTORIAL_MIN_SHARE, (
+        f"{depicting}/{assessed} structural visuals depict ({share:.0%}; "
+        f"want >={_PICTORIAL_MIN_SHARE:.0%}) — typography: {typography[:3]}"
+    )
