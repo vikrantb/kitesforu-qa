@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -844,3 +845,97 @@ def test_scorecard_fully_loaded_artifact_passes(tmp_path):
     for d in ("audio-mix", "visual-images", "video-sync", "music-sfx"):
         assert summary["dimensions"][d]["passed"], (d, summary["all_issues"])
     assert summary["passed"], summary["all_issues"]
+
+
+# ── visual.pictorial_share (stroke-based) ────────────────────────────────────────
+# The FIRST version scored COLOUR VARIETY and was inverted for our renderers (#80 ->
+# reverted in #81): its top-scoring "depiction" was narration set in type, its
+# bottom-scoring "typography" was a real flowchart. These fixtures are the ACTUAL
+# renders from job 38e591f2 (downscaled to what the check measures anyway), each one
+# viewed and hand-labelled — synthetic fixtures are what let v1 ship broken.
+_FIXTURES = Path(__file__).parent / "fixtures" / "pictorial"
+REAL_TEXT_CARD = str(_FIXTURES / "real_text_card.png")        # narration set in type
+REAL_HEADLINE_CARD = str(_FIXTURES / "real_headline_card.png")  # bold full-width headline
+REAL_FLOWCHART = str(_FIXTURES / "real_flowchart.png")        # Prompt -> AI -> Output
+
+
+def _pictorial_doc(cards: int, figs: int) -> dict:
+    doc = _base_doc()
+    clips = [
+        {"beat_index": i, "modality": "diagram", "render_mode": "image",
+         "aspect_ratio": "9:16", "asset_uri": f"gs://x/card{i}.png"}
+        for i in range(cards)
+    ] + [
+        {"beat_index": cards + j, "modality": "diagram", "render_mode": "image",
+         "aspect_ratio": "9:16", "asset_uri": f"gs://x/fig{j}.png"}
+        for j in range(figs)
+    ]
+    doc["visual"] = {"clips": clips}
+    return doc
+
+
+def _stage(tmp_path, cards: int, figs: int) -> list[str]:
+    out = []
+    for i in range(cards):
+        p = tmp_path / f"card{i}.png"
+        shutil.copy(REAL_TEXT_CARD if i % 2 == 0 else REAL_HEADLINE_CARD, p)
+        out.append(str(p))
+    for j in range(figs):
+        p = tmp_path / f"fig{j}.png"
+        shutil.copy(REAL_FLOWCHART, p)
+        out.append(str(p))
+    return out
+
+
+def _pictorial_result(art):
+    _sr, by = _gating_results(art, "visual-images")
+    return by["visual.pictorial_share"]
+
+
+def test_pictorial_signal_separates_real_card_from_real_flowchart():
+    """PREMISE PIN — the reason v1 shipped broken. If a renderer restyle collapses this
+    separation, fail HERE instead of silently mis-grading every job."""
+    from PIL import Image
+
+    from kitesforu_qa.harness.checks.visual import (
+        _PICTORIAL_MIN_STROKE,
+        _max_ink_run_frac,
+    )
+    scores = {}
+    for name, path in (("text", REAL_TEXT_CARD), ("headline", REAL_HEADLINE_CARD),
+                       ("flow", REAL_FLOWCHART)):
+        with Image.open(path) as im:
+            scores[name] = _max_ink_run_frac(im)
+    assert scores["text"] < _PICTORIAL_MIN_STROKE, scores
+    assert scores["headline"] < _PICTORIAL_MIN_STROKE, (
+        f"a bold full-width headline card must still read as typography: {scores}"
+    )
+    assert scores["flow"] >= _PICTORIAL_MIN_STROKE, scores
+
+
+def test_pictorial_not_fooled_by_the_gradient_that_broke_v1():
+    """v1 scored this exact card HIGHEST of all and called it a depiction."""
+    from PIL import Image
+
+    from kitesforu_qa.harness.checks.visual import _max_ink_run_frac
+    with Image.open(REAL_TEXT_CARD) as im:
+        assert _max_ink_run_frac(im) < 0.35
+
+
+def test_pictorial_share_fails_a_wall_of_text_cards(tmp_path):
+    r = _pictorial_result(Artifact.from_doc(
+        _pictorial_doc(8, 1), image_paths=_stage(tmp_path, 8, 1)))
+    assert not r["skipped"], r["evidence"]
+    assert not r["passed"], f"8 real cards + 1 flowchart must FAIL: {r['evidence']}"
+
+
+def test_pictorial_share_passes_when_a_majority_depict(tmp_path):
+    r = _pictorial_result(Artifact.from_doc(
+        _pictorial_doc(2, 6), image_paths=_stage(tmp_path, 2, 6)))
+    assert not r["skipped"], r["evidence"]
+    assert r["passed"], f"6 flowcharts vs 2 cards must PASS: {r['evidence']}"
+
+
+def test_pictorial_share_skips_rather_than_lies_when_no_assets():
+    r = _pictorial_result(Artifact.from_doc(_pictorial_doc(2, 2), image_paths=[]))
+    assert r["skipped"], f"no assets must SKIP, got: {r['evidence']}"
