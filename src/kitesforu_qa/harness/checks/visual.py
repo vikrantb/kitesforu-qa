@@ -1215,3 +1215,122 @@ def pictorial_share(art):
         f"{depicting}/{assessed} structural visuals depict ({share:.0%}; "
         f"want >={_PICTORIAL_MIN_SHARE:.0%}) — typography: {typography[:3]}"
     )
+
+
+# ── CADENCE — is anything HAPPENING, or is one frame held forever? ───────────────
+# Founder, 2026-07-28, on job eaf99101: "the visuals were horrible, a boring screen
+# and same image dancing. havent i told u i need to see a new fresh beautiful image
+# every 2 seconds or zoom to some other part. see there has to be always something
+# happening."
+#
+# THIS AXIS WAS COMPLETELY UNMEASURED. The battery scored WHAT an image is (pictorial
+# share, legibility, fill, safe-area) and never whether it CHANGES. So a job could pass
+# every visual check while holding ONE still frame for 67 SECONDS — which is exactly
+# what eaf99101 delivered:
+#     mean hold 7.58s · median 4.95s · MAX 67.39s · 26 of 48 clips over 4s
+#     rendered_motion_clips 0 · render_modes {still: 48} · 31 of 48 with NO motion_preset
+# The only alarm was the founder watching it. That is the failure this check ends.
+#
+# Two independent ways to be boring, so two signals:
+#   (a) DWELL — a single asset holding the frame far past the ~2s target.
+#   (b) STILLNESS — nothing moving: no motion clips AND no Ken Burns preset, so even a
+#       long hold has no drift to carry it.
+# Thresholds are deliberately LENIENT vs the founder's 2s ask: this is a regression
+# alarm, not a style gate. A job that trips these is broken, not merely unambitious.
+_CADENCE_MAX_HOLD_S = 12.0        # any single clip longer than this is a dead frame
+_CADENCE_MEAN_HOLD_S = 9.0        # sustained slowness across the whole video
+# NOTE: "nothing MOVES" is deliberately NOT scored here — it is a different axis and it
+# belongs to ``visual.motion_not_silently_dead`` below, which carries the min-clip guard
+# needed to tell a still-by-design artifact from a dead feature. One check, one axis.
+
+
+def _clip_seconds(c: dict[str, Any]) -> float:
+    for k in ("duration_ms", "duration_millis"):
+        try:
+            v = float(c.get(k) or 0)
+            if v > 0:
+                return v / 1000.0
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _clip_moves(c: dict[str, Any]) -> bool:
+    """A clip is MOVING if it is a video/motion render, or carries a Ken Burns preset."""
+    if _render_mode(c) in _RENDER_MODE_VIDEO:
+        return True
+    preset = str(c.get("motion_preset") or "").strip().lower()
+    return bool(preset) and preset not in {"none", "static", "hold"}
+
+
+@check("visual.cadence", dimension=_DIMENSION, severity="high")
+def cadence(art):
+    "Something must keep HAPPENING — no dead frames, and the visuals must move."
+    clips = _require_clips(art)
+    durs = [_clip_seconds(c) for c in clips]
+    durs = [d for d in durs if d > 0]
+    if not durs:
+        skip("no clip durations on this artifact")
+    longest = max(durs)
+    mean_hold = sum(durs) / len(durs)
+    moving = sum(1 for c in clips if _clip_moves(c))
+    problems: list[str] = []
+    if longest > _CADENCE_MAX_HOLD_S:
+        problems.append(f"dead frame {longest:.1f}s (max {_CADENCE_MAX_HOLD_S:.0f}s)")
+    if mean_hold > _CADENCE_MEAN_HOLD_S:
+        problems.append(f"mean hold {mean_hold:.1f}s (max {_CADENCE_MEAN_HOLD_S:.0f}s)")
+    return not problems, (
+        f"mean {mean_hold:.1f}s · median {sorted(durs)[len(durs)//2]:.1f}s · "
+        f"max {longest:.1f}s · moving {moving}/{len(clips)}"
+        + (f" — {'; '.join(problems)}" if problems else "")
+    )
+
+
+# ── FLAG-ON-BUT-ZERO-OUTPUT — the silent feature death class ─────────────────────
+# Founder, 2026-07-28: "dont keep repeating same mistakes again and again. everytime
+# you encounter an issue create a recurring mechanism so that next time the validation
+# and also the fix can be learnt."
+#
+# THE CLASS: a feature flag reads ON, the code path is live, and the delivered artifact
+# contains ZERO of what the feature produces. Nothing fails, nothing logs an error, and
+# the only alarm is the founder watching a bad video. It has now happened twice to the
+# SAME feature — motion died fleet-wide on 2026-07-23, and on job eaf99101
+# (2026-07-28) ENABLE_STORY_VISUALS_MOTION / MOTION_AUTHOR / MOTION_CRAFT / GENRE_MOTION
+# were ALL true while `rendered_motion_clips` was 0 and every one of 48 clips was a still.
+#
+# A counter that a live feature can never legitimately leave at zero IS the alarm. This
+# check reads the counters the pipeline already writes, so it costs nothing and cannot
+# drift from what shipped.
+#
+# Scoped honestly: it fires only when the artifact ALSO looks like motion was expected
+# (multiple clips, none of them moving). A genuinely still-by-design artifact with one
+# clip is not a regression.
+_ZERO_OUTPUT_MIN_CLIPS = 6
+
+
+@check("visual.motion_not_silently_dead", dimension=_DIMENSION, severity="high")
+def motion_not_silently_dead(art):
+    "A live motion feature must not deliver zero motion across a whole video."
+    clips = _require_clips(art)
+    if len(clips) < _ZERO_OUTPUT_MIN_CLIPS:
+        skip(f"only {len(clips)} clip(s) — too few to call motion dead")
+    moving = [c for c in clips if _clip_moves(c)]
+    if moving:
+        return True, f"{len(moving)}/{len(clips)} clips move — motion is alive"
+    # Zero moving clips across a multi-clip video. Report the counters so the reader
+    # can tell "feature off" from "feature on and broken" without another query.
+    doc = getattr(art, "doc", None) or {}
+    v = doc.get("visual") if isinstance(doc, dict) else None
+    v = v if isinstance(v, dict) else {}
+    counters = {
+        k: v.get(k)
+        for k in ("rendered_motion_clips", "rendered_local_motion_clips",
+                  "rendered_paid_images")
+        if k in v
+    }
+    return False, (
+        f"ZERO of {len(clips)} clips move (no motion render, no Ken Burns preset). "
+        f"Pipeline counters: {counters or 'absent'}. If the motion flags are ON this is "
+        f"the silent-feature-death class, not a config choice — check the flag-to-effect "
+        f"path, not the flag."
+    )

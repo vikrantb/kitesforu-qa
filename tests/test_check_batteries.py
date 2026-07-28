@@ -975,3 +975,74 @@ def test_landscape_fix_does_not_disturb_portrait_calibration():
     for path in (REAL_TEXT_CARD, REAL_HEADLINE_CARD):
         with Image.open(path) as im:
             assert _max_ink_run_frac(im) < _PICTORIAL_MIN_STROKE, path
+
+
+# ── visual.cadence + visual.motion_not_silently_dead ─────────────────────────────
+# Founder, 2026-07-28 on job eaf99101: "the visuals were horrible, a boring screen and
+# same image dancing ... i need to see a new fresh beautiful image every 2 seconds or
+# zoom to some other part. there has to be always something happening."
+# Followed by: "dont keep repeating same mistakes again and again. everytime you
+# encounter an issue create a recurring mechanism so that next time the validation and
+# also the fix can be learnt."
+#
+# That job passed EVERY existing visual check while holding one still frame for 67
+# SECONDS with zero motion clips. These two checks are the mechanism that ends it, and
+# these tests use ITS REAL NUMBERS so the alarm can never silently stop working.
+
+def _cadence_doc(durations_ms: list[int], *, moving: bool = False) -> dict:
+    doc = _base_doc()
+    doc["visual"] = {"clips": [
+        {"beat_index": i, "modality": "diagram", "render_mode": "image",
+         "aspect_ratio": "16:9", "asset_uri": f"gs://x/a{i}.png",
+         "duration_ms": d,
+         **({"motion_preset": "push_in"} if moving else {})}
+        for i, d in enumerate(durations_ms)
+    ]}
+    return doc
+
+
+def _res(doc, name):
+    _sr, by = _gating_results(Artifact.from_doc(doc, image_paths=[]), "visual-images")
+    return by[name]
+
+
+def test_cadence_fails_the_eaf99101_dead_frame():
+    """THE WITNESS: a 67-second held frame must fail. It previously passed everything."""
+    r = _res(_cadence_doc([3000, 4000, 67390, 5000, 3000, 4000], moving=True),
+             "visual.cadence")
+    assert not r["skipped"], r["evidence"]
+    assert not r["passed"], f"a 67s dead frame must FAIL cadence: {r['evidence']}"
+    assert "dead frame" in r["evidence"]
+
+
+def test_cadence_fails_sustained_slowness_even_with_no_single_dead_frame():
+    r = _res(_cadence_doc([10000] * 8, moving=True), "visual.cadence")
+    assert not r["passed"], r["evidence"]
+    assert "mean hold" in r["evidence"]
+
+
+def test_cadence_passes_a_lively_video():
+    r = _res(_cadence_doc([2000, 2500, 3000, 2000, 2500, 3000], moving=True),
+             "visual.cadence")
+    assert not r["skipped"], r["evidence"]
+    assert r["passed"], f"a ~2-3s cadence must PASS: {r['evidence']}"
+
+
+def test_motion_death_fires_when_nothing_moves():
+    """THE WITNESS: eaf99101 had motion flags ON and rendered_motion_clips=0 with every
+    clip a still. Flags-on + zero-output is the silent-feature-death class."""
+    r = _res(_cadence_doc([4000] * 8, moving=False), "visual.motion_not_silently_dead")
+    assert not r["skipped"], r["evidence"]
+    assert not r["passed"], f"zero moving clips must FAIL: {r['evidence']}"
+    assert "ZERO" in r["evidence"]
+
+
+def test_motion_death_passes_when_something_moves():
+    r = _res(_cadence_doc([4000] * 8, moving=True), "visual.motion_not_silently_dead")
+    assert r["passed"], r["evidence"]
+
+
+def test_motion_death_skips_a_short_artifact_rather_than_crying_wolf():
+    """A still-by-design artifact with few clips is not a dead feature."""
+    r = _res(_cadence_doc([4000, 4000], moving=False), "visual.motion_not_silently_dead")
+    assert r["skipped"], f"2 clips must SKIP, got: {r['evidence']}"
