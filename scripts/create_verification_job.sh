@@ -24,6 +24,10 @@ TIER="low"
 STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
 FORMAT=""           # optional API format (drama|panel|...) — forces multi-speaker casting at T3 cost
 SHORT="false"       # --short: born-short vertical Social Short (short_video: true)
+SOURCE_WRITEUP=""   # --source-writeup <wrt_id>: simulate a writeup→podcast CONVERSION so the
+                    # visuals path can ADOPT that writeup's already-authored grounded figures
+                    # (C3-4). Needs a writeup that HAS figures — check
+                    # formats_generated[fmt].figures, not "content" (no such key).
 VISUALS="false"
 WAIT="false"
 ON_BEHALF_OF=""
@@ -42,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --short)    SHORT="true"; shift ;;  # born-short (short_video=true); pair with --duration 1.0
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
+    --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # founder-visible: job lands in this user's library
     -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -84,9 +89,9 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, content_rating = sys.argv[1:8]
+topic, duration, tier, style, visuals, fmt, content_rating, source_writeup = sys.argv[1:9]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -104,6 +109,10 @@ if fmt:
     body["format"] = fmt
 if content_rating:
     body["content_rating"] = content_rating
+if source_writeup:
+    # Declared on CreateJobRequest (schemas 2.60.0) so the strict model keeps it; the
+    # direct create path stamps it top-level onto the job doc (api #734).
+    body["source_writeup_id"] = source_writeup
 # NOTE: short_video is a QUERY PARAM (?short_video=true), NOT a body field — the
 # strict schemas CreateJobRequest drops body extras, so a body short_video is
 # silently ignored (verified live 2026-07-06: body-only rendered a normal episode).
