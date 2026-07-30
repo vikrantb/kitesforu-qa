@@ -55,25 +55,43 @@ INNOVATIONS=(
 
 echo "════ INNOVATION RECEIPTS — job ${JOB} · ${SVC} · last ${FRESH} ════"
 echo
-echo "── A. LOG RECEIPTS ATTRIBUTED TO THIS JOB (jsonPayload.job_id match) ──"
-OWN=$(gcloud logging read \
-  "resource.labels.service_name=\"${SVC}\" AND jsonPayload.job_id=\"${JOB}\"" \
-  --project "${PROJ}" --limit 1000 --format='value(jsonPayload.message)' \
+echo "── A. LOG RECEIPTS ATTRIBUTED TO THIS JOB (free-text job-id match, ALL services) ──"
+# WHY FREE-TEXT AND NOT jsonPayload.job_id (corrected 2026-07-30, minutes after shipping the
+# structured version): this stage emits logs in TWO shapes. Some records are genuine structured
+# jsonPayload (the `data_shape_pre_v2` receipt), but StructuredLogger-based loggers emit the whole
+# record as a JSON *string*, so `jsonPayload.job_id` DOES NOT EXIST on those lines. Measured on job
+# c8b86b3f: `jsonPayload.job_id=` matched 26 lines on ONE service, while a free-text match on the
+# same id found 500 across THREE services including 236 on kitesforu-worker-visuals — the exact
+# lines this tool exists to read. The structured filter was a silent false-negative generator:
+# it reported "0 attributed" for a job that had logged 236 visuals lines.
+#
+# AND NO SERVICE FILTER: the visuals stage does not only run on kitesforu-worker-visuals. On the
+# same job, visuals-authoring logs appeared on worker-visuals AND worker-audio AND worker-tools.
+# Hardcoding SVC made the tool blind to whichever service actually did the work.
+OWN=$(gcloud logging read "\"${JOB}\"" \
+  --project "${PROJ}" --limit 2000 --format='value(jsonPayload.message,textPayload)' \
   --freshness="${FRESH}" 2>/dev/null)
 
-# Everything in the window, regardless of job — used ONLY to report what we could not attribute.
+echo -n "  services that logged this job: "
+gcloud logging read "\"${JOB}\"" --project "${PROJ}" --limit 2000 \
+  --format='value(resource.labels.service_name)' --freshness="${FRESH}" 2>/dev/null \
+  | sort | uniq -c | awk '{printf "%s(x%s) ", $2, $1}'
+echo
+
+# Everything in the window on the visuals-capable services, regardless of job — used ONLY to
+# report what we could NOT attribute, never counted as a pass.
 ALL=$(gcloud logging read \
-  "resource.labels.service_name=\"${SVC}\"" \
-  --project "${PROJ}" --limit 1000 --format='value(jsonPayload.message)' \
+  "resource.labels.service_name=\"${SVC}\" OR resource.labels.service_name=\"kitesforu-worker-audio\"" \
+  --project "${PROJ}" --limit 2000 --format='value(jsonPayload.message,textPayload)' \
   --freshness="${FRESH}" 2>/dev/null)
 
 if [ -z "${ALL}" ]; then
   echo "NO LOGS in the window — widen freshness or check the service name."; exit 2
 fi
 if [ -z "${OWN}" ]; then
-  echo "  ⚠️  ZERO log lines carry job_id=${JOB}."
-  echo "      Either the job has not reached ${SVC} yet, or these receipts do not stamp job_id."
-  echo "      Nothing below section A can be attributed to this job — read B as unattributed."
+  echo "  ⚠️  ZERO log lines mention ${JOB} in the last ${FRESH}."
+  echo "      Either the job has not reached the visuals stage yet, or the window is too narrow."
+  echo "      Nothing in section A can be attributed to this job."
 fi
 
 HITS=0; MISSES=0; UNATTRIB=0
