@@ -60,7 +60,7 @@ class TestItWaitsOutRealObservedChurn:
         assert r.settled is True
         assert len(r.clips) == 9, "must settle on the STEADY array, not an intermediate one"
 
-    def test_a_repeated_COUNT_is_not_stability(self):
+    def test_a_repeated_count_is_not_stability(self):
         """A later pass can rewrite the array while preserving its length — counting would call this
         settled when the content changed under it."""
         seq = [_clips(5, "a"), _clips(5, "b"), _clips(5, "c")] + [_clips(5, "c")] * 12
