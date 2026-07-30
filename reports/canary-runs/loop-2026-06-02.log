@@ -1,0 +1,653 @@
+
+=== [2026-06-02 16:42:23 UTC] iter 2 START ===
+  triggered job_id=78d6df0a-6e57-4d66-ba36-f0edb277d25a
+  [2026-06-02 16:43:57 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=pipeline_start pct=2
+  [2026-06-02 16:44:57 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=architect_done pct=10
+  [2026-06-02 16:45:57 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=architect_done pct=10
+  [2026-06-02 16:46:57 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=architect_done pct=10
+  [2026-06-02 16:47:58 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=audio_segment pct=61
+  [2026-06-02 16:48:58 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=audio_combiner pct=78
+  [2026-06-02 16:49:58 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=audio_combiner pct=78
+  [2026-06-02 16:50:58 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=running stage=audio_combiner pct=78
+  [2026-06-02 16:51:59 UTC] poll job=78d6df0a-6e57-4d66-ba36-f0edb277d25a status=completed stage=completed pct=100
+  ffprobe failed: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1000)>
+=== iter 2 OUTCOME=WARN ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 17:21:59 UTC] iter 3 START ===
+  triggered job_id=60c4e322-52e9-4ae4-ad43-89a80c0cea8b
+  [2026-06-02 17:23:46 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=architect pct=5
+  [2026-06-02 17:24:46 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=architect_done pct=10
+  [2026-06-02 17:25:46 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=architect_done pct=10
+  [2026-06-02 17:26:47 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=audio_segment pct=75
+  [2026-06-02 17:27:47 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=audio_combiner pct=78
+  [2026-06-02 17:28:47 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=audio_combiner pct=78
+  [2026-06-02 17:29:48 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=running stage=audio_combiner pct=78
+  [2026-06-02 17:30:48 UTC] poll job=60c4e322-52e9-4ae4-ad43-89a80c0cea8b status=completed stage=completed pct=100
+  ffprobe failed: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1000)>
+=== iter 3 OUTCOME=WARN ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 18:00:48 UTC] iter 4 START ===
+  triggered job_id=a6e4704e-7fdf-4542-a0d8-fa1190c114ba
+  [2026-06-02 18:02:22 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=pipeline_start pct=2
+  [2026-06-02 18:03:22 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=architect_done pct=10
+  [2026-06-02 18:04:22 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=architect_done pct=10
+  [2026-06-02 18:05:22 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=streaming_script pct=20
+  [2026-06-02 18:06:22 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=audio_segment pct=31
+  [2026-06-02 18:07:23 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=audio_combiner pct=78
+  [2026-06-02 18:08:23 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=running stage=audio_combiner pct=78
+  [2026-06-02 18:09:23 UTC] poll job=a6e4704e-7fdf-4542-a0d8-fa1190c114ba status=completed stage=completed pct=100
+  ffprobe failed: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1000)>
+=== iter 4 OUTCOME=WARN ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 18:39:23 UTC] iter 5 START ===
+  triggered job_id=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8
+  [2026-06-02 18:41:00 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=pipeline_start pct=2
+  [2026-06-02 18:42:01 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=architect pct=5
+  [2026-06-02 18:43:01 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=architect pct=5
+  [2026-06-02 18:44:01 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=architect pct=5
+  [2026-06-02 18:45:01 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=audio_segment pct=52
+  [2026-06-02 18:46:01 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=audio_combiner pct=78
+  [2026-06-02 18:47:02 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=audio_combiner pct=78
+  [2026-06-02 18:48:02 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=running stage=audio_combiner pct=78
+  [2026-06-02 18:49:02 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=failed_qa stage=completed pct=100
+  [2026-06-02 18:50:02 UTC] poll job=3df4f13d-cf9d-4549-94af-18e9dbf3eaf8 status=failed_qa stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 5 STALL
+job_id: `3df4f13d-cf9d-4549-94af-18e9dbf3eaf8`
+status: `failed_qa` timeout: `True`
+failure_reason: `quality_gate_failed: stage5_content_quality`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 51725, "architect_ms": 214647, "pipeline_start_ms": 27513, "total_ms": 470234, "audio_combiner_ms": 164909, "completed_ms": 722, "streaming_script_ms": 8274, "execute_entry_ms": 2440}```
+wall_clock: 639s (limit 600s)
+log tail:
+```2026-06-02T18:48:27.041549Z	kitesforu-worker-audio		Quality metrics logged
+2026-06-02T18:48:21.499689Z	kitesforu-worker-audio		character_system shadow: no artifact produced
+2026-06-02T18:48:21.493666Z	kitesforu-worker-audio		character_system: no viable cast
+2026-06-02T18:48:21.493055Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-02T18:48:21.347492Z	kitesforu-worker-audio		sfx_director_hydrated
+2026-06-02T18:45:40.607591Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T18:45:40.577534Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T18:45:39.094985Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T18:45:39.064313Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T18:45:38.962676Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T18:45:38.923647Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T18:45:38.631526Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T18:45:38.601514Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T18:45:38.052478Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T18:45:38.018692Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T18:45:37.582342Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T18:45:37.510953Z	kitesforu-worker-au```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 5 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 19:20:04 UTC] iter 6 START ===
+  triggered job_id=fe181d46-62da-46ae-81ff-8bd05ebb229b
+  [2026-06-02 19:21:40 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=running stage=pipeline_start pct=2
+  [2026-06-02 19:22:40 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=running stage=architect pct=5
+  [2026-06-02 19:23:41 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=running stage=audio_segment pct=64
+  [2026-06-02 19:24:41 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=running stage=audio_combiner pct=78
+  [2026-06-02 19:25:41 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=running stage=music_render pct=85
+  [2026-06-02 19:26:42 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=running stage=music_render pct=85
+  [2026-06-02 19:27:42 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=needs_review stage=completed pct=100
+  [2026-06-02 19:28:42 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=needs_review stage=completed pct=100
+  [2026-06-02 19:29:42 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=needs_review stage=completed pct=100
+  [2026-06-02 19:30:43 UTC] poll job=fe181d46-62da-46ae-81ff-8bd05ebb229b status=needs_review stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 6 STALL
+job_id: `fe181d46-62da-46ae-81ff-8bd05ebb229b`
+status: `needs_review` timeout: `True`
+failure_reason: `quality_check_inconclusive`
+last heartbeat_phase: `music_render`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 66805, "architect_ms": 72664, "pipeline_start_ms": 41175, "total_ms": 374885, "audio_combiner_ms": 18200, "completed_ms": 526, "architect_done_ms": 5093, "music_render_ms": 158781, "streaming_script_ms": 8553, "execute_entry_ms": 3057}```
+wall_clock: 639s (limit 600s)
+log tail:
+```2026-06-02T19:27:37.331882Z	kitesforu-worker-audio		Quality metrics logged
+2026-06-02T19:27:29.533011Z	kitesforu-worker-audio		character_system shadow: no artifact produced
+2026-06-02T19:27:29.526851Z	kitesforu-worker-audio		character_system: no viable cast
+2026-06-02T19:27:29.524819Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-02T19:27:29.431358Z	kitesforu-worker-audio		sfx_director_hydrated
+2026-06-02T19:24:39.033574Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T19:24:38.957713Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T19:24:36.605007Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T19:24:36.561124Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T19:24:33.841575Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T19:24:33.768686Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T19:24:33.108453Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T19:24:33.055406Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T19:24:32.145808Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T19:24:32.108863Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T19:24:31.879544Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T19:24:31.819326Z	kitesforu-worker-au```
+Hypothesis: Watcher 10-min timeout while still running at phase=music_render. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 6 OUTCOME=STALL ===
+
+>>> CANARY HEARTBEAT @ iter 6: passes=0 fails=5 avg_wall=0s (n=0)
+
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 20:00:44 UTC] iter 7 START ===
+  triggered job_id=3bdc00c2-26fa-4f83-b334-658df2d9a596
+  [2026-06-02 20:02:35 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=running stage=pipeline_start pct=2
+  [2026-06-02 20:03:35 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=running stage=architect pct=5
+  [2026-06-02 20:04:35 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=running stage=streaming_script pct=20
+  [2026-06-02 20:05:35 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=running stage=audio_segment pct=75
+  [2026-06-02 20:06:35 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=running stage=audio_combiner pct=78
+  [2026-06-02 20:07:36 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=running stage=music_render pct=85
+  [2026-06-02 20:08:36 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=failed_qa stage=completed pct=100
+  [2026-06-02 20:09:36 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=failed_qa stage=completed pct=100
+  [2026-06-02 20:10:36 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=failed_qa stage=completed pct=100
+  [2026-06-02 20:11:37 UTC] poll job=3bdc00c2-26fa-4f83-b334-658df2d9a596 status=failed_qa stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 7 STALL
+job_id: `3bdc00c2-26fa-4f83-b334-658df2d9a596`
+status: `failed_qa` timeout: `True`
+failure_reason: `quality_gate_failed: stage5_content_quality`
+last heartbeat_phase: `music_render`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 62911, "architect_ms": 95316, "pipeline_start_ms": 35599, "total_ms": 373814, "audio_combiner_ms": 80737, "completed_ms": 539, "music_render_ms": 86759, "streaming_script_ms": 8938, "execute_entry_ms": 3010}```
+wall_clock: 652s (limit 600s)
+log tail:
+```2026-06-02T20:08:30.158300Z	kitesforu-worker-audio		Quality metrics logged
+2026-06-02T20:08:22.498210Z	kitesforu-worker-audio		character_system shadow: no artifact produced
+2026-06-02T20:08:22.491048Z	kitesforu-worker-audio		character_system: no viable cast
+2026-06-02T20:08:22.489796Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-02T20:08:22.417348Z	kitesforu-worker-audio		sfx_director_hydrated
+2026-06-02T20:05:41.639197Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:05:41.607062Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:05:40.388785Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:05:40.352781Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:05:40.207299Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:05:40.178032Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:05:40.148417Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:05:40.139532Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:05:39.987298Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:05:39.943316Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:05:39.050613Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:05:39.016514Z	kitesforu-worker-au```
+Hypothesis: Watcher 10-min timeout while still running at phase=music_render. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 7 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 20:41:38 UTC] iter 8 START ===
+  triggered job_id=636e8df3-a31a-40d9-a719-8f84318a0d9f
+  [2026-06-02 20:43:41 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=pipeline_start pct=2
+  [2026-06-02 20:44:41 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=architect pct=5
+  [2026-06-02 20:45:41 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=streaming_script pct=20
+  [2026-06-02 20:46:41 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=audio_combiner pct=78
+  [2026-06-02 20:47:41 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=music_render pct=85
+  [2026-06-02 20:48:41 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=music_render pct=85
+  [2026-06-02 20:49:42 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=music_render pct=85
+  [2026-06-02 20:50:42 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=running stage=music_render pct=85
+  [2026-06-02 20:51:42 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=failed_qa stage=completed pct=100
+  [2026-06-02 20:52:42 UTC] poll job=636e8df3-a31a-40d9-a719-8f84318a0d9f status=failed_qa stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 8 STALL
+job_id: `636e8df3-a31a-40d9-a719-8f84318a0d9f`
+status: `failed_qa` timeout: `True`
+failure_reason: `quality_gate_failed: stage5_content_quality`
+last heartbeat_phase: `mastering`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 38719, "architect_ms": 94608, "pipeline_start_ms": 31507, "music_render_ms": 215260, "audio_combiner_ms": 62813, "mastering_ms": 33469, "total_ms": 487868, "completed_ms": 567, "streaming_script_ms": 8192, "execute_entry_ms": 2729}```
+wall_clock: 664s (limit 600s)
+log tail:
+```2026-06-02T20:51:33.065845Z	kitesforu-worker-audio		Quality metrics logged
+2026-06-02T20:51:25.086023Z	kitesforu-worker-audio		character_system shadow: no artifact produced
+2026-06-02T20:51:25.082967Z	kitesforu-worker-audio		character_system: no viable cast
+2026-06-02T20:51:25.081880Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-02T20:51:25.035539Z	kitesforu-worker-audio		sfx_director_hydrated
+2026-06-02T20:46:20.576881Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:46:20.541974Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:46:18.390056Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:46:18.357859Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:46:16.687078Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:46:16.651388Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:46:15.298300Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:46:15.258307Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:46:14.666805Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:46:14.635160Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T20:46:13.539805Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T20:46:13.488958Z	kitesforu-worker-au```
+Hypothesis: Watcher 10-min timeout while still running at phase=mastering. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 8 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 21:22:43 UTC] iter 9 START ===
+  triggered job_id=ce12dd9b-7483-4fbd-9359-f72d6f57e67b
+  [2026-06-02 21:24:30 UTC] poll job=ce12dd9b-7483-4fbd-9359-f72d6f57e67b status=running stage=architect pct=5
+  [2026-06-02 21:25:30 UTC] poll job=ce12dd9b-7483-4fbd-9359-f72d6f57e67b status=running stage=audio_segment pct=73
+  [2026-06-02 21:26:30 UTC] poll job=ce12dd9b-7483-4fbd-9359-f72d6f57e67b status=failed stage=failed pct=0
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 9 FAIL
+job_id: `ce12dd9b-7483-4fbd-9359-f72d6f57e67b`
+status: `failed` timeout: `False`
+failure_reason: `None`
+last heartbeat_phase: `audio_segment`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 71429, "architect_ms": 66653, "pipeline_start_ms": 11310, "total_ms": 157371, "architect_done_ms": 1346, "streaming_script_ms": 6474, "execute_entry_ms": 157}```
+wall_clock: 227s (limit 600s)
+log tail:
+```2026-06-02T21:26:19.434252Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:19.362480Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:15.826621Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:15.761007Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:14.078867Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:14.023087Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:13.967235Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:13.920108Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:13.635761Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:13.582684Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:08.614218Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:08.561816Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:07.637293Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:07.577084Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T21:26:06.725879Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T21:26:06.625491Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Unclassified — inspect log tail + Firestore stages.* for last-write phase.
+============================================================
+=== iter 9 OUTCOME=FAIL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 21:56:32 UTC] iter 10 START ===
+  triggered job_id=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f
+  [2026-06-02 21:58:13 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=architect pct=5
+  [2026-06-02 21:59:14 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=audio_segment pct=37
+  [2026-06-02 22:00:14 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=audio_combiner pct=78
+  [2026-06-02 22:01:14 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=music_render pct=85
+  [2026-06-02 22:02:14 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=music_render pct=85
+  [2026-06-02 22:03:15 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=music_render pct=85
+  [2026-06-02 22:04:15 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=running stage=music_render pct=85
+  [2026-06-02 22:05:15 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=failed_qa stage=completed pct=100
+  [2026-06-02 22:06:16 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=failed_qa stage=completed pct=100
+  [2026-06-02 22:07:16 UTC] poll job=7d7e0db2-7b25-40ab-8d37-9dc5939cc33f status=failed_qa stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 10 STALL
+job_id: `7d7e0db2-7b25-40ab-8d37-9dc5939cc33f`
+status: `failed_qa` timeout: `True`
+failure_reason: `quality_gate_failed: stage5_content_quality,story_judge_narrative_craft`
+last heartbeat_phase: `mastering`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 64446, "architect_ms": 74228, "pipeline_start_ms": 26910, "music_render_ms": 247327, "audio_combiner_ms": 15048, "mastering_ms": 23649, "architect_done_ms": 1519, "total_ms": 458791, "completed_ms": 475, "streaming_script_ms": 5019, "execute_entry_ms": 165}```
+wall_clock: 644s (limit 600s)
+log tail:
+```2026-06-02T22:04:59.915156Z	kitesforu-worker-audio		Quality metrics logged
+2026-06-02T22:04:54.513981Z	kitesforu-worker-audio		character_system shadow: no artifact produced
+2026-06-02T22:04:54.510280Z	kitesforu-worker-audio		character_system: no viable cast
+2026-06-02T22:04:54.509434Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-02T22:04:54.360985Z	kitesforu-worker-audio		sfx_director_hydrated
+2026-06-02T22:00:12.656408Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:00:12.597118Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:00:11.927748Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:00:11.865658Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:00:10.544593Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:00:10.470090Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:00:06.559766Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:00:06.517276Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:00:06.013740Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:00:05.929869Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:00:05.007591Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:00:04.878738Z	kitesforu-worker-au```
+Hypothesis: Watcher 10-min timeout while still running at phase=mastering. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 10 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 22:37:18 UTC] iter 11 START ===
+  triggered job_id=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf
+  [2026-06-02 22:39:01 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=running stage=architect pct=5
+  [2026-06-02 22:40:02 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=running stage=audio_combiner pct=78
+  [2026-06-02 22:41:02 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=running stage=music_render pct=85
+  [2026-06-02 22:42:02 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=running stage=music_render pct=85
+  [2026-06-02 22:43:02 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=running stage=music_render pct=85
+  [2026-06-02 22:44:03 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=running stage=music_render pct=85
+  [2026-06-02 22:45:03 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=failed_qa stage=completed pct=100
+  [2026-06-02 22:46:03 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=failed_qa stage=completed pct=100
+  [2026-06-02 22:47:03 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=failed_qa stage=completed pct=100
+  [2026-06-02 22:48:04 UTC] poll job=7959a93a-f099-4b8c-af5f-2f83ab6eb2cf status=failed_qa stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 11 STALL
+job_id: `7959a93a-f099-4b8c-af5f-2f83ab6eb2cf`
+status: `failed_qa` timeout: `True`
+failure_reason: `quality_gate_failed: stage5_content_quality,story_judge_narrative_craft`
+last heartbeat_phase: `mastering`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 41465, "architect_ms": 38711, "pipeline_start_ms": 16922, "music_render_ms": 253475, "audio_combiner_ms": 16940, "mastering_ms": 25606, "architect_done_ms": 1219, "total_ms": 399938, "completed_ms": 275, "streaming_script_ms": 5143, "execute_entry_ms": 176}```
+wall_clock: 646s (limit 600s)
+log tail:
+```2026-06-02T22:44:51.300316Z	kitesforu-worker-audio		Quality metrics logged
+2026-06-02T22:44:46.613853Z	kitesforu-worker-audio		character_system shadow: no artifact produced
+2026-06-02T22:44:46.613422Z	kitesforu-worker-audio		character_system: no viable cast
+2026-06-02T22:44:46.612958Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-02T22:44:46.528308Z	kitesforu-worker-audio		sfx_director_hydrated
+2026-06-02T22:39:54.673280Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:39:54.623173Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:39:53.223358Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:39:53.113077Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:39:53.076115Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:39:53.011888Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:39:52.405376Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:39:52.303530Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:39:52.238065Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:39:52.149644Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T22:39:51.819045Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T22:39:51.771891Z	kitesforu-worker-au```
+Hypothesis: Watcher 10-min timeout while still running at phase=mastering. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 11 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 23:18:05 UTC] iter 12 START ===
+  triggered job_id=2b352fb2-cad1-436f-8c98-492b00b95849
+  [2026-06-02 23:19:47 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=architect pct=5
+  [2026-06-02 23:20:47 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=architect_done pct=10
+  [2026-06-02 23:21:48 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=architect_done pct=10
+  [2026-06-02 23:22:48 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=music_supervisor pct=14
+  [2026-06-02 23:23:48 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=audio_segment pct=55
+  [2026-06-02 23:24:49 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=music_render pct=85
+  [2026-06-02 23:25:49 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=music_render pct=85
+  [2026-06-02 23:26:49 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=music_render pct=85
+  [2026-06-02 23:27:49 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=music_render pct=85
+  [2026-06-02 23:28:50 UTC] poll job=2b352fb2-cad1-436f-8c98-492b00b95849 status=running stage=mastering pct=92
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 12 STALL
+job_id: `2b352fb2-cad1-436f-8c98-492b00b95849`
+status: `running` timeout: `True`
+failure_reason: `None`
+last heartbeat_phase: `mastering`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 52820, "architect_ms": 48234, "pipeline_start_ms": 32593, "total_ms": 585590, "audio_combiner_ms": 15853, "mastering_ms": 9520, "architect_done_ms": 150286, "sfx_director_ms": 164, "music_supervisor_ms": 2951, "music_render_ms": 264962, "streaming_script_ms": 8045, "execute_entry_ms": 155}```
+wall_clock: 645s (limit 600s)
+log tail:
+```2026-06-02T23:23:50.806835Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:50.739486Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:50.553793Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:50.485122Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:49.611198Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:49.544928Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:49.414709Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:49.342081Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:46.690696Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:46.620959Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:45.729824Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:45.617920Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:45.562066Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:45.496299Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-02T23:23:45.106145Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-02T23:23:45.030216Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Watcher 10-min timeout while still running at phase=mastering. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 12 OUTCOME=STALL ===
+
+>>> CANARY HEARTBEAT @ iter 12: passes=0 fails=11 avg_wall=0s (n=0)
+
+  sleeping 1800s before next iter...
+
+=== [2026-06-02 23:58:51 UTC] iter 13 START ===
+  triggered job_id=227d06f3-6700-43b4-a974-76dd525d04ef
+  [2026-06-03 00:00:33 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=architect pct=5
+  [2026-06-03 00:01:34 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=architect_done pct=10
+  [2026-06-03 00:02:34 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=architect_done pct=10
+  [2026-06-03 00:03:34 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=architect_done pct=10
+  [2026-06-03 00:04:34 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=audio_segment pct=75
+  [2026-06-03 00:05:35 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=audio_combiner pct=78
+  [2026-06-03 00:06:35 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=audio_combiner pct=78
+  [2026-06-03 00:07:35 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=audio_combiner pct=78
+  [2026-06-03 00:08:35 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=audio_combiner pct=78
+  [2026-06-03 00:09:36 UTC] poll job=227d06f3-6700-43b4-a974-76dd525d04ef status=running stage=audio_combiner pct=78
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 13 STALL
+job_id: `227d06f3-6700-43b4-a974-76dd525d04ef`
+status: `running` timeout: `True`
+failure_reason: `None`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 63897, "architect_ms": 66790, "pipeline_start_ms": 25479, "total_ms": 586196, "audio_combiner_ms": 271264, "sfx_director_ms": 187, "architect_done_ms": 150345, "music_supervisor_ms": 155, "streaming_script_ms": 7922, "execute_entry_ms": 148}```
+wall_clock: 644s (limit 600s)
+log tail:
+```2026-06-03T00:04:59.177513Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:59.134571Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:58.767312Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:58.605965Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:58.557695Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:58.507304Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:57.891695Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:57.852577Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:57.206016Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:57.155364Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:54.193157Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:54.149668Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:53.906334Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:53.856620Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:04:53.547351Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:04:53.448810Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 13 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-03 00:39:37 UTC] iter 14 START ===
+  triggered job_id=c5edc84d-d165-43e8-ac65-916e978eea52
+  [2026-06-03 00:41:20 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=architect pct=5
+  [2026-06-03 00:42:20 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=architect pct=5
+  [2026-06-03 00:43:20 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=architect pct=5
+  [2026-06-03 00:44:20 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_segment pct=37
+  [2026-06-03 00:45:20 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_combiner pct=78
+  [2026-06-03 00:46:21 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_combiner pct=78
+  [2026-06-03 00:47:21 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_combiner pct=78
+  [2026-06-03 00:48:21 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_combiner pct=78
+  [2026-06-03 00:49:21 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_combiner pct=78
+  [2026-06-03 00:50:22 UTC] poll job=c5edc84d-d165-43e8-ac65-916e978eea52 status=running stage=audio_combiner pct=78
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 14 STALL
+job_id: `c5edc84d-d165-43e8-ac65-916e978eea52`
+status: `running` timeout: `True`
+failure_reason: `None`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 59205, "sfx_director_ms": 195, "pipeline_start_ms": 24022, "total_ms": 587496, "audio_combiner_ms": 300330, "architect_ms": 193022, "music_supervisor_ms": 125, "streaming_script_ms": 10398, "execute_entry_ms": 194}```
+wall_clock: 645s (limit 600s)
+log tail:
+```2026-06-03T00:45:13.476994Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:13.388719Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:12.915740Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:12.871984Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:11.721621Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:11.679491Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:10.825234Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:10.770522Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:09.466141Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:09.414227Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:09.027591Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:08.978368Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:08.520494Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:08.467637Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T00:45:05.171262Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T00:45:05.106064Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 14 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-03 01:20:23 UTC] iter 15 START ===
+  triggered job_id=4f3033f3-4b78-41da-a44b-837ea9f11d96
+  [2026-06-03 01:21:58 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=architect pct=5
+  [2026-06-03 01:22:58 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=architect_done pct=10
+  [2026-06-03 01:23:58 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=architect_done pct=10
+  [2026-06-03 01:24:58 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_segment pct=52
+  [2026-06-03 01:25:58 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_combiner pct=78
+  [2026-06-03 01:26:59 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_combiner pct=78
+  [2026-06-03 01:27:59 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_combiner pct=78
+  [2026-06-03 01:28:59 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_combiner pct=78
+  [2026-06-03 01:29:59 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_combiner pct=78
+  [2026-06-03 01:31:00 UTC] poll job=4f3033f3-4b78-41da-a44b-837ea9f11d96 status=running stage=audio_combiner pct=78
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 15 STALL
+job_id: `4f3033f3-4b78-41da-a44b-837ea9f11d96`
+status: `running` timeout: `True`
+failure_reason: `None`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 44008, "architect_ms": 40548, "pipeline_start_ms": 16277, "total_ms": 587124, "audio_combiner_ms": 327594, "sfx_director_ms": 205, "architect_done_ms": 150358, "music_supervisor_ms": 175, "streaming_script_ms": 7773, "execute_entry_ms": 181}```
+wall_clock: 636s (limit 600s)
+log tail:
+```2026-06-03T01:25:29.627308Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:29.565053Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:29.522857Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:29.502623Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:28.766617Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:28.719960Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:28.648343Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:28.597013Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:27.780600Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:27.718386Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:24.075641Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:23.985651Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:23.904681Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:23.823380Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T01:25:23.748563Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T01:25:23.674798Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 15 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-03 02:01:01 UTC] iter 16 START ===
+  triggered job_id=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3
+  [2026-06-03 02:02:41 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=architect pct=5
+  [2026-06-03 02:03:41 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=architect_done pct=10
+  [2026-06-03 02:04:41 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=architect_done pct=10
+  [2026-06-03 02:05:41 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=architect_done pct=10
+  [2026-06-03 02:06:41 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=audio_segment pct=49
+  [2026-06-03 02:07:42 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:08:42 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:09:42 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:10:42 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:11:43 UTC] poll job=f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3 status=running stage=audio_combiner pct=78
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 16 STALL
+job_id: `f37d2c0d-fb29-4bcd-ab5c-079dc3e70ad3`
+status: `running` timeout: `True`
+failure_reason: `None`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 60987, "architect_ms": 60406, "pipeline_start_ms": 22652, "total_ms": 586548, "audio_combiner_ms": 284965, "sfx_director_ms": 190, "architect_done_ms": 150359, "music_supervisor_ms": 154, "streaming_script_ms": 6715, "execute_entry_ms": 116}```
+wall_clock: 641s (limit 600s)
+log tail:
+```2026-06-03T02:06:49.840818Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:49.798443Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:45.421156Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:45.348812Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:43.495113Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:43.451942Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:43.172046Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:43.121489Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:42.113907Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:42.056046Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:42.049379Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:42.004241Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:41.795946Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:41.746791Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:06:37.885496Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:06:37.833700Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 16 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-03 02:41:44 UTC] iter 17 START ===
+  triggered job_id=31fb6d63-5709-40b6-a961-b47fac3007e7
+  [2026-06-03 02:43:21 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=architect pct=5
+  [2026-06-03 02:44:21 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=architect pct=5
+  [2026-06-03 02:45:21 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=architect pct=5
+  [2026-06-03 02:46:21 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=architect pct=5
+  [2026-06-03 02:47:21 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=audio_segment pct=75
+  [2026-06-03 02:48:22 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:49:22 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:50:22 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:51:22 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=audio_combiner pct=78
+  [2026-06-03 02:52:22 UTC] poll job=31fb6d63-5709-40b6-a961-b47fac3007e7 status=running stage=audio_combiner pct=78
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 17 STALL
+job_id: `31fb6d63-5709-40b6-a961-b47fac3007e7`
+status: `running` timeout: `True`
+failure_reason: `None`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 59397, "sfx_director_ms": 137, "pipeline_start_ms": 16700, "total_ms": 593315, "audio_combiner_ms": 286708, "architect_ms": 221644, "music_supervisor_ms": 119, "streaming_script_ms": 8435, "execute_entry_ms": 172}```
+wall_clock: 638s (limit 600s)
+log tail:
+```2026-06-03T02:47:34.312133Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:34.278443Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:32.744879Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:32.704821Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:31.553156Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:31.506383Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:28.841112Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:28.798797Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:28.663813Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:28.623048Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:27.471755Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:27.428116Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:27.218883Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:27.176263Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T02:47:26.732516Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T02:47:26.696982Z	kitesforu-worker-audio		Segment signing unavailable,```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 17 OUTCOME=STALL ===
+  sleeping 1800s before next iter...
+
+=== [2026-06-03 03:22:24 UTC] iter 18 START ===
+  triggered job_id=fab1d073-4996-4999-91a2-5cc54be556b1
+  [2026-06-03 03:23:56 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=architect pct=5
+  [2026-06-03 03:24:56 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=architect_done pct=10
+  [2026-06-03 03:25:56 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=architect_done pct=10
+  [2026-06-03 03:26:57 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=audio_segment pct=52
+  [2026-06-03 03:27:57 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=audio_combiner pct=78
+  [2026-06-03 03:28:57 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=audio_combiner pct=78
+  [2026-06-03 03:29:57 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=audio_combiner pct=78
+  [2026-06-03 03:30:57 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=audio_combiner pct=78
+  [2026-06-03 03:31:58 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=running stage=audio_combiner pct=78
+  [2026-06-03 03:32:58 UTC] poll job=fab1d073-4996-4999-91a2-5cc54be556b1 status=failed_qa stage=completed pct=100
+
+======== SLACK ALERT (channel C09QXLV86C8) ========
+:rotating_light: canary iter 18 STALL
+job_id: `fab1d073-4996-4999-91a2-5cc54be556b1`
+status: `failed_qa` timeout: `True`
+failure_reason: `quality_gate_failed: stage5_content_quality,story_judge_narrative_craft`
+last heartbeat_phase: `audio_combiner`
+phase_timing: ```{"stalled_ms": 0, "audio_segment_ms": 44548, "architect_ms": 32958, "pipeline_start_ms": 22300, "total_ms": 594391, "audio_combiner_ms": 335139, "sfx_director_ms": 170, "architect_done_ms": 150329, "completed_ms": 306, "music_supervisor_ms": 179, "streaming_script_ms": 8261, "execute_entry_ms": 196}```
+wall_clock: 634s (limit 600s)
+log tail:
+```2026-06-03T03:32:53.922564Z	kitesforu-worker-audio		character_system shadow: entry
+2026-06-03T03:27:22.003625Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:21.956313Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:21.514676Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:21.445065Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:21.082199Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:21.037337Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:20.883593Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:20.811627Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:20.416870Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:20.338152Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:17.373683Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:17.284679Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:16.669196Z	kitesforu-worker-audio		Segment uploaded for streaming
+2026-06-03T03:27:16.559348Z	kitesforu-worker-audio		Segment signing unavailable, falling back to public URL
+2026-06-03T03:27:16.447785Z	kitesforu-worker-audio		Segment uploaded for streami```
+Hypothesis: Watcher 10-min timeout while still running at phase=audio_combiner. Likely a long-running LLM call or new stall in that phase.
+============================================================
+=== iter 18 OUTCOME=STALL ===
+
+>>> CANARY HEARTBEAT @ iter 18: passes=0 fails=17 avg_wall=0s (n=0)
+
+  sleeping 1800s before next iter...

@@ -51,6 +51,12 @@ INNOVATIONS=(
 "data-less compare beat|data-less beat declined to static|#1965 working"
 "select_candidates|per-filter drop counter (data router intake)|#1968 inert — cannot tell which filter starves the router"
 "data_shape pre-V2 LOCK|data-router receipt WITH shots_in correlation key|#1970 inert — beats= is unpairable again"
+"story_visuals shot budget|the plan BUDGET receipt (was entirely dark)|#1977 inert — cannot tell an over-plan from downstream loss"
+"capacity=|runtime capacity BESIDE the budget|#1979 inert — a ceiling with nothing to compare it to"
+"budget_src=|WHY the budget is that number|#1981 inert — flag-off, late-signal and genuine-3 stay indistinguishable"
+"via segments_ready|the budget stopped racing the audio producer|#1983 inert — early runs still collapse to the flat 3"
+"EXCEEDS THE BORN-SHORT CAP|the plan broke its own cap|a MISS here is GOOD (no over-plan on this job)"
+"story_visuals beat loss|beat-loss advisory, now BUDGET-relative|#1982: a MISS is GOOD — it fired on 67% of jobs before"
 )
 
 echo "════ INNOVATION RECEIPTS — job ${JOB} · ${SVC} · last ${FRESH} ════"
@@ -175,14 +181,47 @@ print(f"            longest_same_image_s= {dist.get('longest_same_image_s')}    
 print(f"            top1_share={dist.get('top1_share')}  top3_share={dist.get('top3_share')}             [NOT GATED]")
 print(f"            busiest beat {top_beat} holds {top_ms/1000:.1f}s of {total_ms/1000:.1f}s = {100*top_share:.0f}%  [NOT GATED]")
 print(f"  GATED     required={dist.get('required')} distinct assets · delivered={dist.get('delivered_distinct_assets')} ⇒ met={dist.get('met')}")
+
+# ── #1980 THE NUMBER THAT TRACKS THE COMPLAINT. Everything above measures how the runtime is
+# DIVIDED; only this says how often a NEW picture appears. Blind to repeat-inflated clip counts,
+# so a change that adds slots without adding pictures cannot fake an improvement here.
+_spd = dist.get("seconds_per_distinct_picture")
+if _spd is None:
+    print("  ⬜ #1980 seconds_per_distinct_picture ABSENT — job predates the deploy, or no clips")
+else:
+    _band = "✅ BEATS Vox" if _spd <= 1.9 else ("🟡 better than fleet median" if _spd < 6.3 else "🔴 worse than fleet median")
+    print(f"  {_band}  #1980 seconds_per_distinct_picture = {_spd}s"
+          f"  ({dist.get('distinct_pictures')} pictures / {dist.get('measured_runtime_s')}s)")
+    print("       fleet (64 jobs, 2026-07-30): p25 4.7 · MEDIAN 6.3 · p90 11.9 · Vox reference 1.9")
+
+# ── #1982 the advisory's denominator. Plan-relative "loss" is the plan-vs-CAP gap, not loss:
+# delivery is pinned at ~6 while plans grow 6->28, so <0.5 fired on 67% of the fleet.
+_bud = dist.get("visual_budget")
+if _bud is None:
+    print("  ⬜ #1982 visual_budget ABSENT — episode (uncapped) or job predates the deploy")
+else:
+    print(f"  ✅ #1982 budget-relative delivery = {dist.get('beat_delivery_vs_budget')}"
+          f"  (budget={_bud}, plan={dist.get('beats_planned')})")
+    print("       judge THIS, not beat_delivery_ratio — the plan is not what delivery was allowed")
 print()
 flags = []
-if isinstance(dist.get("beat_delivery_ratio"), (int, float)) and dist["beat_delivery_ratio"] < 0.6:
-    flags.append(f"only {100*dist['beat_delivery_ratio']:.0f}% of planned beats got a visual")
+# JUDGE THE BUDGET-RELATIVE RATIO, NEVER THE PLAN-RELATIVE ONE (corrected 2026-07-30 with #1982).
+# `beat_delivery_ratio < 0.6` looks like the obvious dullness signal and is actually noise: measured
+# across 42 jobs its median is 0.40 and it fires on 93% of them, because the planner authors 16-18
+# beats while the born-short cap admits 3-5. Flagging it here would have reproduced, in the
+# verification tool, the exact mis-measurement that was just removed from the pipeline.
+_vsb = dist.get("beat_delivery_vs_budget")
+if isinstance(_vsb, (int, float)) and _vsb < 0.6:
+    flags.append(
+        f"only {100*_vsb:.0f}% of the beats the budget ALLOWED got a visual "
+        f"(budget={dist.get('visual_budget')})"
+    )
 if isinstance(dist.get("longest_same_image_s"), (int, float)) and dist["longest_same_image_s"] > 5:
     flags.append(f"one image holds for {dist['longest_same_image_s']}s")
 if top_share > 0.4:
     flags.append(f"one beat owns {100*top_share:.0f}% of the runtime")
+if isinstance(_spd, (int, float)) and _spd > 6.3:
+    flags.append(f"a new picture only every {_spd}s (fleet median 6.3, Vox 1.9)")
 if flags:
     print("  🔴 DULLNESS SIGNALS THE GATE IGNORED:")
     for f in flags:
