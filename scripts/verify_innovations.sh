@@ -194,6 +194,22 @@ else:
           f"  ({dist.get('distinct_pictures')} pictures / {dist.get('measured_runtime_s')}s)")
     print("       fleet (64 jobs, 2026-07-30): p25 4.7 · MEDIAN 6.3 · p90 11.9 · Vox reference 1.9")
 
+# ── #1990 COVERAGE — read this BEFORE believing the cadence above.
+# The cadence used to be divided by the surviving CLIP SPAN, so dropping clips IMPROVED it. Job
+# 52304adc reported 2.07s (apparently benchmark-level) for three pictures crammed into the first
+# 6.2s of a 22.6s video: 27% coverage, honest cadence 7.53s. The denominator is fixed in the
+# pipeline now, and these keys appear ONLY when the clip span disagrees with the real runtime —
+# i.e. their presence is itself the finding.
+_cov = dist.get("visual_coverage_pct")
+if _cov is not None:
+    _cband = "🔴" if _cov < 80 else ("🟡" if _cov < 95 else "✅")
+    print(f"  {_cband}  #1990 visual_coverage_pct = {_cov}%"
+          f"  (clips span {dist.get('measured_runtime_s')}s of {dist.get('video_runtime_s')}s of video)")
+    if _cov < 80:
+        print(f"       {100-_cov:.0f}% of this video has NO picture at all. Coverage, not cadence,")
+        print(f"       is the defect here — and the flattering clip-span cadence would have read"
+              f" {dist.get('cadence_over_clip_span_s')}s.")
+
 # ── #1982 the advisory's denominator. Plan-relative "loss" is the plan-vs-CAP gap, not loss:
 # delivery is pinned at ~6 while plans grow 6->28, so <0.5 fired on 67% of the fleet.
 _bud = dist.get("visual_budget")
@@ -203,6 +219,41 @@ else:
     print(f"  ✅ #1982 budget-relative delivery = {dist.get('beat_delivery_vs_budget')}"
           f"  (budget={_bud}, plan={dist.get('beats_planned')})")
     print("       judge THIS, not beat_delivery_ratio — the plan is not what delivery was allowed")
+
+# ── #1991 CEILING vs COLLAPSE — the discriminator. Two mechanisms produce the identical "dull"
+# symptom and a fix for one does NOTHING for the other:
+#   regime A  planned 16, delivered 5  ->  coverage COLLAPSE (the floor/strobe contract, #1974)
+#   regime B  planned  3, delivered 3  ->  budget CEILING    (raise the budget toward capacity)
+# This used to require correlating 4-6 interleaved log receipts per job, and mis-pairing exactly
+# that kind of receipt produced five wrong conclusions on 2026-07-30. Now the doc says it.
+_sb = v.get("shot_budget") or {}
+if not _sb:
+    print("  ⬜ #1991 shot_budget ABSENT — job predates the deploy")
+else:
+    _cap, _mu = _sb.get("capacity"), _sb.get("max_units")
+    print(f"  ✅ #1991 shot_budget: max_units={_mu} via {_sb.get('budget_src')}"
+          f" · planned={_sb.get('planned')} · capacity={_cap}"
+          f" (one every {_sb.get('capacity_cadence_s')}s from {_sb.get('n_segments')} segment(s)"
+          f" via {_sb.get('capacity_src')})")
+    if _sb.get("over_cap"):
+        print("       🔴 the plan EXCEEDS its own born-short cap — the cap was bypassed, so every")
+        print("          coverage number below is measured against a plan that should not exist")
+    if isinstance(_cap, int) and isinstance(_mu, int) and _cap > _mu:
+        print(f"       🔴 REGIME B (budget CEILING): the runtime could hold {_cap} pictures at the"
+              f" strobe floor")
+        print(f"          it already enforces, and the budget admitted {_mu}. Raising the budget is"
+              f" the fix;")
+        print("          variety/monotony work operates BELOW this ceiling and cannot move it.")
+    elif _sb.get("planned") and isinstance(_mu, int) and int(_sb["planned"]) > _mu:
+        print("       🟡 REGIME A (coverage COLLAPSE): more beats were planned than the budget"
+              " allowed;")
+        print("          judge the floor/strobe contract (#1974), not the budget.")
+    if _sb.get("capacity_src") == "none":
+        print("       🔴 capacity UNKNOWN at the plan seam — the segment timing was not published"
+              " yet,")
+        print("          so this budget was computed before the durations existed. Under-budgets"
+              " every job")
+        print("          regardless of the ceiling, and no ceiling change can fix it.")
 print()
 flags = []
 # JUDGE THE BUDGET-RELATIVE RATIO, NEVER THE PLAN-RELATIVE ONE (corrected 2026-07-30 with #1982).
