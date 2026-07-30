@@ -43,7 +43,11 @@ while [[ $# -gt 0 ]]; do
     --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --short)    SHORT="true"; shift ;;   # Social Short path (9:16, kinetic captions, assembly)
     --visuals)  VISUALS="true"; shift ;;
-    --short)    SHORT="true"; shift ;;  # born-short (short_video=true); pair with --duration 1.0
+    --visuals-auto) VISUALS="auto"; shift ;;  # T3-SAFE: send NEITHER wants_visuals nor
+                    # visuals_opt_out, so the worker's non-fiction $0 auto-default applies
+                    # (deterministic diagrams/cards, NO paid images). Use this to exercise the
+                    # visual PLANNING path — info-figure routing, figure adoption — without
+                    # tripping the T4 paid-visuals gate. `--visuals` remains T4 (real images).
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
@@ -98,13 +102,18 @@ body = {
     "style": style,
     "quality_tier": tier,
     "economy_mode": tier == "low",
-    "wants_visuals": visuals == "true",
-    "visuals_opt_out": visuals != "true",
+
     "intro_enabled": False,
     "allow_premium": tier in ("high", "ultra"),
     "skip_clarifier": True,
     "language": "en-US",
 }
+# "auto" sends NEITHER key → the worker's own non-fiction $0 visual default decides.
+# Sending visuals_opt_out=true (the old else-branch) killed visuals outright, so the
+# visual-planning path could never be exercised at T3.
+if visuals != "auto":
+    body["wants_visuals"] = visuals == "true"
+    body["visuals_opt_out"] = visuals != "true"
 if fmt:
     body["format"] = fmt
 if content_rating:
