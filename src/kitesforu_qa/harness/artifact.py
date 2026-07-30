@@ -27,6 +27,71 @@ def _g(d: Any, *path: str, default: Any = None) -> Any:
     return cur
 
 
+@dataclass(frozen=True)
+class VisualReadiness:
+    """Whether a job's VISUAL stage has actually finished — so a metric read off it means something.
+
+    THE ERROR CLASS THIS EXISTS TO KILL. On 2026-07-30 I misread a still-changing job doc as final
+    TEN times in one day. The clip array does not just grow (append-only); a visuals RE-RUN
+    REPLACES it, so the same job read 13 -> 19 -> 3 clips within minutes. Each read was internally
+    consistent and each supported a different, confident, wrong conclusion:
+
+      * "figures LOST before render"  — receipt paired with a snapshot from a DIFFERENT run
+      * "8 pending, no video"         — a mid-run snapshot; the stage finished `done` moments later
+      * a real behaviour change (a ceiling lowered 24 -> 12) shipped on that snapshot
+
+    Reasoning was sound every time. The INPUT was provisional. So the harness now refuses to let a
+    provisional doc be read silently: ask `readiness.is_final` before believing any clip-derived
+    number, or call `assert_final()` and let it raise.
+
+    FINAL means all three, because any one alone has lied here:
+      1. `visual.status == "done"` — the stage says it finished;
+      2. NO clip left `pending` — every planned picture resolved;
+      3. NO clip with an empty `asset_uri` — every resolved picture actually has bytes.
+    """
+
+    status: str
+    video_status: str
+    total_clips: int
+    pending_clips: int
+    empty_asset_uris: int
+
+    @property
+    def is_final(self) -> bool:
+        return (
+            self.status == "done"
+            and self.pending_clips == 0
+            and self.empty_asset_uris == 0
+            and self.total_clips > 0
+        )
+
+    @property
+    def why_not_final(self) -> list[str]:
+        """Ordered reasons, most decisive first — so there is ONE thing to wait on."""
+        out: list[str] = []
+        if self.total_clips == 0:
+            out.append("no clips persisted yet")
+        if self.status != "done":
+            out.append(f"visual.status={self.status!r} (not 'done')")
+        if self.pending_clips:
+            out.append(f"{self.pending_clips}/{self.total_clips} clip(s) still 'pending'")
+        if self.empty_asset_uris:
+            out.append(f"{self.empty_asset_uris} clip(s) with an empty asset_uri")
+        return out
+
+    def __str__(self) -> str:
+        if self.is_final:
+            return (
+                f"FINAL: visual.status=done, {self.total_clips} clip(s), none pending, "
+                f"all with assets (video_status={self.video_status!r})"
+            )
+        return "IN FLIGHT — do NOT measure: " + "; ".join(self.why_not_final)
+
+
+class ProvisionalArtifactError(RuntimeError):
+    """Raised when a metric is requested from a job whose visual stage has not finished."""
+
+
 @dataclass
 class Artifact:
     job_id: str
@@ -263,6 +328,43 @@ class Artifact:
         return bool(self.image_paths) or bool(self.visual_clips)
 
     # ── loaders ──
+    @cached_property
+    def visual_readiness(self) -> VisualReadiness:
+        """Classify the visual stage as FINAL or IN FLIGHT. Read this BEFORE any clip metric.
+
+        Pure and total: a malformed doc reports as in-flight (0 clips) rather than raising, because
+        an unreadable doc is exactly the case where a confident number is most dangerous.
+        """
+        v = self.doc.get("visual") if isinstance(self.doc, dict) else None
+        v = v if isinstance(v, dict) else {}
+        clips = [c for c in (v.get("clips") or []) if isinstance(c, dict)]
+        pending = sum(
+            1 for c in clips if str(c.get("status") or "").strip().lower() == "pending"
+        )
+        empty = sum(1 for c in clips if not str(c.get("asset_uri") or "").strip())
+        return VisualReadiness(
+            status=str(v.get("status") or "").strip().lower(),
+            video_status=str(v.get("video_status") or "").strip().lower(),
+            total_clips=len(clips),
+            pending_clips=pending,
+            empty_asset_uris=empty,
+        )
+
+    def assert_visual_final(self) -> VisualReadiness:
+        """Raise unless the visual stage finished. Use this to GATE a claim, not to decorate one.
+
+        The whole point is that it is louder than a comment: a probe that calls this cannot quietly
+        report a mid-run number, which is how a lowered ceiling got shipped on a snapshot.
+        """
+        r = self.visual_readiness
+        if not r.is_final:
+            raise ProvisionalArtifactError(
+                f"job {self.job_id}: {r}. Re-read once the stage settles — this doc is still "
+                f"changing, and a visuals RE-RUN can REPLACE the clip array (13 -> 19 -> 3 observed "
+                f"on one job), not merely append to it."
+            )
+        return r
+
     @classmethod
     def from_doc(
         cls,
