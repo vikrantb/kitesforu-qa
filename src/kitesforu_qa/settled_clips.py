@@ -42,10 +42,25 @@ from typing import Any
 
 __all__ = ["SettledResult", "clips_fingerprint", "wait_for_settled_clips"]
 
-#: Two identical reads this far apart is the default stability proof. Shorter risks catching a pause
-#: between passes; the observed churn on `43107d93` spanned tens of seconds.
-DEFAULT_STABLE_SECONDS = 20.0
-DEFAULT_TIMEOUT_SECONDS = 300.0
+#: Two identical reads this far apart is the default stability proof.
+#:
+#: THIS DEFAULT WAS 20.0 AND IT WAS WRONG — it reported ``settled`` on the very first real use, and
+#: the array changed again minutes later. The window has to exceed the longest QUIET GAP between
+#: writes, not the duration of the churn.
+#:
+#: So the gap was MEASURED rather than guessed. Polling `43107d93` every 10s for 7 minutes, on a job
+#: already reporting ``status=completed`` AND ``visual.status=done``::
+#:
+#:      t=  1s   n=17   fp=8cbfcfd49b
+#:      t= 73s   n=18   fp=64a92d2725     <- 72s of silence, then a write
+#:      t= 84s   n= 8   fp=5ea7a81650     <- a REWRITE that discarded 10 clips
+#:      t=420s   (no further change)
+#:
+#: A 20s window declares victory at t=21s, inside that 72s gap. 120s clears the longest observed gap
+#: with margin; the timeout rises with it so a slow-but-real settle is not cut short. Callers that
+#: know their job is long finished can pass a smaller ``stable_seconds`` deliberately.
+DEFAULT_STABLE_SECONDS = 120.0
+DEFAULT_TIMEOUT_SECONDS = 600.0
 
 
 @dataclass(frozen=True)

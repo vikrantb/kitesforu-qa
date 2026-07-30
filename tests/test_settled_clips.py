@@ -121,3 +121,46 @@ class TestTheFingerprint:
 
     def test_identical_lists_match(self):
         assert clips_fingerprint(_clips(4)) == clips_fingerprint(_clips(4))
+
+
+class TestTheDefaultWindowClearsTheMeasuredGap:
+    """The 20.0 default reported `settled` on its first real use and the array moved again minutes
+    later. Polling `43107d93` every 10s for 7 minutes — already `status=completed`, `visual.status=done`:
+
+        t=  1s  n=17   t= 73s  n=18   t= 84s  n=8   t=420s  (no further change)
+
+    The binding number is the 72s of SILENCE before the t=73s write, not the span of the churn.
+    """
+
+    MEASURED_QUIET_GAP_S = 72.0
+
+    def test_the_default_clears_the_longest_observed_quiet_gap(self):
+        from kitesforu_qa.settled_clips import DEFAULT_STABLE_SECONDS
+
+        assert DEFAULT_STABLE_SECONDS > self.MEASURED_QUIET_GAP_S, (
+            "a window inside the measured 72s quiet gap declares victory mid-churn"
+        )
+
+    def test_the_timeout_still_allows_several_windows(self):
+        from kitesforu_qa.settled_clips import DEFAULT_STABLE_SECONDS, DEFAULT_TIMEOUT_SECONDS
+
+        assert DEFAULT_TIMEOUT_SECONDS >= DEFAULT_STABLE_SECONDS * 3, (
+            "a timeout barely longer than one window can never observe a settle"
+        )
+
+    def test_the_defaults_replay_the_real_trace_correctly(self):
+        """Drive the ACTUAL observed timeline: a write at t=73 and t=84, then quiet."""
+        c = _Clock()
+        events = {73.0: _clips(18, "b"), 84.0: _clips(8, "c")}
+        state = {"v": _clips(17, "a")}
+
+        def read():
+            for t in sorted(events):
+                if c.t >= t:
+                    state["v"] = events[t]
+            return state["v"]
+
+        r = wait_for_settled_clips(read, poll_s=5.0, sleep=c.sleep, now=c.now)
+        assert r.settled is True
+        assert len(r.clips) == 8, f"settled on the wrong array: {len(r.clips)}"
+        assert c.t >= 84.0 + 120.0, "must have observed a full quiet window AFTER the last write"
