@@ -110,3 +110,6 @@ docker/output/
 
 .worktrees/
 .claude/worktrees/
+
+# Local session control token (keep-going hook) — never tracked
+.claude/.awaiting
