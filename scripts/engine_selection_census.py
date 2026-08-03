@@ -60,10 +60,21 @@ def _diagram_kinds(node, out):
             _diagram_kinds(v, out)
 
 
+# SPLIT BY SURFACE, ALWAYS. Blending them hides the severe case: measured 2026-08-03, a 120-job
+# sample was 92 shorts and 28 episodes, and the blended flowchart share (42.2%) UNDERSTATED
+# episodes, where it is 73.6% and 21 of 29 engines never fire. The surface marker is
+# `format == "short_video"` — NOT `is_short` / `aspect_ratio`, which is what I guessed first, and
+# which silently labelled all 120 jobs "episode".
+by_surface: dict = {}
 kinds, jobs_with_visuals = Counter(), 0
 for snap in jobs:
+    doc = snap.to_dict() or {}
+    surface = "short_video" if doc.get("format") == "short_video" else "episode"
     found = []
-    _diagram_kinds(snap.to_dict() or {}, found)
+    _diagram_kinds(doc, found)
+    entry = by_surface.setdefault(surface, {"jobs": 0, "beats": Counter()})
+    entry["jobs"] += 1
+    entry["beats"].update(found)
     if found:
         jobs_with_visuals += 1
         kinds.update(found)
@@ -76,11 +87,26 @@ for k, n in kinds.most_common():
     print(f"  {k:24} {n:5}  {pct:5.1f}%")
 
 # An advertised engine is "reached" if its own name OR any kind it fits appears.
-def reached(name):
-    if name in kinds:
+def reached(name, in_kinds=None):
+    """Did this engine draw anything? `in_kinds` scopes the question to one surface.
+
+    Compares against the GENERALIST floor (0.4) rather than >0, because `_MermaidEngine` fits any
+    string at 0.4 — an "some engine fits it" test passes for every name including nonsense.
+    """
+    in_kinds = kinds if in_kinds is None else in_kinds
+    if name in in_kinds:
         return True
     eng = [e for e in _REGISTRY if e.name == name]
-    return any(e.fit(k) > 0.4 for e in eng for k in kinds)
+    return any(e.fit(k) > 0.4 for e in eng for k in in_kinds)
+
+for _surf, _info in sorted(by_surface.items()):
+    _b = _info["beats"]
+    _tot = sum(_b.values())
+    print(f"\n--- {_surf}: {_info['jobs']} jobs, {_tot} diagram beats")
+    for _k, _n in _b.most_common(6):
+        print(f"    {_k:22} {_n:5} {100.0 * _n / max(_tot, 1):5.1f}%")
+    _dead = sorted(a for a in advertised if not reached(a, _b))
+    print(f"    NEVER rendered on this surface: {len(_dead)} of {len(advertised)}")
 
 dead = sorted(a for a in advertised if not reached(a))
 print(f"\nADVERTISED to the director: {len(advertised)}")
