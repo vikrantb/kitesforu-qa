@@ -88,7 +88,8 @@ def _pixel_invariants(frames: list[str]) -> list[dict]:
         # frame (witness 7171699f f_004: 28 bright edge pixels, std only 15.9) passes a
         # std>38 guard while being a real visible defect; >=12 bright pixels can never
         # be a lone hot pixel.
-        if int((im[:, :3] >= 200).sum()) >= 12 or int((im[:, -3:] >= 200).sum()) >= 12:
+        if (int((im[:, :3] >= 200).sum()) >= 12 or int((im[:, -3:] >= 200).sum()) >= 12
+                or int((im[:3, :] >= 200).sum()) >= 12 or int((im[-3:, :] >= 200).sum()) >= 12):
             edge_clip += 1
     if letterbox >= max(2, len(samp) // 2):
         issues.append({"sev": "MAJOR", "msg": (

@@ -85,13 +85,24 @@ for p in ps:
 edge = []
 for p in ps:
     g = np.asarray(Image.open(p).convert("L"), dtype=np.float32)
-    # >=12 bright pixels in the outer 3 columns = real content touching the frame
-    # edge (witness f_004 measured 28; all clean frames 0; a lone hot pixel cannot
-    # reach 12). The old std>38 guard MISSED the witness (std 15.9 — a small
-    # portrait callout leaves the column mostly dark).
-    if int((g[:, :3] >= 200).sum()) >= 12 or int((g[:, -3:] >= 200).sum()) >= 12:
+    # >=12 bright pixels in the outer 3 columns/rows = real content touching the
+    # frame edge (LEFT/RIGHT witness 7171699f f_004 = 28px; TOP/BOTTOM witness
+    # 4d41320d f_001 = 517/908px — the clipped hook composite the eye pass caught
+    # while the left/right-only arm passed it; every clean frame measures 0).
+    if (int((g[:, :3] >= 200).sum()) >= 12 or int((g[:, -3:] >= 200).sum()) >= 12
+            or int((g[:3, :] >= 200).sum()) >= 12 or int((g[-3:, :] >= 200).sum()) >= 12):
         edge.append(p.split("/")[-1])
+# 9c. HALF-FRAME DEAD ZONE (witness 4d41320d f_007/f_008: content crammed in the
+# top 40-50%, bottom half of the 9:16 canvas empty for ~10s — the whole-frame void
+# census passes it; measured: bottom-half mean 9 on the witnesses, 31-105 clean).
+halfdead = []
+for p in ps:
+    g = np.asarray(Image.open(p).convert("L"), dtype=np.float32)
+    bh = g[g.shape[0]//2:, :]
+    if bh.mean() < 15 and float((bh > 40).mean())*100 < 2:
+        halfdead.append(p.split("/")[-1])
 print(f"[9 frames]    n={n} three-arm-void={len(void)} :: {'PASS' if not void else 'EYES-REQUIRED'}")
+print(f"              bottom-half-dead={len(halfdead)} {halfdead[:4]} :: {'PASS' if len(halfdead) <= max(1, n//5) else 'WARN'}")
 print(f"              edge-text-clip={len(edge)} {edge[:4]} :: {'PASS' if not edge else 'FAIL'}")
 if void: print(f"              flagged (may be legible dark type — LOOK before concluding): {void[:6]}")
 PY
