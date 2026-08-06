@@ -83,9 +83,12 @@ def _pixel_invariants(frames: list[str]) -> list[dict]:
         if mid.size and (mid.mean() - max(top.mean(), bot.mean())) > 16 \
                 and top.std() < 9 and bot.std() < 9:
             letterbox += 1
-        # C: bright (text/marker) pixels hugging the very edge column => content cut off-frame.
-        if (im[:, :2].max() > 200 or im[:, -2:].max() > 200) \
-                and np.concatenate([im[:, :3].ravel(), im[:, -3:].ravel()]).std() > 38:
+        # C: bright (text/marker) pixels hugging the very edge columns => content cut
+        # off-frame. Count-based, not std-based: a small clipped callout in a portrait
+        # frame (witness 7171699f f_004: 28 bright edge pixels, std only 15.9) passes a
+        # std>38 guard while being a real visible defect; >=12 bright pixels can never
+        # be a lone hot pixel.
+        if int((im[:, :3] >= 200).sum()) >= 12 or int((im[:, -3:] >= 200).sum()) >= 12:
             edge_clip += 1
     if letterbox >= max(2, len(samp) // 2):
         issues.append({"sev": "MAJOR", "msg": (
