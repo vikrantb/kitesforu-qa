@@ -24,7 +24,10 @@ print(f"[1 intake]    ask={dm}min status={d.get('status')} :: {ok(d.get('status'
 mt = d.get("master_segment_timeline") or []
 sp = max((int(x.get("end_ms") or 0) for x in mt if isinstance(x, dict)), default=0)/60000
 ratio = sp/dm if dm else 0
-band = "PASS" if 0.7 <= ratio <= 1.4 else ("WARN" if ratio <= 2 else "FAIL")
+# Band tightened 2026-08-06: the old <=1.4 PASS flattered the exact defect the
+# sub-capsule campaign fixed (a 1.39x witness read PASS). PASS now mirrors the
+# trim band (+/-25%); 1.25-1.5 = WARN; beyond = FAIL.
+band = "PASS" if 0.75 <= ratio <= 1.25 else ("WARN" if 0.5 <= ratio <= 1.5 else "FAIL")
 print(f"[2 script]    speech={sp:.2f}min ratio={ratio:.2f}x :: {band}")
 
 # 3. AUDIO — tail bound (speech end vs audio stream measured later), calibration stamp
