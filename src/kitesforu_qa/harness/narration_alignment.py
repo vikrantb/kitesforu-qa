@@ -22,8 +22,24 @@ seeing the defect they name.
 
 WHAT WE MEASURE INSTEAD
 -----------------------
-The caption cue track (``visual.captions_vtt``) carries REAL sentence-level timings derived from the
-synthesized audio, so it is ground truth for "what is being said when". Against that spine:
+The caption cue track (``visual.captions_vtt``) is the timing spine. **Read its precision honestly**
+(corrected 2026-08-06 after reading the producer — an earlier version of this docstring called these
+"REAL sentence-level timings", which is only half true):
+
+* **Segment boundaries ARE measured.** ``master_segment_timeline`` is stamped by the audio combiner
+  from the synthesized audio (``master_segment_timeline_source == 'combiner'``).
+* **Cue splits WITHIN a segment are ESTIMATED.** ``stages/visuals/captions.py:288`` computes
+  ``c_end = start + round(span * acc / total)`` — character-proportional, not measured. A segment is
+  ~10s and typically splits into 2-3 cues, so an individual cue edge can be off by a second or two.
+
+What that means per metric: ``hold_across_sentences`` counts cues (chunking is by TEXT, so the count
+is sound); ``boundary_alignment`` measures against a spine that is exact at segment edges and
+approximate within, so read it as "cuts do not track speech" rather than as a millisecond claim; and
+``shown_words_lag``'s witness median of 8635ms is an order of magnitude beyond the estimation error,
+so that finding survives the correction. Word-level truth would need a TTS alignment payload or a
+forced aligner; neither is captured today.
+
+Against that spine:
 
 1. ``hold_across_sentences`` — how many spoken sentences a single distinct picture is held across.
    A picture authored for one idea that sits across several sentences is the founder's complaint.
