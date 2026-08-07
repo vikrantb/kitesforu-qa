@@ -166,14 +166,24 @@ def main() -> int:
     skipped = len(docs) - len(results)
     print(f"scanned={len(results)} skipped(no clips/captions)={skipped}  project={_PROJECT}\n")
 
-    header = f"{'job':10} {'clips':>5} {'sent/pic':>8} {'on-bound':>8} {'shown-lag':>9} {'starved':>7}"
+    # TWO lag columns, deliberately. `fuzzy-lag` is shown_words_lag over the enrichment's
+    # `on_screen_text` — a PARAPHRASE of the spoken line, matched by SIMILARITY. `exact-lag` is
+    # card_provenance_lag over the clip's own `card_text`, scored ONLY where the rendered sentence
+    # is spoken VERBATIM. Until 2026-08-07 only the fuzzy one was printed, and every report of
+    # "median shown-vs-spoken lag" — including the number that scoped this whole campaign — was
+    # silently the fuzzy figure while the exact metric was computed and thrown away.
+    header = (
+        f"{'job':10} {'clips':>5} {'sent/pic':>8} {'on-bound':>8} "
+        f"{'fuzzy-lag':>9} {'exact-lag':>9} {'starved':>7}"
+    )
     print(header)
     print("-" * len(header))
     for r in results:
         lag = f"{r['shown'].median_lag_ms:.0f}ms" if r["shown"].traceable else "-"
+        exact = f"{r['provenance'].median_lag_ms:.0f}ms" if r["provenance"].traceable else "-"
         print(
             f"{str(r['job_id'])[:8]:10} {r['clips']:>5} {r['hold'].median_sentences:>8.1f} "
-            f"{r['boundary'].aligned_frac:>7.0%} {lag:>9} {r['starved'].starved:>7}"
+            f"{r['boundary'].aligned_frac:>7.0%} {lag:>9} {exact:>9} {r['starved'].starved:>7}"
         )
         if args.verbose:
             for o in r["shown"].offenders[:3]:
@@ -184,12 +194,36 @@ def main() -> int:
 
     if results:
         lags = [r["shown"].median_lag_ms for r in results if r["shown"].traceable]
+        exact_lags = [r["provenance"].median_lag_ms for r in results if r["provenance"].traceable]
         print(f"\n=== FLEET (n={len(results)} jobs) ===")
         print(f" median sentences one picture is held across : {median([r['hold'].median_sentences for r in results]):.1f}")
         print(f" median cuts landing on a speech boundary    : {median([r['boundary'].aligned_frac for r in results]):.0%}")
         print(f" median cut offset from nearest boundary     : {median([r['boundary'].median_offset_ms for r in results]):.0f}ms")
+        # ALWAYS print the denominator with the median. A lag median states a fact about the rows
+        # that CONTRIBUTED, and both metrics skip most jobs — reporting the bare number promotes a
+        # subset to "fleet-wide" (which is exactly how this campaign's headline was overstated).
         if lags:
-            print(f" median shown-vs-spoken lag on text cards    : {median(lags):.0f}ms")
+            print(
+                f" FUZZY  lag (on_screen_text, similarity)     : {median(lags):.0f}ms"
+                f"   [n={len(lags)}/{len(results)} jobs]"
+            )
+        if exact_lags:
+            print(
+                f" EXACT  lag (card_text, verbatim-only)       : {median(exact_lags):.0f}ms"
+                f"   [n={len(exact_lags)}/{len(results)} jobs]"
+            )
+        else:
+            print(
+                f" EXACT  lag (card_text, verbatim-only)       : no data"
+                f"   [n=0/{len(results)} jobs — card_text ships from workers #2155 (2026-08-07),"
+                f" so jobs older than that carry none]"
+            )
+        if lags and not exact_lags:
+            print(
+                "   ^ TRUST THE EXACT ROW, NOT THE FUZZY ONE. The fuzzy metric matches a"
+                " PARAPHRASE by similarity;\n     thresholded similarity is what made workers"
+                " #2153 anchor 498/978 beats to unrelated narration."
+            )
         print(f" jobs with >= 1 zero-duration clip           : {sum(1 for r in results if r['starved'].starved)}/{len(results)}")
     return 0
 
