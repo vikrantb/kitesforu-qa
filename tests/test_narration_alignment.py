@@ -10,6 +10,7 @@ placement guarantees by construction.
 
 from __future__ import annotations
 
+from kitesforu_qa.harness import narration_alignment as na
 from kitesforu_qa.harness.narration_alignment import (
     MAX_SENTENCES_PER_PICTURE,
     MAX_SHOWN_WORDS_LAG_MS,
@@ -135,7 +136,7 @@ class TestStarvedClips:
         assert not r.ok
         assert r.beat_indexes == [7]
 
-    def test_zero_length_AND_unplaced_is_the_worst_case_not_a_skipped_one(self):
+    def test_zero_length_and_unplaced_is_the_worst_case_not_a_skipped_one(self):
         """Regression pin: an earlier guard required start_ms and hid these (7/38 vs the true 22/38)."""
         clips = [_clip(0, 2000, "a"), {"duration_ms": 0, "content_hash": "b", "beat_index": 9}]
         r = starved_clips(clips)
@@ -180,3 +181,61 @@ class TestDegenerateInputsFailSoft:
     def test_end_ms_shape_is_accepted_as_well_as_duration_ms(self):
         clips = [{"start_ms": 0, "end_ms": 2000, "content_hash": "a"}]
         assert hold_across_sentences(clips, CUES).assessed_clips == 1
+
+
+# -- card_provenance_lag: EXACT provenance, never a guess ------------------------------
+
+class TestCardProvenanceLag:
+    """The witness, reproduced. Card at 21188ms renders "Textbooks miss it: not all sand makes
+    good concrete."; seg1 (4523-10289ms) SPEAKS that sentence verbatim. The picture arrives
+    16665ms after its own sentence begins.
+
+    This exists because the fuzzy sibling (``shown_words_lag``) needs a similarity THRESHOLD,
+    and thresholded keyword scoring is exactly what made workers PR #2153 anchor 498 of 978
+    beats to narration mentioning nothing of them. Here: verbatim substring or not scored.
+    """
+
+    SEGMENTS = [
+        (0, 4062, "Imagine the glittering skyscrapers of Dubai."),
+        (4523, 10289, "Textbooks miss it: not all sand makes good concrete. Concrete needs "
+                      "interlocking particles for a strong, stable skeleton."),
+        (10672, 23096, "Desert sand, those beautiful round quartz grains, are too smooth, "
+                       "like tiny, polished marbles."),
+    ]
+
+    def test_the_witness_lag_reproduces(self):
+        cards = [{"card_text": "Textbooks miss it: not all sand makes good concrete.",
+                  "start_ms": 21188, "duration_ms": 2500}]
+        r = na.card_provenance_lag(cards, self.SEGMENTS)
+        assert r.traceable == 1
+        assert r.median_lag_ms == 16665.0
+        assert r.offenders[0]["spoken_ms"] == 4523 and r.offenders[0]["shown_ms"] == 21188
+
+    def test_a_sentence_spoken_nowhere_is_not_scored_rather_than_guessed(self):
+        """The #2153 failure mode, made structurally impossible."""
+        cards = [{"card_text": "a sentence the script never contains",
+                  "start_ms": 5000, "duration_ms": 2500}]
+        r = na.card_provenance_lag(cards, self.SEGMENTS)
+        assert r.traceable == 0 and r.cards == 1 and r.offenders == []
+
+    def test_a_correctly_paired_card_scores_zero_lag(self):
+        """Symmetry: the metric must reward a right answer, not only punish a wrong one."""
+        cards = [{"card_text": "Textbooks miss it: not all sand makes good concrete.",
+                  "start_ms": 4523, "duration_ms": 2500}]
+        r = na.card_provenance_lag(cards, self.SEGMENTS)
+        assert r.traceable == 1 and r.median_lag_ms == 0.0 and r.offenders == []
+
+    def test_punctuation_and_casing_do_not_break_the_match(self):
+        cards = [{"card_text": "TEXTBOOKS MISS IT -- not all sand makes good concrete!!",
+                  "start_ms": 4523, "duration_ms": 2500}]
+        assert na.card_provenance_lag(cards, self.SEGMENTS).traceable == 1
+
+    def test_clips_without_card_text_are_ignored(self):
+        cards = [{"start_ms": 4523, "duration_ms": 2500},
+                 {"card_text": "", "start_ms": 9000, "duration_ms": 2500}]
+        r = na.card_provenance_lag(cards, self.SEGMENTS)
+        assert r.traceable == 0
+
+    def test_empty_inputs_are_safe(self):
+        assert na.card_provenance_lag([], self.SEGMENTS).traceable == 0
+        assert na.card_provenance_lag([{"card_text": "x", "start_ms": 0}], []).traceable == 0

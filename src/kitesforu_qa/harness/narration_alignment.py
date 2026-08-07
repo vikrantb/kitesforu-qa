@@ -429,6 +429,80 @@ def shown_words_lag(cards: Iterable[dict[str, Any]], cues: Sequence[Cue]) -> Sho
     )
 
 
+def _normalize(text: str) -> str:
+    """Collapse to comparable prose: lowercase, letters/digits/spaces only, single-spaced.
+
+    Deliberately NOT a similarity score. The card sentence is authored FROM the script, so when
+    the pairing is right the sentence appears in a segment VERBATIM; normalization only absorbs
+    punctuation/casing/whitespace differences introduced by rendering.
+    """
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower()))
+
+
+def card_provenance_lag(
+    cards: Iterable[dict[str, Any]],
+    segments: Sequence[tuple[int, int, str]],
+) -> ShownWordsResult:
+    """EXACT-provenance lag: how late a card appears relative to when its own sentence is SPOKEN.
+
+    ``cards`` are clip dicts carrying ``card_text`` (the rendered sentence, persisted by
+    workers ``beat_restamp``). ``segments`` are ``(start_ms, end_ms, text_full)`` from
+    ``segments_ready`` joined to the REAL offsets in ``master_segment_timeline`` — which is a
+    LIST of ``{index,start_ms,end_ms}``, not a dict; reading it as a dict silently yields gapless
+    offsets and a wrong answer (that mistake produced a retracted 260ms median).
+
+    WHY EXACT AND NOT :func:`shown_words_lag`'s similarity. The fuzzy sibling needs a threshold,
+    and thresholded keyword scoring is precisely what made workers PR #2153 anchor 498 of 978
+    beats to narration that mentions nothing of them (precision 89% -> 61%). Here a card is
+    scored ONLY when its normalized sentence is a SUBSTRING of a segment's normalized text. No
+    match -> not scored, never guessed. That is why this can be trusted to drive a fix.
+
+    Witness ``19327d06``: the card at 21188ms renders "Textbooks miss it: not all sand makes good
+    concrete." and seg1 (4523-10289ms) speaks it verbatim -> a ~11s lag, exactly reproducible.
+    """
+    cards = list(cards)
+    if not cards or not segments:
+        return ShownWordsResult()
+
+    norm_segments = [(a, b, _normalize(t)) for a, b, t in segments if t]
+    spans = delivered_spans(cards)
+    lags: list[int] = []
+    offenders: list[dict[str, Any]] = []
+    for i, card in enumerate(cards):
+        span = spans.get(i)
+        text = str(card.get("card_text") or "").strip()
+        if span is None or not text:
+            continue
+        needle = _normalize(text)
+        if not needle:
+            continue
+        owner = next(((a, b) for a, b, hay in norm_segments if needle in hay), None)
+        if owner is None:
+            continue  # not spoken verbatim anywhere -> NOT scored, never guessed
+        lag = abs(span[0] - owner[0])
+        lags.append(lag)
+        if lag > MAX_SHOWN_WORDS_LAG_MS:
+            offenders.append(
+                {
+                    "shown_ms": span[0],
+                    "spoken_ms": owner[0],
+                    "lag_ms": lag,
+                    "on_screen": text[:70],
+                }
+            )
+
+    if not lags:
+        return ShownWordsResult(cards=len(cards))
+    offenders.sort(key=lambda o: -o["lag_ms"])
+    return ShownWordsResult(
+        median_lag_ms=float(median(lags)),
+        worst_lag_ms=max(lags),
+        traceable=len(lags),
+        cards=len(cards),
+        offenders=offenders[:10],
+    )
+
+
 def _is_starved(clip: dict[str, Any]) -> bool:
     """True when a clip can occupy no screen time at all.
 
