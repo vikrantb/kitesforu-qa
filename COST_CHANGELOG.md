@@ -2,6 +2,31 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-08-06 — Narration-sync instrument: does the picture follow the words? (cost-NEUTRAL, $0)
+
+**Files:** `src/kitesforu_qa/harness/narration_alignment.py` (new),
+`src/kitesforu_qa/harness/checks/narration_sync.py` (new), `scripts/narration_sync_audit.py`
+(new), `tests/test_narration_alignment.py` (new), `harness/checks/__init__.py` (registration).
+
+**Context:** the founder reported "whats shown on visuals and the audio dont match" on witness
+`f6709ffc-1be9-4fb4-923e-1fd0bf0dbeb8`. Both existing gates PASS that job —
+`video_sync.clips_beat_aligned` scores 61/61 = 1.00 and the pipeline-stamped
+`visual.av_content_sync` reports 0 offenders with `median_offset_ms == max_offset_ms == 120` —
+because both only ask whether a clip starts inside its own beat window, which placement
+guarantees by construction. Four new axes measure against the caption cue track instead and all
+four FAIL on that witness.
+
+**Per-unit $ delta: $0.** Deterministic timing math over job docs the pipeline already writes
+(T1 on the test-cost ladder). No LLM call, no VLM call, no provider call, no generation, no new
+job created — `scripts/narration_sync_audit.py` is read-only and reuses existing artifacts, per
+the reuse-before-generate rule. Firestore reads only, on the same docs other QA scripts already
+read. No pricing-page implication.
+
+**Cost story it improves:** the fleet-level defect (2.0 sentences per picture, 28% of cuts on a
+speech boundary, 7423ms shown-vs-spoken lag, 22/38 jobs with a zero-duration clip) was
+previously invisible, so paid image generations were being spent on visuals that land against
+the wrong words — and 22/38 jobs paid to author at least one clip that never reached the screen.
+
 ## 2026-07-25 — Fleet Drift Sentinel severity/denominator hardening (cost-NEUTRAL, $0)
 
 **Files:** `scripts/fleet_drift_sentinel.py`, `tests/test_fleet_drift_sentinel.py`, README.
