@@ -57,10 +57,16 @@ Population: the 40 most recent ``podcast_jobs`` with ``status == completed``; 38
 ``visual.clips`` and ``visual.captions_vtt``.
 
     median sentences one picture is held across : 2.0
-    median cuts landing on a sentence boundary  : 28%   (at BOUNDARY_TOLERANCE_MS = 150)
-    median cut offset from nearest boundary     : 845ms
+    median cuts landing on a sentence boundary  : 27%   (at BOUNDARY_TOLERANCE_MS = 150)
+    median cut offset from nearest boundary     : 853ms
     median shown-vs-spoken lag on text cards    : 7423ms
     jobs with >= 1 zero-duration clip           : 22/38
+
+RE-MEASURED after the window-semantics correction (see :func:`delivered_spans`). The earlier run of
+these same figures used ``duration_ms`` as the window, which silently excluded every zero-duration
+clip — present in 22 of the 38 jobs, i.e. exactly the clips most likely to be mis-timed. The bias was
+real and the headline HELD: 2.0 unchanged, 28% -> 27%, 845ms -> 853ms, 7423ms unchanged. Reported
+because a number whose method was wrong is worth re-deriving even when the answer survives.
 
 On witness ``f6709ffc`` specifically, of the 7 on-screen text cards whose words are traceable to a
 spoken sentence, the median gap between SHOWN and SPOKEN is **8635ms** (7/7 beyond 2s, 5/7 beyond
@@ -201,8 +207,48 @@ class ShownWordsResult:
         )
 
 
+def delivered_spans(clips: Sequence[dict[str, Any]]) -> dict[int, tuple[int, int]]:
+    """The window each clip is actually ON SCREEN for, keyed by its index in ``clips``.
+
+    THE DELIVERED WINDOW IS THE GAP TO THE NEXT DISTINCT START, not ``duration_ms``. That is the
+    assembler's own rule (``video_assembler.resolve_bounds`` uses ``end = sf[i+1]``;
+    ``pacing/destrobe`` computes ``win = si[i+1] - si[i]``).
+
+    THIS CORRECTS A BIAS IN THIS MODULE'S OWN PUBLISHED NUMBERS. Every metric here used to derive
+    its window from ``duration_ms``, which silently DROPPED every zero-duration clip — and 22 of 38
+    fleet jobs carry at least one. A ``duration_ms`` of 0 does not mean "not shown"; it means "no
+    measured narration window", and the compositor still paints the clip until the next one starts.
+    So the fleet figures published from the old code were computed on a sample that excluded exactly
+    the clips most likely to be mis-timed.
+
+    Clips stacked at one timestamp do not bound each other (the unanchored-beat cluster — witness
+    4d41320d stacks six at 24403), or every one of them would collapse to a zero-width window."""
+    rows = []
+    for i, clip in enumerate(clips or []):
+        if not isinstance(clip, dict):
+            continue
+        try:
+            rows.append((int(clip.get("start_ms")), i, clip))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+    rows.sort(key=lambda r: r[0])
+    out: dict[int, tuple[int, int]] = {}
+    for n, (start, idx, clip) in enumerate(rows):
+        end = next((s for s, _, _ in rows[n + 1 :] if s > start), None)
+        if end is None:
+            span = _span(clip)
+            end = span[1] if span else None
+        if end is not None and end > start:
+            out[idx] = (start, int(end))
+    return out
+
+
 def _span(clip: dict[str, Any]) -> tuple[int, int] | None:
-    """(start_ms, end_ms) for a clip, tolerating end_ms-vs-duration_ms shapes. None if unusable."""
+    """(start_ms, end_ms) for a clip, tolerating end_ms-vs-duration_ms shapes. None if unusable.
+
+    Used only to bound the LAST clip (which has no successor) and by :func:`starved_clips`. Every
+    other consumer must use :func:`delivered_spans` — see its docstring for why ``duration_ms`` is
+    the wrong window."""
     start = clip.get("start_ms")
     if start is None:
         return None
@@ -250,10 +296,11 @@ def hold_across_sentences(clips: Iterable[dict[str, Any]], cues: Sequence[Cue]) 
     if not clips or not cues:
         return HoldResult()
 
+    spans = delivered_spans(clips)
     envelope: dict[str, tuple[int, int]] = {}
     assessed = 0
-    for clip in clips:
-        span = _span(clip)
+    for i, clip in enumerate(clips):
+        span = spans.get(i)
         key = _asset_key(clip)
         if span is None or key is None:
             continue
@@ -300,9 +347,10 @@ def boundary_alignment(
     if not boundaries:
         return BoundaryResult()
 
+    spans = delivered_spans(clips)
     offsets: list[int] = []
-    for clip in clips:
-        span = _span(clip)
+    for i in range(len(clips)):
+        span = spans.get(i)
         if span is None:
             continue
         offsets.append(min(abs(span[0] - b) for b in boundaries))
@@ -340,10 +388,11 @@ def shown_words_lag(cards: Iterable[dict[str, Any]], cues: Sequence[Cue]) -> Sho
     if not cards or not cues:
         return ShownWordsResult()
 
+    spans = delivered_spans(cards)
     lags: list[int] = []
     offenders: list[dict[str, Any]] = []
-    for card in cards:
-        span = _span(card)
+    for i, card in enumerate(cards):
+        span = spans.get(i)
         text = card.get("text")
         if span is None or not text:
             continue
