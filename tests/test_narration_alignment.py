@@ -239,3 +239,52 @@ class TestCardProvenanceLag:
     def test_empty_inputs_are_safe(self):
         assert na.card_provenance_lag([], self.SEGMENTS).traceable == 0
         assert na.card_provenance_lag([{"card_text": "x", "start_ms": 0}], []).traceable == 0
+
+
+class TestAuditSkipsMidFlightDocs:
+    """A visuals re-run REPLACES the clip array rather than appending: 13 -> 19 -> 3 on one job,
+    and 17 -> 6 -> 17 observed on 1ab08626 while this metric was being built. Scoring a snapshot
+    reports a number that never existed, so the audit must SKIP, not score."""
+
+    @staticmethod
+    def _audit():
+        import importlib.util
+        from pathlib import Path
+
+        p = Path(__file__).resolve().parents[1] / "scripts" / "narration_sync_audit.py"
+        spec = importlib.util.spec_from_file_location("nsa", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def _doc(self, status, video_url):
+        return {
+            "status": status,
+            "visual": {
+                "clips": [{"beat_index": 0, "start_ms": 0, "duration_ms": 2000,
+                           "content_hash": "a"}],
+                **({"video_url": video_url} if video_url else {}),
+            },
+            "captions_vtt": "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nhello there friend\n",
+        }
+
+    def test_a_running_job_is_skipped(self):
+        assert self._audit().audit(self._doc("running", "gs://x/v.mp4")) is None
+
+    def test_a_completed_job_without_a_surfaced_video_is_skipped(self):
+        """The exact state observed on 1ab08626: status=completed, video_url absent, clips
+        still being rewritten."""
+        assert self._audit().audit(self._doc("completed", None)) is None
+
+    def test_master_segment_timeline_is_read_as_a_list_not_a_dict(self):
+        """Reading it as a dict silently degrades to gapless offsets — that produced a 260ms
+        median that had to be retracted."""
+        m = self._audit()
+        doc = {
+            "segments_ready": [{"index": 0, "text_full": "hello there"},
+                               {"index": 1, "text_full": "second segment here"}],
+            "master_segment_timeline": [{"index": 0, "start_ms": 0, "end_ms": 1000},
+                                        {"index": 1, "start_ms": 4523, "end_ms": 9000}],
+        }
+        rows = m._spoken_segments(doc)
+        assert rows == [(0, 1000, "hello there"), (4523, 9000, "second segment here")]

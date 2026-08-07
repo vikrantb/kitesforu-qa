@@ -36,6 +36,7 @@ from kitesforu_qa.harness.checks.video_sync import _parse_vtt_cues  # noqa: E402
 from kitesforu_qa.harness.narration_alignment import (  # noqa: E402
     Cue,
     boundary_alignment,
+    card_provenance_lag,
     hold_across_sentences,
     shown_words_lag,
     starved_clips,
@@ -53,6 +54,9 @@ def _cues(doc: dict[str, Any]) -> list[Cue]:
     return [Cue(c["start_ms"], c["end_ms"], c.get("text") or "") for c in _parse_vtt_cues(vtt)]
 
 
+_TERMINAL = {"completed", "failed_qa", "failed"}
+
+
 def _cards(doc: dict[str, Any], clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Clips whose beat puts a line of script text on screen."""
     enrichment = doc.get("_art_director_enrichment") or {}
@@ -65,19 +69,53 @@ def _cards(doc: dict[str, Any], clips: list[dict[str, Any]]) -> list[dict[str, A
     return out
 
 
+def _spoken_segments(doc: dict[str, Any]) -> list[tuple[int, int, str]]:
+    """``(start_ms, end_ms, text)`` per narration segment, on the REAL master timeline.
+
+    ``master_segment_timeline`` is a LIST of ``{index,start_ms,end_ms}``, NOT a dict. Reading it
+    as a dict silently degrades to gapless cumulative offsets and produces a plausible, wrong
+    answer — that exact mistake produced a 260ms median that had to be retracted.
+    """
+    text_by_index = {
+        int(s["index"]): str(s.get("text_full") or s.get("text_preview") or "")
+        for s in (doc.get("segments_ready") or [])
+        if isinstance(s, dict) and s.get("index") is not None
+    }
+    rows: list[tuple[int, int, str]] = []
+    for r in doc.get("master_segment_timeline") or []:
+        if not isinstance(r, dict) or "index" not in r:
+            continue
+        try:
+            rows.append((int(r["start_ms"]), int(r["end_ms"]), text_by_index.get(int(r["index"]), "")))
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
 def audit(doc: dict[str, Any]) -> dict[str, Any] | None:
-    """All four metrics for one job doc. None when the job has no measurable timing spine."""
+    """Every metric for one job doc. None when the job has no measurable timing spine.
+
+    MID-FLIGHT DOCS ARE SKIPPED, not scored. A visuals re-run REPLACES the clip array rather
+    than appending to it (13 -> 19 -> 3 observed on one job; 17 -> 6 observed on 1ab08626 while
+    this metric was being built), so a snapshot read reports a number that never existed.
+    """
     visual = doc.get("visual") or {}
     clips = visual.get("clips") or doc.get("visual_clips") or []
     cues = _cues(doc)
     if not clips or not cues:
+        return None
+    if str(doc.get("status") or "") not in _TERMINAL or not visual.get("video_url"):
         return None
 
     hold = hold_across_sentences(clips, cues)
     bound = boundary_alignment(clips, cues)
     starved = starved_clips(clips)
     shown = shown_words_lag(_cards(doc, clips), cues)
+    # EXACT provenance — scored only where the rendered sentence is spoken verbatim, so it can
+    # never invent an anchor the way thresholded keyword scoring did (workers PR #2153).
+    prov = card_provenance_lag(clips, _spoken_segments(doc))
     return {
+        "provenance": prov,
         "job_id": doc.get("job_id") or doc.get("id") or "?",
         "clips": len(clips),
         "cues": len(cues),
