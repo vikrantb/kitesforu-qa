@@ -1290,7 +1290,29 @@ def _clip_seconds(c: dict[str, Any]) -> float:
 
 
 def _clip_moves(c: dict[str, Any]) -> bool:
-    """A clip is MOVING if it is a video/motion render, or carries a Ken Burns preset."""
+    """A clip is MOVING if it is a video/motion render, or carries a Ken Burns preset.
+
+    ⚠️ THIS IS A DOC-LEVEL PROXY AND IT IS NOT EVIDENCE OF PIXEL MOTION. Measured 2026-08-08 by
+    frame-proofing two delivered masters, the relationship is INVERTED — the `video` render mode
+    this function trusts most is the MOST FROZEN class in the pipeline:
+
+        artifact                       still (Ken Burns)   video (the MOTION path)
+        cff04dc8  1080x1920 short            6.116               **0.028**
+        736dbec1  1920x1080 episode          0.455               **0.010**
+
+    (adjacent-frame mean |diff|, 96x171 gray @6fps, windows from consecutive `start_ms`.) A
+    diagram motion render is BUILD-THEN-HOLD: it reveals in ~2s and then holds a dead frame, so
+    `render_mode='video'` certifies as "moving" precisely the clips a viewer sees as a slideshow.
+    Root-caused with the engine's own smoke test — `kinetic_type` reaches 0.375 while
+    `flowchart_buildon` sits at 0.061 — so the ENGINE is fine and the doc field simply cannot see
+    the difference. Fixed in workers #2213/#2214/#2216 (a read-safe drift-out).
+
+    So: this check catches motion that is dead in the PLAN (nothing even asked to move — the
+    2026-07-23 fleet-wide death it was written for), and that is worth keeping. It CANNOT catch
+    motion that is dead in the PIXELS. For that use `scripts/frame_proof.py`, which measures the
+    delivered master — the "stamped-but-not-rendered" class in
+    `.claude/rules/artifact-verification.md`.
+    """
     if _render_mode(c) in _RENDER_MODE_VIDEO:
         return True
     preset = str(c.get("motion_preset") or "").strip().lower()
