@@ -31,6 +31,7 @@ SOURCE_WRITEUP=""   # --source-writeup <wrt_id>: simulate a writeup→podcast CO
 VISUALS="false"
 WAIT="false"
 ON_BEHALF_OF=""
+ON_BEHALF_OF_EMAIL=""   # --on-behalf-of-email: the ADDRESS (the api reads it from its own header)
 SHORT="false"       # born-short: short_video=true → 9:16, single-voice, intro/outro suppressed
 CONTENT_RATING=""   # optional maturity dial: g|pg|pg_13|r (exercises ENABLE_CONTENT_MATURITY end-to-end)
 
@@ -51,7 +52,8 @@ while [[ $# -gt 0 ]]; do
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
-    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # founder-visible: job lands in this user's library
+    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email
+    --on-behalf-of-email) ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
     -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
@@ -137,7 +139,27 @@ POST_URL="$API_BASE/v1/podcasts"
 
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS est=$EST"
 OBO_ARGS=()
-[[ -n "$ON_BEHALF_OF" ]] && OBO_ARGS=(-H "X-On-Behalf-Of: $ON_BEHALF_OF")
+if [[ -n "$ON_BEHALF_OF" ]]; then
+  # `X-On-Behalf-Of` is a CLERK USER ID, never an email. The api validates it with
+  # `_validate_clerk_user_id` (kitesforu-api/src/api/auth/clerk.py), which accepts only a
+  # `user_*` or `test_*` prefix; anything else raises `Invalid X-On-Behalf-Of user ID format`
+  # and the caller sees a bare `{"detail":"Invalid authentication credentials"}` — a 401 that
+  # looks like a BAD KEY and sends you hunting the wrong thing (measured 2026-08-08: the same
+  # TEST_API_KEY returned HTTP 200 on `GET /v1/podcasts` at that moment, and 401 with no key,
+  # so the key was provably fine). The email belongs in the SEPARATE `X-On-Behalf-Of-Email`.
+  # Fail FAST and say so, rather than emitting a request whose rejection is unreadable.
+  if [[ "$ON_BEHALF_OF" != user_* && "$ON_BEHALF_OF" != test_* ]]; then
+    echo "--on-behalf-of expects a CLERK USER ID (user_… or test_…), not '$ON_BEHALF_OF'." >&2
+    if [[ "$ON_BEHALF_OF" == *@* ]]; then
+      echo "  That looks like an email. The api validates this header as a user ID and will" >&2
+      echo "  reject it with a 401 that reads 'Invalid authentication credentials'." >&2
+      echo "  Pass the Clerk user ID; use --on-behalf-of-email for the address." >&2
+    fi
+    exit 2
+  fi
+  OBO_ARGS=(-H "X-On-Behalf-Of: $ON_BEHALF_OF")
+  [[ -n "$ON_BEHALF_OF_EMAIL" ]] && OBO_ARGS+=(-H "X-On-Behalf-Of-Email: $ON_BEHALF_OF_EMAIL")
+fi
 # ${arr[@]+...} guard: macOS bash 3.2 treats an EMPTY array expansion as an
 # unbound variable under `set -u`.
 RESP=$(curl -sS -X POST "$POST_URL" \
