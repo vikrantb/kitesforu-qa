@@ -176,13 +176,47 @@ echo "job_id=$JOB_ID  (est $EST)"
 echo "status: $API_BASE/v1/podcasts/$JOB_ID/status"
 
 if [[ "$WAIT" == "true" ]]; then
-  echo "Polling until terminal state..."
-  for i in $(seq 1 60); do
+  # BOUNDED, AND A PROBE FAILURE IS ITS OWN STATE.
+  #
+  # The iteration bound was added after a poll loop billed Cloud Run for 8 days 17 hours. But a
+  # bound alone does not fix the class: the loop below used to fold an UNREADABLE status into
+  # "keep waiting". An unauthenticated or 5xx response makes the parse print an empty string,
+  # which matches no terminal state, so the loop kept polling a job it could not read — 60
+  # useless requests that learn nothing, and in the unbounded ancestor ~26,000 of them.
+  #
+  # A probe that cannot answer is a DIFFERENT condition from "the job is still running", and it
+  # is fatal to the wait: if we cannot read status once, we almost certainly cannot read it on
+  # attempt 60 either. Consecutive failures abort with a distinct message and a non-zero exit,
+  # so the caller sees "I could not read this job" rather than a silent timeout.
+  MAX_POLLS=60
+  MAX_CONSECUTIVE_PROBE_FAILURES=3
+  probe_failures=0
+  STATUS=""
+  echo "Polling until terminal state (max $MAX_POLLS x 15s)..."
+  for i in $(seq 1 "$MAX_POLLS"); do
     sleep 15
-    STATUS=$(curl -sS "$API_BASE/v1/podcasts/$JOB_ID/status" -H "Authorization: Bearer $TEST_API_KEY" ${OBO_ARGS[@]+"${OBO_ARGS[@]}"} \
+    RAW=$(curl -sS --max-time 20 "$API_BASE/v1/podcasts/$JOB_ID/status" \
+      -H "Authorization: Bearer $TEST_API_KEY" ${OBO_ARGS[@]+"${OBO_ARGS[@]}"} 2>/dev/null)
+    STATUS=$(printf '%s' "$RAW" \
       | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+    if [[ -z "$STATUS" ]]; then
+      probe_failures=$((probe_failures + 1))
+      echo "  [$i] (status unreadable — probe failure $probe_failures/$MAX_CONSECUTIVE_PROBE_FAILURES): ${RAW:0:120}"
+      if (( probe_failures >= MAX_CONSECUTIVE_PROBE_FAILURES )); then
+        echo "ABORTING: cannot read job status ($probe_failures consecutive failures)." >&2
+        echo "This is a PROBE failure, not a job state — check auth (TEST_API_KEY) and the api." >&2
+        echo "Job $JOB_ID may still be running; read it directly rather than polling blind." >&2
+        exit 3
+      fi
+      continue
+    fi
+    probe_failures=0
     echo "  [$i] $STATUS"
     case "$STATUS" in completed|failed|failed_qa) break ;; esac
   done
+  if [[ -z "$STATUS" ]]; then
+    echo "Final status: UNKNOWN (never read a status) — job $JOB_ID" >&2
+    exit 3
+  fi
   echo "Final status: $STATUS — grade it with the \$0 battery: kqa / Artifact.load('$JOB_ID')"
 fi

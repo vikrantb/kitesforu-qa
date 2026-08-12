@@ -118,13 +118,29 @@ def main() -> int:
                .collection("podcast_jobs").document(args.job_id).get())
         job = doc.to_dict() or {}
         vis = job.get("visual") or {}
-        url = str(vis.get("video_url") or "")
-        if not url.startswith("gs://"):
-            print(f"job {args.job_id}: no visual.video_url (got {url!r})", file=sys.stderr)
+        url = str(vis.get("video_url") or "").strip()
+        # `video_url` is surfaced as a PUBLIC https URL on the delivered path, and as `gs://` on
+        # some internal ones — accept both. (My first version only took `gs://` and rejected a
+        # perfectly good master with "no visual.video_url", printing the URL it had just refused.)
+        # An EMPTY value is the real defect shape — "rendered but not surfaced".
+        if not url:
+            print(f"job {args.job_id}: visual.video_url is EMPTY — rendered but not surfaced "
+                  f"(video_status={vis.get('video_status')!r}, "
+                  f"skip_reason={vis.get('video_skip_reason')!r})", file=sys.stderr)
             return 1
         clips = [c for c in (vis.get("clips") or []) if isinstance(c, dict)]
         path = f"{tempfile.mkdtemp()}/master.mp4"
-        subprocess.run(["gsutil", "-q", "cp", url, path], check=True)
+        if url.startswith("gs://"):
+            subprocess.run(["gsutil", "-q", "cp", url, path], check=True)
+        elif url.startswith("http"):
+            # Fetch via gsutil, NOT urllib: a public storage.googleapis.com URL still fails local
+            # `urlopen` with CERTIFICATE_VERIFY_FAILED on a stock macOS python, and gsutil is
+            # already required by the gs:// branch. Translate the public form back to gs://.
+            gs = url.replace("https://storage.googleapis.com/", "gs://", 1)
+            subprocess.run(["gsutil", "-q", "cp", gs, path], check=True)
+        else:
+            print(f"job {args.job_id}: unrecognised video_url scheme: {url!r}", file=sys.stderr)
+            return 1
 
     span = _probe_duration(path)
     whole = _score(_diffs(path))
