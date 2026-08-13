@@ -213,17 +213,41 @@ TRANSCRIPT:
 {transcript}
 ---
 
-{{"form": "fiction|informational|narrative_nonfiction", "confidence": <0-1>, "why": "<12 words>"}}"""
+Also judge, from the TITLE ALONE, what a user who clicked it EXPECTED to get:
+- "informational" if the title reads as an explainer/listicle/guide/question about the real world
+- "story" if it reads as a narrative, drama or fiction piece
+
+TITLE: {title}
+
+{{"form": "fiction|informational|narrative_nonfiction", "promise": "informational|story",
+  "confidence": <0-1>, "why": "<12 words>"}}"""
 
 
 def detect_promise(topic: str) -> str:
-    """What the TITLE led the user to EXPECT: 'informational' or 'story'.
+    """DEPRECATED regex fallback — see :func:`classify`.
 
-    Kept deterministic on purpose — this reads only the title, which is short and explicit, and it
-    must not cost a model call per job. It is judged against :func:`detect_form` (what the body
-    actually IS) to produce the ``purpose_fulfillment`` finding: title promised a listicle, body
-    delivered a horror vignette."""
+    Kept ONLY as the offline fallback when the classify call fails. On its own it produced a
+    THIRD false headline: it defaults any non-interrogative title to "story", so
+    "global coffee trade: which countries grow, ship and drink it" read as a story promise and
+    the judge dutifully scored purpose_fulfillment 1/10 for delivering an explainer. That inflated
+    a fleet "73% purpose mismatch" figure which was an artifact of this regex, not a defect in the
+    product. Promise is now decided by the same cheap model call that decides form."""
     return "informational" if _PROMISE_INFO.search(topic or "") else "story"
+
+
+def classify(transcript: str, topic: str, model: str = DEFAULT_JUDGE_MODEL) -> Tuple[str, str]:
+    """(form, promise) from ONE cheap call. Falls back to the regexes on any failure."""
+    if not transcript:
+        return "narrative_nonfiction", detect_promise(topic)
+    res = call_judge(
+        _CLASSIFY_PROMPT.format(transcript=transcript[:6000], title=topic or "(untitled)"), model
+    ) or {}
+    form = str(res.get("form") or "").strip().lower()
+    promise = str(res.get("promise") or "").strip().lower()
+    return (
+        form if form in RUBRICS else "narrative_nonfiction",
+        promise if promise in ("informational", "story") else detect_promise(topic),
+    )
 
 
 def detect_form(transcript: str, script: Any = None, model: str = DEFAULT_JUDGE_MODEL) -> str:
@@ -359,8 +383,7 @@ def judge_job(db: Any, job_id: str, model: str) -> Optional[Dict[str, Any]]:
     if not transcript:
         print(f"{job_id}: no script text", file=sys.stderr)
         return None
-    family = detect_form(transcript, script, model)
-    promise = detect_promise(topic)
+    family, promise = classify(transcript, topic, model)
     dur = (script or {}).get("metadata", {}).get("total_duration_seconds") if isinstance(script, dict) else None
     res = call_judge(build_prompt(topic, family, dur, transcript, promise), model)
     if res is None:
