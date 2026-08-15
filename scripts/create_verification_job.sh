@@ -22,6 +22,11 @@ TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
 STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
+LANGUAGE="en-US"    # --language <bcp47>: the SPOKEN language. Was hardcoded to en-US in the body,
+                    # so this script — the tool everyone verifies with — could not create a
+                    # non-English job AT ALL. Measured 2026-08-15 on the full podcast_jobs
+                    # collection (n=4079): 3645 en-US and ZERO non-English jobs after 2026-05-02.
+                    # A defect no verification tool can express is a defect nobody re-tests.
 FORMAT=""           # optional API format (drama|panel|...) — forces multi-speaker casting at T3 cost
 SHORT="false"       # --short: born-short vertical Social Short (short_video: true)
 SOURCE_WRITEUP=""   # --source-writeup <wrt_id>: simulate a writeup→podcast CONVERSION so the
@@ -41,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --duration) DURATION="$2"; shift 2 ;;
     --tier)     TIER="$2"; shift 2 ;;
     --style)    STYLE="$2"; shift 2 ;;
+    --language) LANGUAGE="$2"; shift 2 ;;
     --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --short)    SHORT="true"; shift ;;   # Social Short path (9:16, kinetic captions, assembly)
     --visuals)  VISUALS="true"; shift ;;
@@ -95,9 +101,9 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, content_rating, source_writeup = sys.argv[1:9]
+topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language = sys.argv[1:10]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -108,7 +114,7 @@ body = {
     "intro_enabled": False,
     "allow_premium": tier in ("high", "ultra"),
     "skip_clarifier": True,
-    "language": "en-US",
+    "language": language,
 }
 # "auto" sends NEITHER key → the worker's own non-fiction $0 visual default decides.
 # Sending visuals_opt_out=true (the old else-branch) killed visuals outright, so the
@@ -137,7 +143,7 @@ PYEOF
 POST_URL="$API_BASE/v1/podcasts"
 [[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
 
-echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS est=$EST"
+echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST"
 OBO_ARGS=()
 if [[ -n "$ON_BEHALF_OF" ]]; then
   # `X-On-Behalf-Of` is a CLERK USER ID, never an email. The api validates it with
