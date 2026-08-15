@@ -9,6 +9,7 @@
 #   ./create_verification_job.sh --topic "b-trees" --wait # + poll until done
 #   ./create_verification_job.sh --tier medium --visuals  # T4 — needs FOUNDER_SPEND_ACK
 #   ./create_verification_job.sh --short --duration 1.0 --wait  # born-short (9:16), 60s
+#   ./create_verification_job.sh --language hi-IN --topic "भारत की अर्थव्यवस्था" --wait  # Hindi, T3
 #     — verifies the short-form craft (wpm band, caption dwell); duration>0.5 ⇒ needs ACK
 #
 # Auth: TEST_API_KEY env var, or fetched from Secret Manager (kitesforu-dev).
@@ -34,6 +35,11 @@ ON_BEHALF_OF=""
 ON_BEHALF_OF_EMAIL=""   # --on-behalf-of-email: the ADDRESS (the api reads it from its own header)
 SHORT="false"       # born-short: short_video=true → 9:16, single-voice, intro/outro suppressed
 CONTENT_RATING=""   # optional maturity dial: g|pg|pg_13|r (exercises ENABLE_CONTENT_MATURITY end-to-end)
+LANGUAGE="en-US"    # --language <BCP-47>: the SPOKEN language. Was hardcoded "en-US" in the body
+                    # below, so no non-English job could be verified at all — and measured
+                    # 2026-08-15 on the full podcast_jobs collection (n=4079), not one job has
+                    # been created in a non-English language since 2026-05-02. T3-priced: a
+                    # 10s hi-IN job costs the same ~$0.025 as an English one.
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +55,7 @@ while [[ $# -gt 0 ]]; do
                     # (deterministic diagrams/cards, NO paid images). Use this to exercise the
                     # visual PLANNING path — info-figure routing, figure adoption — without
                     # tripping the T4 paid-visuals gate. `--visuals` remains T4 (real images).
+    --language) LANGUAGE="$2"; shift 2 ;;   # e.g. hi-IN, mr-IN, es-ES — see POPULAR_LANGUAGE_CODES
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
@@ -95,9 +102,9 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, content_rating, source_writeup = sys.argv[1:9]
+topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language = sys.argv[1:10]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -108,7 +115,7 @@ body = {
     "intro_enabled": False,
     "allow_premium": tier in ("high", "ultra"),
     "skip_clarifier": True,
-    "language": "en-US",
+    "language": language or "en-US",
 }
 # "auto" sends NEITHER key → the worker's own non-fiction $0 visual default decides.
 # Sending visuals_opt_out=true (the old else-branch) killed visuals outright, so the
