@@ -83,13 +83,39 @@ def _pixel_invariants(frames: list[str]) -> list[dict]:
         if mid.size and (mid.mean() - max(top.mean(), bot.mean())) > 16 \
                 and top.std() < 9 and bot.std() < 9:
             letterbox += 1
-        # C: bright (text/marker) pixels hugging the very edge columns => content cut
-        # off-frame. Count-based, not std-based: a small clipped callout in a portrait
-        # frame (witness 7171699f f_004: 28 bright edge pixels, std only 15.9) passes a
-        # std>38 guard while being a real visible defect; >=12 bright pixels can never
-        # be a lone hot pixel.
-        if (int((im[:, :3] >= 200).sum()) >= 12 or int((im[:, -3:] >= 200).sum()) >= 12
-                or int((im[:3, :] >= 200).sum()) >= 12 or int((im[-3:, :] >= 200).sum()) >= 12):
+        # C: content CUT OFF by the frame edge.
+        #
+        # This used to count BRIGHT pixels in the edge columns (`im[:, :3] >= 200`). Brightness
+        # cannot tell a clipped box from a bright FULL-BLEED BACKDROP, and a backdrop legitimately
+        # fills the margin — so the check both cried wolf and, worse, produced uninterpretable
+        # numbers that made a fleet scope impossible ("13 of 40 frames carry margin pixels" says
+        # nothing about clipping). Measured on a labelled control set: a smooth bright backdrop
+        # scores 61560 bright pixels in the left margin and is perfectly fine.
+        #
+        # What actually distinguishes them is VERTICAL STRUCTURE. A backdrop — however bright,
+        # however it ramps — changes smoothly, so no two vertically adjacent pixels differ much.
+        # Content that is cut by the frame has hard horizontal boundaries where the box or the
+        # text row starts and stops. Counting steps >28 in the vertical direction inside the
+        # margin therefore reads ~0 for any backdrop and high for anything clipped.
+        #
+        # Validated on a 3-case labelled set (`tests/test_edge_clip_probe.py`, which regenerates
+        # the fixtures deterministically):
+        #     bright smooth backdrop -> 0    PASS   (brightness test said 61560: false positive)
+        #     clean, content inset   -> 0    PASS
+        #     box+text cut at x=0    -> 798  FLAG
+        # and against the human-observed defect in job 9725a85c at t=21s -> left margin 660, while
+        # its clean frames (t=8,11,14) score 0.
+        #
+        # NOTE the earlier horizontal-gradient attempt scored the clipped control 0 and was
+        # discarded: a box that fills the whole margin is horizontally uniform inside it.
+        mw = max(3, int(im.shape[1] * 0.03))
+        mh = max(3, int(im.shape[0] * 0.03))
+        def _vsteps(strip):
+            return int((np.abs(np.diff(strip, axis=0)) > 28).sum())
+        def _hsteps(strip):
+            return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
+        if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
+                or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
             edge_clip += 1
     if letterbox >= max(2, len(samp) // 2):
         issues.append({"sev": "MAJOR", "msg": (
