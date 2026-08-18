@@ -55,6 +55,18 @@ while [[ $# -gt 0 ]]; do
                     # (deterministic diagrams/cards, NO paid images). Use this to exercise the
                     # visual PLANNING path — info-figure routing, figure adoption — without
                     # tripping the T4 paid-visuals gate. `--visuals` remains T4 (real images).
+                    #
+                    # ⚠️ REQUIRES A LONGER DURATION — it does NOTHING at the 0.167min default.
+                    # MEASURED 2026-08-18, job 9725a85c (~$0.025, wasted): a 10s run authors no
+                    # BLUEPRINT, and `stages/visuals/flags.py::_is_nonfiction` fails SAFE to
+                    # fiction when the blueprint is absent, so the stage logs
+                    #   "story_visuals: blueprint never completed"
+                    #   "story_visuals: skip — not opted in and (opted out or not non-fiction)"
+                    # and renders nothing. That skip is BY DESIGN (no spend on an undetermined
+                    # job) — do not "fix" the gate. Note the persisted doc afterwards reports
+                    # _is_nonfiction=True, which makes it LOOK like an ordering race; it is not,
+                    # the blueprint simply did not exist at decision time.
+                    # ⇒ pair it with --duration (>0.5 needs the FOUNDER_SPEND_ACK file).
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
