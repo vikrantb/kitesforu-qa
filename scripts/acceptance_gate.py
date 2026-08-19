@@ -57,10 +57,62 @@ def _extract_frames(mp4: str, out_dir: str) -> list[str]:
     return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".png"))
 
 
-def _pixel_invariants(frames: list[str]) -> list[dict]:
+#: `_extract_frames` runs ffmpeg at `fps=1/3`, so output frame i (0-based) is the video at
+#: i*3 seconds. Named rather than inlined because the frame->clip mapping below is only as
+#: correct as this constant, and the two must be changed together.
+_FRAME_INTERVAL_MS = 3000
+
+
+def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
+    """The authored modality of the clip covering ``ts_ms``, or None when unknown.
+
+    None is returned for BOTH "no clips supplied" and "no clip covers this timestamp", and both
+    mean the same thing to the caller: keep checking. Absence must never be read as permission
+    to skip a check — that is how a gate silently turns itself off.
+    """
+    for c in clips or []:
+        try:
+            start = int(c.get("start_ms") or 0)
+            dur = int(c.get("duration_ms") or 0)
+        except (TypeError, ValueError):
+            continue
+        if dur > 0 and start <= ts_ms < start + dur:
+            m = c.get("modality")
+            return m if isinstance(m, str) and m else None
+    return None
+
+
+def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
     """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
     measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
-    layer would flag, without an LLM call. Rough heuristics, biased toward flagging."""
+    layer would flag, without an LLM call. Rough heuristics, biased toward flagging.
+
+    ── EDGE-CLIP IS SKIPPED ON PHOTO BEATS, AND ONLY ON PHOTO BEATS ──────────────────────────
+    The gate runs on frames from the DELIVERED MASTER, which interleaves diagram beats with
+    generated photography. The pipeline's OWN edge checker (`log_unsafe_bbox`) is called only
+    from `diagram/render.py` — it never inspects a photo, because a photo legitimately bleeds to
+    every edge. Running the diagram rule over photo frames made this gate flag 6 of 12 frames I
+    had labelled clean by eye.
+
+    MEASURED against a labelled set of four jobs (`visual.clips[].modality`):
+
+        6cae642d  REAL defects   diagram 13 · scene_image  1
+        c533260d  REAL defects   diagram 14 · scene_image  3
+        131546af  FALSE positive scene_image 24 · diagram  1
+        db02c066  FALSE positive scene_image 17 · diagram  3
+
+    The false-positive jobs are photo-dominated and the true-defect jobs diagram-dominated. This
+    is the "never ask a model to PERCEIVE what you can COMPUTE" case: the pipeline already LABELS
+    every beat at authoring time, so no pixel heuristic is needed. Two were tried and neither
+    separated the classes — brightness scored a smooth backdrop 61560, and a horizontal-gradient
+    variant scored the clipped control 0.
+
+    LETTERBOX is unaffected: a persistent black band is a defect on a photo too.
+
+    `modality is None` occurs on real clips. It is treated as UNKNOWN and still checked — reading
+    absence as "photo" would silently disable the gate on exactly the jobs whose records are
+    incomplete.
+    """
     issues: list[dict] = []
     try:
         import numpy as np
@@ -69,9 +121,14 @@ def _pixel_invariants(frames: list[str]) -> list[dict]:
         return issues
     if not frames:
         return issues
-    samp = frames[:: max(1, len(frames) // 12)][:12]
+    step = max(1, len(frames) // 12)
+    # Keep the ORIGINAL index alongside the path — it is the only thing that maps a frame back to
+    # a timestamp, and therefore to the clip that authored it.
+    samp = list(enumerate(frames))[::step][:12]
     letterbox = edge_clip = 0
-    for fp in samp:
+    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
+    edge_skipped_photo = 0
+    for idx, fp in samp:
         try:
             im = np.asarray(Image.open(fp).convert("L"), dtype=float)
         except Exception:  # noqa: BLE001 — a bad frame is skipped, never fatal
@@ -114,17 +171,29 @@ def _pixel_invariants(frames: list[str]) -> list[dict]:
             return int((np.abs(np.diff(strip, axis=0)) > 28).sum())
         def _hsteps(strip):
             return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
-        if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
-                or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
-            edge_clip += 1
+        # A photo beat legitimately bleeds to every edge — the pipeline's own checker never
+        # inspects one. Skip the rule, do not merely discount it.
+        if _clip_modality_at(clips, idx * _FRAME_INTERVAL_MS) == "scene_image":
+            edge_skipped_photo += 1
+        else:
+            edge_checked += 1
+            if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
+                    or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
+                edge_clip += 1
     if letterbox >= max(2, len(samp) // 2):
         issues.append({"sev": "MAJOR", "msg": (
             f"LETTERBOX: {letterbox}/{len(samp)} frames show a persistent dark band — content "
             "not filling the vertical frame (authored for the wrong aspect)")})
-    if edge_clip >= max(2, len(samp) // 3):
+    # THE DENOMINATOR IS WHAT WAS CHECKED, not what was sampled. Dividing by the full sample
+    # after skipping photos would make a photo-heavy job progressively harder to flag — the gate
+    # would quietly weaken on exactly the jobs where the skip applies, which is the opposite of
+    # what the skip is for.
+    if edge_checked and edge_clip >= max(2, edge_checked // 3):
+        skipped = (f" ({edge_skipped_photo} photo frame(s) exempt — a scene_image bleeds to the "
+                   "edge by design)") if edge_skipped_photo else ""
         issues.append({"sev": "MAJOR", "msg": (
-            f"EDGE-CLIP: {edge_clip}/{len(samp)} frames have bright/text pixels hugging the frame "
-            "edge — content likely cut off-frame")})
+            f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
+            f"the frame edge — content likely cut off-frame{skipped}")})
     return issues
 
 
@@ -168,7 +237,7 @@ def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
     # OBSERVE: emit frames for the independent vision/adversary step.
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     frames = _extract_frames(tmp, fdir)
-    issues.extend(_pixel_invariants(frames))  # invariants B + C on the real frames
+    issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
