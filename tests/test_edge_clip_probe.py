@@ -119,3 +119,84 @@ def test_the_clipped_fixture_is_horizontally_uniform_in_the_margin(frames):
     m = max(3, int(im.shape[1] * 0.03))
     h_steps = int((np.abs(np.diff(im[:, :m], axis=1)) > 28).sum())
     assert h_steps == 0, f"expected 0 horizontal steps in the margin, got {h_steps}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# MODALITY AWARENESS — the diagram rule must not run on photo beats
+#
+# The gate reads frames from the DELIVERED MASTER, which interleaves diagram beats with generated
+# photography. The pipeline's OWN edge checker (`log_unsafe_bbox`) is called only from
+# `diagram/render.py`; it never inspects a photo, because a photo legitimately bleeds to every
+# edge. Running the diagram rule over photo frames made the gate flag 6 of 12 frames labelled
+# clean by eye.
+#
+# Measured against four labelled jobs via `visual.clips[].modality`:
+#   6cae642d REAL   diagram 13 · scene_image  1      131546af FALSE  scene_image 24 · diagram 1
+#   c533260d REAL   diagram 14 · scene_image  3      db02c066 FALSE  scene_image 17 · diagram 3
+# Photo-dominated jobs are the false positives. The pipeline already LABELS every beat, so no
+# pixel heuristic is needed — two were tried and neither separated the classes.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+def _clips(modality, n=12, interval_ms=3000):
+    """One clip per sampled frame, covering the timeline back to back."""
+    return [{"start_ms": i * interval_ms, "duration_ms": interval_ms, "modality": modality}
+            for i in range(n)]
+
+
+def test_a_photo_beat_is_exempt_from_the_diagram_edge_rule(frames):
+    gate = _load_gate()
+    paths = [frames["clipped"]] * 6
+    # Same pixels, same rule — only the authored label differs.
+    assert gate._pixel_invariants(paths), "premise: these frames DO trip the rule unlabelled"
+    issues = [i for i in gate._pixel_invariants(paths, _clips("scene_image"))
+              if "EDGE-CLIP" in i["msg"]]
+    assert not issues, (
+        "a scene_image beat was flagged for content at the frame edge. A photo bleeds to the edge "
+        "by design and the pipeline's own checker never inspects one; this is the false positive "
+        "that made 6 of 12 hand-labelled-clean frames fail."
+    )
+
+
+def test_a_diagram_beat_is_STILL_flagged(frames):
+    """The half that makes the exemption safe. If only the test above existed, deleting the rule
+    entirely would satisfy it."""
+    gate = _load_gate()
+    issues = [i for i in gate._pixel_invariants([frames["clipped"]] * 6, _clips("diagram"))
+              if "EDGE-CLIP" in i["msg"]]
+    assert issues, "a diagram beat with content cut at the edge was not flagged"
+
+
+def test_an_UNKNOWN_modality_is_still_checked(frames):
+    """`modality is None` occurs on real clips. Reading absence as "photo" would silently disable
+    the gate on exactly the jobs whose records are incomplete — the failure mode that has cost
+    this codebase a 30-day outage and a month of dark image budget. Absence means UNKNOWN."""
+    gate = _load_gate()
+    for clips in (_clips(None), None, []):
+        issues = [i for i in gate._pixel_invariants([frames["clipped"]] * 6, clips)
+                  if "EDGE-CLIP" in i["msg"]]
+        assert issues, f"an unlabelled beat was silently exempted (clips={clips!r})"
+
+
+def test_the_denominator_is_what_was_CHECKED_not_what_was_sampled(frames):
+    """A photo-heavy job must not become harder to flag.
+
+    Six frames: two diagrams that are genuinely clipped, four photos. Dividing by the full sample
+    needs `max(2, 6//3)=2` hits — which passes here by luck — but at 12 photos and 2 diagrams it
+    would need 4 hits from 2 checkable frames, i.e. unflaggable. The threshold therefore divides
+    by the frames the rule actually ran on.
+    """
+    gate = _load_gate()
+    paths = [frames["clipped"]] * 2 + [frames["backdrop"]] * 10
+    clips = ([{"start_ms": 0, "duration_ms": 3000, "modality": "diagram"},
+              {"start_ms": 3000, "duration_ms": 3000, "modality": "diagram"}]
+             + [{"start_ms": (i + 2) * 3000, "duration_ms": 3000, "modality": "scene_image"}
+                for i in range(10)])
+    issues = [i for i in gate._pixel_invariants(paths, clips) if "EDGE-CLIP" in i["msg"]]
+    assert issues, (
+        "2 clipped diagram frames among 10 exempt photos did not flag — the threshold is still "
+        "dividing by the sampled count, so photo-heavy jobs get a weaker gate"
+    )
+    assert "/2 checked frames" in issues[0]["msg"], (
+        "the message should report the CHECKED denominator so the number is interpretable; got: "
+        + issues[0]["msg"]
+    )
