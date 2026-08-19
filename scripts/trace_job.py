@@ -20,6 +20,7 @@ Everything the pipeline recorded is reachable (down to the raw job doc).
 """
 import argparse
 import json
+import sys
 
 # ---- pipeline topology: which stages belong to which phase, in flow order ----
 # The vertical spine, top -> bottom. audio & visuals run in PARALLEL (one band, two lanes).
@@ -134,11 +135,65 @@ def _load_doc(job_id=None, from_file=None):
             return json.load(f)
     from google.cloud import firestore
     db = firestore.Client(project="kitesforu-dev")
-    snap = db.collection("podcast_jobs").document(job_id).get()
+    ref = db.collection("podcast_jobs").document(job_id)
+    snap = ref.get()
     d = snap.to_dict()  # type: ignore[union-attr]
     if not d:
         raise SystemExit(f"job {job_id} not found in podcast_jobs")
+    _merge_overflow(ref, d)
     return d
+
+
+#: Where ``workers.common.doc_size_guard`` reroutes debug entries once a job's inline array would
+#: push the job doc toward Firestore's 1 MiB ceiling. Keep in sync with
+#: ``doc_size_guard.OVERFLOW_SUBCOLLECTION`` / ``EVICTABLE_DEBUG_FIELDS``.
+OVERFLOW_SUBCOLLECTION = "debug_logs_overflow"
+EVICTABLE_DEBUG_FIELDS = (
+    "llm_call_logs", "tts_segment_logs", "tool_call_logs", "stage_complete_logs",
+)
+
+
+def _merge_overflow(ref, d: dict) -> None:
+    """Fold overflowed debug entries back into the in-memory doc.
+
+    THE PRODUCER HAD NO CONSUMER. ``doc_size_guard`` has been rerouting debug entries into
+    ``podcast_jobs/{id}/debug_logs_overflow`` for months — 194 such writes in the last 30 days,
+    and job 5f8ed80c carries 32 overflow docs — while EVERY reader, this tool included, read only
+    the inline array. Overflowed calls were written and never read by anything: invisible to the
+    trace exactly on the biggest, most expensive jobs, which are the ones worth tracing.
+
+    That gap is also what makes the inline cap unsafe to lower. Measured 2026-08-19: the cap's
+    400 entries at the p90 entry size (1585 B) plus the LARGEST observed product floor (418 KiB)
+    comes to 101% of the 1 MiB limit — so the cap wants lowering, but lowering it without this
+    reader would simply hide more of the trace.
+
+    Read-only and FAIL-OPEN (Tenet 9): a missing subcollection, a permissions error, or a slow
+    read degrades to today's inline-only trace rather than failing the tool.
+    """
+    try:
+        docs = list(ref.collection(OVERFLOW_SUBCOLLECTION).stream())
+    except Exception as exc:  # noqa: BLE001 — a debug tool must never fail on its own extra read
+        print(f"[trace] overflow subcollection unreadable ({type(exc).__name__}: {str(exc)[:120]}) "
+              f"— tracing INLINE ENTRIES ONLY; call counts may be undercounted", file=sys.stderr)
+        return
+    if not docs:
+        return
+    merged = {f: 0 for f in EVICTABLE_DEBUG_FIELDS}
+    for od in docs:
+        payload = od.to_dict() or {}
+        field = payload.get("field")
+        entries = payload.get("entries") or []
+        if field not in EVICTABLE_DEBUG_FIELDS or not isinstance(entries, list):
+            continue
+        existing = d.get(field)
+        d[field] = (existing if isinstance(existing, list) else []) + entries
+        merged[field] += len(entries)
+    recovered = {f: n for f, n in merged.items() if n}
+    if recovered:
+        # SAY SO. A silently-merged trace and a silently-truncated one look identical, which is
+        # how this gap survived: the trace always rendered, just short.
+        print(f"[trace] recovered {sum(recovered.values())} overflowed debug entries from "
+              f"{len(docs)} {OVERFLOW_SUBCOLLECTION} doc(s): {recovered}", file=sys.stderr)
 
 
 def build_trace(job_id=None, from_file=None) -> dict:
