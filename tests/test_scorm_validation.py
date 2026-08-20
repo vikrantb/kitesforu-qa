@@ -107,8 +107,15 @@ class TestValidScormPackage:
             os.unlink(path)
 
     def test_valid_package_with_expected_sco_count(self):
+        # _SCO_HTML_WITH_API references <audio src="audio/lesson1.mp3">, so a
+        # package calling itself VALID has to actually contain that file. This
+        # fixture omitted it, which made the test assert that a package missing a
+        # referenced asset still passes -- the opposite of what the validator is
+        # for. (It was red before the relative-path fix too, just for a
+        # confusing reason: the raw src never matched any ZIP entry.)
         path = _create_scorm_zip({
             "lesson1/index.html": _SCO_HTML_WITH_API,
+            "lesson1/audio/lesson1.mp3": b"fake-mp3-data",
         })
         try:
             result = validate_scorm_package(path, expected_sco_count=1)
