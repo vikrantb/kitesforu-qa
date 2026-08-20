@@ -186,6 +186,49 @@ def _visual_clips() -> list[dict]:
     ]
 
 
+def _visual_clips_varied() -> list[dict]:
+    """SIX evenly-spread assets across the same 20 s — an artifact that is GOOD by the
+    CURRENT monotony rule, not by the one in force when these tests were written.
+
+    ``_visual_clips()`` gives beat 0 a single scene image held for 10 of 20 s = 50% of
+    runtime. ``_MONOTONY_TOP1_MAX`` is 0.25, so that fixture asserts a GOOD artifact
+    contains exactly the "same image dancing" defect the anti-dullness work exists to
+    catch. The gate is right; the fixture is stale.
+
+    This is ADDITIVE on purpose. ``_visual_clips()`` is shared by seven tests, and
+    ``test_visual_count_reasonable_uses_nested_clips`` asserts literally "4 expected" —
+    editing the shared fixture to fix the monotony tests breaks that one, which is
+    currently green. (Tried it; broke it; reverted.) So the tests that need a
+    current-standards GOOD artifact get their own fixture and the shared one is untouched.
+
+    Arithmetic, against the real thresholds in harness/checks/visual.py:
+        6 assets x ~3.33 s over 20 s
+        top-1  16.7%  (max 25%, strict >)      top-3  50%  (max 60%)
+        18.0 distinct/min — per_min has a MINIMUM only, no upper cap
+    """
+    return [
+        # beat 0 — the pictorial half, THREE shots instead of one 10 s hold. Beats stay
+        # {0, 1} to match _base_doc()'s segment_beat_map {"0":0,"1":0,"2":1,"3":1}; a beat
+        # index outside that map is an ORPHAN clip and trips visual.no_orphan_clip.
+        {"beat_index": 0, "start_ms": 0, "duration_ms": 3333, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "motion_preset": "push_in",
+         "asset_uri": "gs://x/v0.png"},
+        {"beat_index": 0, "start_ms": 3333, "duration_ms": 3333, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "motion_preset": "pan_left",
+         "asset_uri": "gs://x/v1.png"},
+        {"beat_index": 0, "start_ms": 6666, "duration_ms": 3334, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "motion_preset": "push_out",
+         "asset_uri": "gs://x/v2.png"},
+        # beat 1 — a diagram that BUILDS over 3 reveal frames (node-by-node)
+        {"beat_index": 1, "start_ms": 10000, "duration_ms": 3333, "modality": "diagram",
+         "render_mode": "image", "_reveal_index": 0, "_reveal_total": 3, "asset_uri": "gs://x/v3a.png"},
+        {"beat_index": 1, "start_ms": 13333, "duration_ms": 3333, "modality": "diagram",
+         "render_mode": "image", "_reveal_index": 1, "_reveal_total": 3, "asset_uri": "gs://x/v3b.png"},
+        {"beat_index": 1, "start_ms": 16666, "duration_ms": 3334, "modality": "diagram",
+         "render_mode": "image", "_reveal_index": 2, "_reveal_total": 3, "asset_uri": "gs://x/v3c.png"},
+    ]
+
+
 def _captions(audio_ms: int = 20000) -> list[dict]:
     """Monotonic cues covering the full audio span."""
     n = 5
@@ -303,9 +346,13 @@ def test_audio_na_when_no_audio():
 
 def test_visual_good_passes(tmp_path):
     doc = _base_doc()
-    doc["visual_clips"] = _visual_clips()
+    # the CURRENT-standards fixture: _visual_clips() holds one image for 50% of runtime,
+    # which the monotony rule (top-1 max 25%) correctly rejects. See _visual_clips_varied.
+    doc["visual_clips"] = _visual_clips_varied()
     imgs = [
         _good_image(str(tmp_path / "v0.png")),
+        _good_image(str(tmp_path / "v1.png")),
+        _good_image(str(tmp_path / "v2.png")),
         _good_image(str(tmp_path / "v1a.png")),
         _good_image(str(tmp_path / "v1b.png")),
         _good_image(str(tmp_path / "v1c.png")),
@@ -831,10 +878,10 @@ def test_scorecard_fully_loaded_artifact_passes(tmp_path):
     """An artifact with audio + visuals + video + music passes the gate across ALL four dimensions."""
     from kitesforu_qa.harness import run_scorecard, scorecard_summary
     doc = _base_doc()
-    doc["visual_clips"] = _visual_clips()
+    doc["visual_clips"] = _visual_clips_varied()
     doc["captions"] = _captions()
     doc["stages"] = _music_stage()
-    imgs = [_good_image(str(tmp_path / f"s{i}.png")) for i in range(4)]
+    imgs = [_good_image(str(tmp_path / f"s{i}.png")) for i in range(6)]
     art = Artifact.from_doc(
         doc,
         audio_path=_good_audio(str(tmp_path / "full.wav")),
