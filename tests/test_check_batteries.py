@@ -171,11 +171,44 @@ def _base_doc() -> dict:
 
 
 def _visual_clips() -> list[dict]:
-    """Two beats: beat 0 a pictorial scene, beat 1 a diagram that BUILDS over 3 reveal frames.
-    Spans clock gaplessly across the 20 s audio (segments are 4x5 s)."""
+    """Two beats: beat 0 a pictorial scene in THREE shots, beat 1 a diagram that BUILDS over
+    3 reveal frames. Spans clock gaplessly across the 20 s audio (segments are 4x5 s).
+
+    WHY BEAT 0 IS THREE SHOTS AND NOT ONE. It was a single 10 000 ms image — half of a
+    20 s piece on one picture. `visual.monotony` caps top-1 at 25% of runtime and top-3 at
+    60%, so this fixture asserted that a GOOD artifact contains exactly the dullness the
+    anti-dullness work exists to catch, and `test_visual_good_passes` could not pass:
+
+        4 distinct images over 20s · top-1 50% (max 25%) · top-3 83% (max 60%)
+
+    The gate is right and the fixture predates the threshold. Six ~3.3 s shots put top-1 at
+    16.7% and top-3 at 50% — comfortably inside both caps rather than balanced on them, so a
+    later tightening of either cap does not silently re-break this.
+
+    THE SCENE SHOTS CARRY A KEN BURNS PRESET, and that is not decoration either. At 4 clips
+    `visual.motion_not_silently_dead` SKIPPED (`_ZERO_OUTPUT_MIN_CLIPS = 6` — too few clips to
+    call motion dead); at 6 it runs, and this "GOOD" fixture had ZERO moving clips. It was only
+    escaping the motion check by being small enough to skip it. Ken Burns rather than
+    `render_mode="video"` because that check's own evidence says the video path is the MOST
+    frozen class measured (adjacent-frame diff 0.028 vs 6.116 for Ken Burns stills) — certifying
+    this fixture "moving" via the render mode a viewer experiences as a slideshow would make it
+    pass while staying dull.
+
+    The beat COUNT is deliberately still 2 while the clip count is 6: several tests turn on
+    clips != beats (see `test_visual_count_reasonable_uses_nested_clips`, which only
+    discriminates a nested read from a `len(beat_map)` fallback while those two numbers
+    differ).
+    """
     return [
-        {"beat_index": 0, "start_ms": 0, "duration_ms": 10000, "modality": "scene",
-         "render_mode": "image", "aspect_ratio": "16:9", "asset_uri": "gs://x/0.png"},
+        {"beat_index": 0, "start_ms": 0, "duration_ms": 3333, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "motion_preset": "ken_burns",
+         "asset_uri": "gs://x/0a.png"},
+        {"beat_index": 0, "start_ms": 3333, "duration_ms": 3333, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "motion_preset": "ken_burns",
+         "asset_uri": "gs://x/0b.png"},
+        {"beat_index": 0, "start_ms": 6666, "duration_ms": 3334, "modality": "scene",
+         "render_mode": "image", "aspect_ratio": "16:9", "motion_preset": "ken_burns",
+         "asset_uri": "gs://x/0c.png"},
         # diagram sub-clips share beat_index 1 and carry reveal indices (node-by-node build)
         {"beat_index": 1, "start_ms": 10000, "duration_ms": 3333, "modality": "diagram",
          "render_mode": "image", "_reveal_index": 0, "_reveal_total": 3, "asset_uri": "gs://x/1a.png"},
@@ -305,10 +338,8 @@ def test_visual_good_passes(tmp_path):
     doc = _base_doc()
     doc["visual_clips"] = _visual_clips()
     imgs = [
-        _good_image(str(tmp_path / "v0.png")),
-        _good_image(str(tmp_path / "v1a.png")),
-        _good_image(str(tmp_path / "v1b.png")),
-        _good_image(str(tmp_path / "v1c.png")),
+        _good_image(str(tmp_path / f"v{i}.png"))
+        for i in range(len(doc["visual_clips"]))
     ]
     art = Artifact.from_doc(doc, image_paths=imgs)
     by = _assert_gating_pass(art, "visual-images")
@@ -342,20 +373,23 @@ def test_visual_missing_images_skips_offline(tmp_path):
 def test_visual_count_reasonable_uses_nested_clips(tmp_path):
     """F2 fidelity: real jobs nest clips at doc['visual']['clips'] (top-level visual_clips is None),
     so _expected_image_count must read through _clips() (nested fallback) — not fall back to
-    len(beat_map). Here beat_map has only 2 beats but there are 4 asset-carrying clips; 4 images
-    must count as a MATCH (got==expected==4), which fails iff the old top-level-only read regressed."""
+    len(beat_map). Here beat_map has only 2 beats but there are 6 asset-carrying clips; 6 images
+    must count as a MATCH (got==expected==6), which fails iff the old top-level-only read regressed.
+
+    The 6-vs-2 gap is what gives this test its power: if the fixture is ever rebalanced so the
+    clip count equals the beat count, this test keeps passing while testing nothing."""
     doc = _base_doc()
     doc["visual"] = {"clips": _visual_clips()}  # nested (real) shape; no top-level visual_clips
-    imgs = [_good_image(str(tmp_path / f"n{i}.png")) for i in range(4)]
+    imgs = [_good_image(str(tmp_path / f"n{i}.png")) for i in range(6)]
     art = Artifact.from_doc(doc, image_paths=imgs)
     _sr, by = _gating_results(art, "visual-images")
     c = by["visual.count_reasonable"]
     assert not c["skipped"], c["evidence"]
     assert c["passed"], (
-        f"4 images vs 4 nested asset-clips must match; a beat_map fallback (2) would mis-expect: "
+        f"6 images vs 6 nested asset-clips must match; a beat_map fallback (2) would mis-expect: "
         f"{c['evidence']}"
     )
-    assert "4 expected" in c["evidence"], c["evidence"]
+    assert "6 expected" in c["evidence"], c["evidence"]
 
 
 def test_visual_diagram_checks_run_on_content_hash_names(tmp_path):
@@ -597,19 +631,17 @@ _INTRO_MS = 12000  # intro-music prepend (matches the ec1620a1 +12s class)
 
 
 def _intro_offset_clips() -> list[dict]:
-    """The _visual_clips beats SHIFTED onto the delivered (post-intro) axis: beat 0 starts at the
-    intro offset, beat 1's 3 reveal sub-clips clock across its 10s span (seg2+seg3) right after."""
-    b0 = _INTRO_MS               # 12000 — beat 0 (segs 0,1 → 0..10s of speech) starts here
-    b1 = _INTRO_MS + 10000       # 22000 — beat 1 (segs 2,3 → 10..20s of speech) starts here
+    """`_visual_clips()` SHIFTED onto the delivered (post-intro) axis.
+
+    DERIVED, not retyped. This used to be a hand-written copy of the fixture with every
+    `start_ms` pre-offset, so the two drifted the moment either changed — and rebalancing
+    the fixture for the monotony gate would silently have left this mirror asserting the
+    old shape. The docstring always claimed "the _visual_clips beats SHIFTED"; now the code
+    says it, and there is exactly one place to edit.
+    """
     return [
-        {"beat_index": 0, "start_ms": b0, "duration_ms": 10000, "modality": "scene",
-         "render_mode": "image", "aspect_ratio": "16:9", "asset_uri": "gs://x/0.png"},
-        {"beat_index": 1, "start_ms": b1, "duration_ms": 3333, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 0, "_reveal_total": 3, "asset_uri": "gs://x/1a.png"},
-        {"beat_index": 1, "start_ms": b1 + 3333, "duration_ms": 3333, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 1, "_reveal_total": 3, "asset_uri": "gs://x/1b.png"},
-        {"beat_index": 1, "start_ms": b1 + 6666, "duration_ms": 3334, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 2, "_reveal_total": 3, "asset_uri": "gs://x/1c.png"},
+        {**clip, "start_ms": clip["start_ms"] + _INTRO_MS}
+        for clip in _visual_clips()
     ]
 
 
