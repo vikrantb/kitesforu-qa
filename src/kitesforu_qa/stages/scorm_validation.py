@@ -5,6 +5,7 @@ manifest validity, and resource integrity.
 """
 
 import os
+import posixpath
 import zipfile
 from typing import List, Optional
 from xml.etree import ElementTree as ET
@@ -249,11 +250,40 @@ def _find_audio_references(
                 while start > 0 and html_content[start - 1] not in ('"', "'", "=", " ", ">"):
                     start -= 1
                 audio_path = html_content[start : idx + len(ext)]
-                if audio_path and audio_path not in audio_files:
-                    audio_files.append(audio_path)
+                resolved = _resolve_reference(audio_path, html_path)
+                if resolved and resolved not in audio_files:
+                    audio_files.append(resolved)
                 idx += len(ext)
 
     return audio_files
+
+
+def _resolve_reference(ref: str, html_path: str) -> str:
+    """Resolve an HTML src reference to the ZIP entry path it names.
+
+    An ``<audio src="audio/lesson1.mp3">`` inside ``lesson1/index.html`` names the
+    ZIP entry ``lesson1/audio/lesson1.mp3`` -- the reference is relative to the
+    HTML file's own directory, which is how every browser and every SCORM player
+    resolves it. The check used to compare the RAW src against the ZIP file list,
+    so a package that is completely valid ("1 audio file(s) referenced but not in
+    ZIP") failed validation. That is a FALSE POSITIVE on real exports: our own
+    course packages put each SCO in its own directory.
+
+    Returns "" for references that name nothing inside the ZIP (absolute URLs,
+    data: URIs), so they are skipped rather than reported missing -- a remote
+    asset is not a packaging defect.
+    """
+    ref = (ref or "").strip().replace("\\", "/")
+    if not ref:
+        return ""
+    # Remote or inline references are not ZIP entries at all.
+    if "://" in ref or ref.startswith(("data:", "//", "#", "mailto:")):
+        return ""
+    # A leading "/" means package-root-relative.
+    if ref.startswith("/"):
+        return posixpath.normpath(ref.lstrip("/"))
+    base = posixpath.dirname(html_path)
+    return posixpath.normpath(posixpath.join(base, ref) if base else ref)
 
 
 def _has_scorm_api_reference(html_content: str) -> bool:
