@@ -29,7 +29,7 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from google.cloud import firestore
 
@@ -37,7 +37,7 @@ PROJECT = "kitesforu-dev"
 COLLECTION = "podcast_jobs"
 
 
-def _as_utc(value: Any) -> Optional[datetime]:
+def _as_utc(value: Any) -> datetime | None:
     """`created_at` is USUALLY a timestamp and SOMETIMES an ISO string.
 
     Measured 2026-08-20 on the newest 60 jobs: 58 DatetimeWithNanoseconds + 2
@@ -66,7 +66,7 @@ def _as_utc(value: Any) -> Optional[datetime]:
 # `_control` — what it actually examined — so an empty result is readable.
 # --------------------------------------------------------------------------
 
-def probe_character_consistency(job: Dict[str, Any]) -> Dict[str, Any]:
+def probe_character_consistency(job: dict[str, Any]) -> dict[str, Any]:
     """Do the four cast visual-identity fields survive to the shot prompt?
 
     Chain: bible_author.py:82 -> prompt_assembler.build_shot_prompt:249-263.
@@ -108,7 +108,7 @@ def probe_character_consistency(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def probe_semantic_sync(job: Dict[str, Any]) -> Dict[str, Any]:
+def probe_semantic_sync(job: dict[str, Any]) -> dict[str, Any]:
     """#2572 — did the join key finally reach the instrument (`checked > 0`)?"""
     ss = (job.get("visual") or {}).get("semantic_sync") or {}
     checked = ss.get("checked")
@@ -121,7 +121,7 @@ def probe_semantic_sync(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def probe_visual_register(job: Dict[str, Any]) -> Dict[str, Any]:
+def probe_visual_register(job: dict[str, Any]) -> dict[str, Any]:
     """The three-way split: has register / never had a kind / suppressed-with-reason."""
     clips = (job.get("visual") or {}).get("clips") or []
     has_reg = no_kind = suppressed = unexplained = 0
@@ -145,7 +145,7 @@ def probe_visual_register(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def probe_render_waste(job: Dict[str, Any]) -> Dict[str, Any]:
+def probe_render_waste(job: dict[str, Any]) -> dict[str, Any]:
     """#2585 — assets rendered for beats that are never shown, and zero-width beats.
 
     FIELD NAMES VERIFIED AGAINST A REAL CLIP, NOT ASSUMED. Clips carry
@@ -182,7 +182,7 @@ def probe_render_waste(job: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def probe_visual_style_consumer(job: Dict[str, Any]) -> Dict[str, Any]:
+def probe_visual_style_consumer(job: dict[str, Any]) -> dict[str, Any]:
     """workers PR #2612 — once merged, does a user style answer reach the directive?"""
     directive = ((job.get("scenario_tailoring") or {}).get("visual_directive")) or {}
     prefs = job.get("preferences") or {}
@@ -206,8 +206,71 @@ PROBES = {
 }
 
 
-def capture(job_id: str, job: Dict[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {
+def read_settled(ref, *, quiet_s: float = 300.0, poll_s: float = 15.0,
+                 max_wait_s: float = 1200.0):
+    """Read a job doc only once it has stopped moving, and say so if it hasn't.
+
+    THE PROBLEM, measured 2026-08-20 on job `a43bddcf`. `visual.clips` read
+    15 -> 6 -> 22 -> 3 -> 6 -> 12 -> 13 -> 21 across reads minutes apart, EVERY
+    one of them with::
+
+        job.status = completed    visual.status = done    video_status = ready
+
+    A read taken in that window produced a fully coherent phantom regression —
+    "diagram clips with duration_ms==0: 7/8 = 88% vs controls 0/11 and 1/21",
+    with a modality-correlated, format-correlated signature. One more read and
+    it was gone. **A mid-write read is indistinguishable from a real anomaly**,
+    and it is worse than a false zero: a zero looks like nothing, this looks
+    like a discovery.
+
+    WHY A QUIET PERIOD AND NOT A COMPLETION FLAG — there is no flag. Measured
+    over the 11 most recent completed jobs carrying clips, `updated_at` trails
+    `completed_at` by **156s to 1021s** (2.6 to 17 minutes); the write tail is
+    systemic, not specific to one job. `visual.video_runtime_ms` looked like a
+    candidate marker and is `None` on 11 of 11 — its writer at
+    `visuals/worker.py:2454` is gated on `runtime_ms > 0`, which never arrives.
+    So the only honest signal is: the document has not changed for a while.
+
+    ``quiet_s`` defaults to 300s — roughly twice the longest inter-write gap
+    observed (~151s). 12s and 30s were both tried and are PROVABLY too short:
+    a 10-read stability check at 3s intervals passed, and the doc moved minutes
+    later.
+
+    Returns ``(job_dict, settled, update_time, quiet_for_s)``. ``settled`` False
+    means the caller MUST label every derived number provisional.
+    """
+    import time as _time
+
+    def _quiet_for(update_time) -> float:
+        """Seconds since the last write, from the SERVER's clock.
+
+        Derived from ``update_time`` rather than from when this function was
+        called, so a job written an hour ago is trusted immediately instead of
+        being polled for ``quiet_s`` it has already served. (The first version
+        started the clock at invocation and would have added 5 minutes to every
+        single run, including jobs from last week.)
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            return (now - update_time).total_seconds()
+        except TypeError:            # naive datetime from an emulator/fake
+            return (now.replace(tzinfo=None) - update_time).total_seconds()
+
+    deadline = _time.monotonic() + max_wait_s
+    snap = ref.get()
+
+    while True:
+        quiet_for = _quiet_for(snap.update_time)
+        if quiet_for >= quiet_s:
+            return (snap.to_dict() or {}), True, snap.update_time, quiet_for
+        if _time.monotonic() >= deadline:
+            return (snap.to_dict() or {}), False, snap.update_time, quiet_for
+        _time.sleep(poll_s)
+        snap = ref.get()
+
+
+def capture(job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "job_id": job_id,
         "status": job.get("status"),
         "created_at": str(job.get("created_at")),
@@ -227,16 +290,35 @@ def main() -> int:
     ap.add_argument("job_id", nargs="?")
     ap.add_argument("--latest-after", help="ISO8601; pick the newest job created after this")
     ap.add_argument("--out", default="/tmp")
+    ap.add_argument("--quiet-s", dest="quiet_s", type=float, default=300.0,
+                    help="seconds with no write before the doc is trusted "
+                         "(default 300; 12 and 30 are proven too short)")
+    ap.add_argument("--max-wait-s", dest="max_wait_s", type=float, default=1200.0,
+                    help="give up waiting after this long and report PROVISIONAL "
+                         "rather than blocking (default 1200)")
     args = ap.parse_args()
 
     db = firestore.Client(project=PROJECT)
 
     if args.job_id:
-        snap = db.collection(COLLECTION).document(args.job_id).get()
-        if not snap.exists:
+        ref = db.collection(COLLECTION).document(args.job_id)
+        if not ref.get().exists:
             print(f"job {args.job_id} not found", file=sys.stderr)
             return 1
-        job_id, job = args.job_id, snap.to_dict() or {}
+        job, settled, seen_at, quiet_for = read_settled(
+            ref, quiet_s=args.quiet_s, max_wait_s=args.max_wait_s,
+        )
+        job_id = args.job_id
+        if settled:
+            print(f"settled: no write for {quiet_for:.0f}s (last {seen_at})",
+                  file=sys.stderr)
+        else:
+            print(f"⚠️  job {job_id[:8]} is STILL BEING WRITTEN — last write "
+                  f"{seen_at}, quiet only {quiet_for:.0f}s of the {args.quiet_s:.0f}s "
+                  f"required. EVERY NUMBER BELOW IS PROVISIONAL. `status=completed` "
+                  f"does NOT mean the write is finished; on the 11 most recent "
+                  f"completed jobs `updated_at` trailed `completed_at` by "
+                  f"156-1021s.", file=sys.stderr)
     elif args.latest_after:
         cutoff = _as_utc(args.latest_after)
         docs = list(db.collection(COLLECTION)
