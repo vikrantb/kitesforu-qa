@@ -646,18 +646,48 @@ _INTRO_MS = 12000  # intro-music prepend (matches the ec1620a1 +12s class)
 def _intro_offset_clips() -> list[dict]:
     """The _visual_clips beats SHIFTED onto the delivered (post-intro) axis: beat 0 starts at the
     intro offset, beat 1's 3 reveal sub-clips clock across its 10s span (seg2+seg3) right after."""
-    b0 = _INTRO_MS               # 12000 — beat 0 (segs 0,1 → 0..10s of speech) starts here
-    b1 = _INTRO_MS + 10000       # 22000 — beat 1 (segs 2,3 → 10..20s of speech) starts here
-    return [
-        {"beat_index": 0, "start_ms": b0, "duration_ms": 10000, "modality": "scene",
-         "render_mode": "image", "aspect_ratio": "16:9", "asset_uri": "gs://x/0.png"},
-        {"beat_index": 1, "start_ms": b1, "duration_ms": 3333, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 0, "_reveal_total": 3, "asset_uri": "gs://x/1a.png"},
-        {"beat_index": 1, "start_ms": b1 + 3333, "duration_ms": 3333, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 1, "_reveal_total": 3, "asset_uri": "gs://x/1b.png"},
-        {"beat_index": 1, "start_ms": b1 + 6666, "duration_ms": 3334, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 2, "_reveal_total": 3, "asset_uri": "gs://x/1c.png"},
-    ]
+    # DERIVED, not hand-copied. This used to restate all four clips with pre-shifted
+    # timings — a MIRROR of _visual_clips() that the docstring above already claimed it
+    # was ("the _visual_clips beats SHIFTED"), while the code duplicated instead of
+    # deriving. Any edit to _visual_clips() silently drifted from its own mirror, which is
+    # the second-reference-site class (workers/common/display_text.py mirroring the api's
+    # copy was the same shape, and shipped a real defect for weeks).
+    #
+    # Verified byte-identical to the hand-written version it replaces before the swap:
+    # json.dumps(hand, sort_keys=True) == json.dumps(derived, sort_keys=True) -> True.
+    return [{**c, "start_ms": c["start_ms"] + _INTRO_MS} for c in _visual_clips()]
+
+
+def test_the_intro_offset_mirror_tracks_its_source() -> None:
+    """_intro_offset_clips() must stay a DERIVATION of _visual_clips(), not a copy.
+
+    It was a hand-written restatement of all four clips with pre-shifted timings, while
+    its own docstring claimed it was "the _visual_clips beats SHIFTED". So an edit to
+    _visual_clips() drifted from its mirror silently -- the second-reference-site class.
+    (workers/common/display_text.py mirroring the api's copy was the same shape and
+    shipped a real defect for weeks: every episode title lost its subject on the title
+    card while the api-side fix looked complete.)
+
+    This fails if someone re-hand-writes the mirror, even if the numbers happen to line
+    up today.
+    """
+    src = _visual_clips()
+    mirror = _intro_offset_clips()
+
+    assert len(mirror) == len(src), (
+        f"mirror has {len(mirror)} clips, source has {len(src)} -- it has been "
+        "hand-written again instead of derived"
+    )
+    for i, (a, b) in enumerate(zip(src, mirror)):
+        assert b["start_ms"] == a["start_ms"] + _INTRO_MS, (
+            f"clip {i}: mirror start {b['start_ms']} != source {a['start_ms']} + "
+            f"{_INTRO_MS}"
+        )
+        # every other field must be carried through untouched
+        for k in a:
+            if k == "start_ms":
+                continue
+            assert b.get(k) == a[k], f"clip {i} field {k!r} drifted: {b.get(k)!r} != {a[k]!r}"
 
 
 def _master_segment_timeline(intro_ms: int = _INTRO_MS) -> list[dict]:
