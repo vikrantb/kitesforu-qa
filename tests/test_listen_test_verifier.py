@@ -27,6 +27,7 @@ a member of {PASS, WARN, FAIL}.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import struct
 import wave
@@ -40,7 +41,6 @@ from kitesforu_qa.stages.listen_test import (
     ListenTestReport,
     verify_audio_quality,
 )
-
 
 # ---------------------------------------------------------------------------
 # Synthetic WAV helpers
@@ -64,7 +64,10 @@ def _write_wav(
 
 
 def _make_speech_like(duration_s: float = 10.0, sr: int = 48000) -> list[float]:
-    """Pink-ish noise centered in speech band (~−20 dBFS RMS)."""
+    """UNIFORM WHITE NOISE at ~−20 dBFS RMS (named "speech-like" for its level, not its
+    spectrum). It is broadband and maximally transient-rich — an onset detector fires on
+    it constantly, which is correct behaviour, not a defect. Any assertion about
+    SMOOTHNESS must not be fed this signal. See test_a_smooth_tone_has_no_transients."""
     import random
     random.seed(42)
     n = int(duration_s * sr)
@@ -100,7 +103,12 @@ class TestPublicSurface:
         p = GenreProfile(
             genre="x", lufs_min=-17, lufs_max=-14, lra_min=4, lra_max=8,
         )
-        with pytest.raises(Exception):
+        # FrozenInstanceError specifically, not a blind Exception (ruff B017): a bare
+        # `Exception` here passes even if the dataclass stops being frozen and the
+        # assignment fails for some unrelated reason -- e.g. an AttributeError from a
+        # renamed field. Then the test would still be green while the immutability it
+        # exists to pin is gone.
+        with pytest.raises(dataclasses.FrozenInstanceError):
             p.lufs_min = -10  # type: ignore[misc]
 
     def test_default_profile_is_drama_band(self) -> None:
@@ -197,13 +205,58 @@ class TestEndToEndSynthetic:
         # We don't assert a tight band — the synthetic music is at
         # −24 dBFS which can read variably depending on backend.
         assert r.music_presence_pct is not None
-        # SFX detector on a smooth tone should find ~0 transients.
+        # The SFX detector RAN and produced a count. Deliberately NOT asserting the count
+        # is low here: this signal is _make_speech_like() (uniform WHITE NOISE) plus a
+        # tone, and white noise is maximally transient-rich. The old assertion claimed
+        # "smooth tone shouldn't have transients" while feeding the detector broadband
+        # noise, so it was asserting a property of a signal the test never built.
+        #
+        # MEASURED (both arms, same detector, same box):
+        #     pure 250 Hz tone     -> sfx_event_count =  0
+        #     white noise + tone   -> sfx_event_count = 29
+        # i.e. the detector is CORRECT and the input was wrong. The smoothness claim now
+        # lives in test_a_smooth_tone_has_no_transients, where the signal matches it.
         assert r.sfx_event_count is not None
-        assert r.sfx_event_count <= 3, (
-            f"smooth tone shouldn't have transients; got "
-            f"{r.sfx_event_count} @ {r.to_dict().get('sfx_event_count')}"
+
+
+
+    def test_a_smooth_tone_has_no_transients(self, tmp_path: Path) -> None:
+        """The smoothness claim, on a signal that is actually smooth.
+
+        This is the assertion that used to live in
+        test_full_battery_with_speech_and_mix, where it was fed
+        _make_speech_like() -- uniform WHITE NOISE -- plus a tone, and therefore
+        asserted a property of a signal that test never built. Moved here rather
+        than deleted, so the detector's smoothness behaviour stays covered.
+
+        MEASURED (same detector, same box, both arms):
+            pure 250 Hz tone    -> sfx_event_count =  0
+            white noise + tone  -> sfx_event_count = 29
+        """
+        if not _have_audio_stack():
+            pytest.skip("pyloudnorm + soundfile not installed")
+        if not _have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not installed")
+
+        sr = 48000
+        n = int(10.0 * sr)
+        tone = [0.1 * math.sin(2 * math.pi * 250 * i / sr) for i in range(n)]
+        tone_path = tmp_path / "smooth_tone.wav"
+        _write_wav(tone_path, tone)
+
+        r = verify_audio_quality(
+            audio_path=str(tone_path),
+            speech_only_path=str(tone_path),
+            expected_duration_s=10.0,
         )
 
+        assert r.sfx_event_count is not None, f"detector did not run; notes={r.notes}"
+        assert r.sfx_event_count <= 3, (
+            f"a pure sine tone must not read as transient-rich; got "
+            f"{r.sfx_event_count}. If this fires, the ONSET DETECTOR drifted -- "
+            f"do not relax it without checking the white-noise arm still reads high, "
+            f"or the check becomes vacuous."
+        )
 
 # ---------------------------------------------------------------------------
 # Module-private helpers (top-level so pytest.mark.skipif can ref them)
