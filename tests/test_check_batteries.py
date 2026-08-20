@@ -172,7 +172,25 @@ def _base_doc() -> dict:
 
 def _visual_clips() -> list[dict]:
     """Two beats: beat 0 a pictorial scene, beat 1 a diagram that BUILDS over 3 reveal frames.
-    Spans clock gaplessly across the 20 s audio (segments are 4x5 s)."""
+    Spans clock gaplessly across the 20 s audio (segments are 4x5 s).
+
+    ⚠️ LANDMINE IF YOU ADD CLIPS HERE — read before growing this fixture.
+    These 4 clips carry NO motion, and ``visual.motion_not_silently_dead`` only runs at
+    ``_ZERO_OUTPUT_MIN_CLIPS = 6``. So this fixture passes that check by being TOO SMALL
+    TO BE CHECKED, not by moving. Add two clips and the check suddenly RUNS and fails with
+    "ZERO of N clips move" — a failure that looks like a motion regression and is actually
+    this fixture never having had motion.
+
+    If you grow it: give the scene clips a Ken Burns ``motion_preset``, NOT
+    ``render_mode="video"``. That check's own docstring measures the video path as the most
+    FROZEN class we ship (adjacent-frame diff 0.028 vs 6.116 for Ken Burns stills), so
+    "moving" via render mode would go green while the artifact is still a slideshow.
+
+    Also note three tests turn on this fixture's exact SHAPE — ``_intro_offset_clips()``
+    derives from it, and ``test_visual_count_reasonable_uses_nested_clips`` asserts
+    literally "4 expected" because the 4-clips-vs-2-beats GAP *is* what that test measures.
+    Rebalancing this fixture in place breaks them; ``_visual_clips_varied()`` exists as the
+    additive alternative for tests that need a current-standards GOOD artifact."""
     return [
         {"beat_index": 0, "start_ms": 0, "duration_ms": 10000, "modality": "scene",
          "render_mode": "image", "aspect_ratio": "16:9", "asset_uri": "gs://x/0.png"},
