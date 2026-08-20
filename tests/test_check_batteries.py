@@ -644,19 +644,23 @@ _INTRO_MS = 12000  # intro-music prepend (matches the ec1620a1 +12s class)
 
 
 def _intro_offset_clips() -> list[dict]:
-    """The _visual_clips beats SHIFTED onto the delivered (post-intro) axis: beat 0 starts at the
-    intro offset, beat 1's 3 reveal sub-clips clock across its 10s span (seg2+seg3) right after."""
-    b0 = _INTRO_MS               # 12000 — beat 0 (segs 0,1 → 0..10s of speech) starts here
-    b1 = _INTRO_MS + 10000       # 22000 — beat 1 (segs 2,3 → 10..20s of speech) starts here
+    """`_visual_clips()` SHIFTED onto the delivered (post-intro) axis.
+
+    DERIVED, not retyped. This was a hand-written copy of the fixture with every `start_ms`
+    pre-offset, so the two drifted the moment either changed — and that is not hypothetical:
+    it is what broke the first attempt at #124. Rebalancing `_visual_clips()` for the
+    monotony rule left this mirror silently asserting the OLD shape, which is why that
+    attempt had to be reverted and re-done additively.
+
+    The docstring always claimed "the `_visual_clips` beats SHIFTED". Now the code says it,
+    so there is exactly one place to edit and the mirror cannot go stale.
+
+    Equivalence verified against the hand-written version before replacing it: byte-identical
+    clips, so this is a pure refactor with no behaviour change.
+    """
     return [
-        {"beat_index": 0, "start_ms": b0, "duration_ms": 10000, "modality": "scene",
-         "render_mode": "image", "aspect_ratio": "16:9", "asset_uri": "gs://x/0.png"},
-        {"beat_index": 1, "start_ms": b1, "duration_ms": 3333, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 0, "_reveal_total": 3, "asset_uri": "gs://x/1a.png"},
-        {"beat_index": 1, "start_ms": b1 + 3333, "duration_ms": 3333, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 1, "_reveal_total": 3, "asset_uri": "gs://x/1b.png"},
-        {"beat_index": 1, "start_ms": b1 + 6666, "duration_ms": 3334, "modality": "diagram",
-         "render_mode": "image", "_reveal_index": 2, "_reveal_total": 3, "asset_uri": "gs://x/1c.png"},
+        {**clip, "start_ms": clip["start_ms"] + _INTRO_MS}
+        for clip in _visual_clips()
     ]
 
 
