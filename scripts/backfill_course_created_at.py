@@ -22,9 +22,29 @@ SAFETY
   * Naive stamps are read as UTC: the writer used `datetime.utcnow().isoformat()`,
     so the offset is absent, not local.
 
+OBSERVED LIVE 2026-08-22 — the mechanism, not a prediction. Firestore's own
+"5 newest podcasts for test_user_e2e", from 301 podcasts:
+
+    ae5bae35  str       2026-01-15      <- rank 1
+    1ec85dd6  str       2026-01-15      <- rank 2
+    616cdf09  datetime  2026-08-21      <- the ACTUAL newest, rank 3
+
+Two of five "newest" slots taken by seven-month-old rows. On `podcast_jobs`
+that is 2 rows and only the test user; on `courses` it is 133 rows and real
+users, where a limit(25) never reaches a single datetime row.
+
+SCOPE — only MIXED collections. Measured 2026-08-22:
+    courses       133 str + 94 datetime   <- MIXED, needs this
+    podcast_jobs    2 str + 4111 datetime <- MIXED, needs this
+    classes        50/50 str              <- uniform, LEAVE ALONE
+    writeups       57/57 str              <- uniform, LEAVE ALONE
+A uniform-string collection sorts correctly inside its own type band; converting
+it would be churn, not a fix.
+
 USAGE
-    python scripts/backfill_course_created_at.py              # dry run
-    python scripts/backfill_course_created_at.py --apply      # writes
+    python scripts/backfill_course_created_at.py                          # dry run, courses
+    python scripts/backfill_course_created_at.py --collection podcast_jobs
+    python scripts/backfill_course_created_at.py --apply                  # writes
 """
 from __future__ import annotations
 
@@ -51,12 +71,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
     ap.add_argument("--project", default="kitesforu-dev")
+    ap.add_argument(
+        "--collection",
+        default="courses",
+        help="collection to normalise. Only MIXED collections need it: a collection whose "
+             "created_at is 100%% strings (classes, writeups) already sorts correctly inside "
+             "its own type band and must be left alone.",
+    )
     args = ap.parse_args()
 
     db = firestore.Client(project=args.project)
     would, skipped, already = [], [], 0
 
-    for snap in db.collection("courses").stream():
+    for snap in db.collection(args.collection).stream():
         ca = (snap.to_dict() or {}).get("created_at")
         if isinstance(ca, datetime):
             already += 1
@@ -71,7 +98,7 @@ def main() -> int:
         would.append((snap.id, ca, parsed))
 
     mode = "APPLY" if args.apply else "DRY RUN"
-    print(f"[{mode}] courses.created_at normalisation")
+    print(f"[{mode}] {args.collection}.created_at normalisation")
     print(f"  already datetime (untouched) : {already}")
     print(f"  would convert                : {len(would)}")
     print(f"  SKIPPED (left as-is)         : {len(skipped)}")
@@ -88,7 +115,7 @@ def main() -> int:
 
     batch, n = db.batch(), 0
     for cid, _raw, parsed in would:
-        batch.update(db.collection("courses").document(cid), {"created_at": parsed})
+        batch.update(db.collection(args.collection).document(cid), {"created_at": parsed})
         n += 1
         if n % 400 == 0:
             batch.commit()
