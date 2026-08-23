@@ -39,8 +39,55 @@ from playwright.sync_api import sync_playwright
 API_BASE = "https://kitesforu-api-456429114416.us-central1.run.app"
 BETA_URL = "https://beta.kitesforu.com"
 TEST_EMAIL = "test@kitesforu.com"
-TEST_PASSWORD = "PatangUdav.15"
+_TEST_PASSWORD_SECRET = "TEST_USER_PASSWORD"
 PROJECT_ID = "kitesforu-dev"
+
+
+def _test_password() -> str:
+    """The beta test-account password, from the env or Secret Manager — never from source.
+
+    This file hardcoded the literal. The house pattern already existed and this script was the
+    only executable outside it: `kitetest/tests/shared/auth.ts` reads `TEST_USER_PASSWORD` from the
+    environment and refuses with fetch instructions, `kitesforu-frontend/scripts/
+    create-redesign-walk.mjs` does the same, and `kitesforu-infrastructure/terraform/secrets.tf`
+    declares the secret. So this is adopting the convention, not inventing one.
+
+    Env first (CI exports it from a repo secret), then a direct Secret Manager read for local runs,
+    then a loud failure — never a silent fallback to an empty password, which would surface as a
+    confusing Clerk login timeout rather than a missing credential.
+    """
+    env = os.environ.get(_TEST_PASSWORD_SECRET, "").strip()
+    if env:
+        return env
+    # Two readers, because they carry DIFFERENT credentials and either can be the one that works:
+    # the Python client uses ADC, the CLI uses the gcloud user login. Measured on this machine —
+    # ADC returned 403 `secretmanager.versions.access` while `gcloud secrets versions access`
+    # succeeded. Trying only the client would have swapped a hardcoded password for a script that
+    # no longer runs locally, which is a worse outcome than the problem being fixed.
+    try:
+        from google.cloud import secretmanager
+
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{PROJECT_ID}/secrets/{_TEST_PASSWORD_SECRET}/versions/latest"
+        return client.access_secret_version(name=name).payload.data.decode("utf-8").strip()
+    except Exception:  # noqa: BLE001 — fall through to the CLI, which may hold different creds
+        pass
+    try:
+        out = subprocess.run(
+            ["gcloud", "secrets", "versions", "access", "latest",
+             f"--secret={_TEST_PASSWORD_SECRET}", f"--project={PROJECT_ID}"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        pw = (out.stdout or "").strip()
+        if pw:
+            return pw
+        raise RuntimeError("gcloud returned an empty secret")
+    except Exception as exc:  # noqa: BLE001 — a missing credential must be loud, not silent
+        raise RuntimeError(
+            f"{_TEST_PASSWORD_SECRET} is not set and Secret Manager could not be read ({exc}). "
+            f"Fetch it: export {_TEST_PASSWORD_SECRET}=$(gcloud secrets versions access latest "
+            f"--secret={_TEST_PASSWORD_SECRET} --project={PROJECT_ID})"
+        ) from exc
 
 PROMPT = "Layla and Amir hear whispers in their Cairo apartment. 1 minute horror, dialogue-heavy."
 TARGET_DURATION_MIN = 1.0
@@ -118,7 +165,7 @@ def mint_clerk_token() -> str:
                 page.locator("button.cl-formButtonPrimary").first.click()
                 password_input = page.locator("#password-field, input[name='password']").first
                 password_input.wait_for(state="visible", timeout=15_000)
-            password_input.fill(TEST_PASSWORD)
+            password_input.fill(_test_password())
             page.locator("button.cl-formButtonPrimary").first.click()
 
             # Wait for modal close + session.
