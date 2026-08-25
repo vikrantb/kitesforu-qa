@@ -156,6 +156,20 @@ POST_URL="$API_BASE/v1/podcasts"
 [[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
 
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST"
+
+# WHOSE LIBRARY DOES THIS LAND IN? Without --on-behalf-of the job is owned by the API key's
+# own identity (test_user_e2e), which does NOT appear on the founder's signed-in home page.
+# Measured 2026-08-25: a whole afternoon of "verification" jobs landed on test_user_e2e; the
+# founder opened beta.kitesforu.com, saw none of them, and asked "where are ur test couple
+# videos u created". Verifying on a surface the reviewer cannot open is not verification —
+# and nothing said so, because the owner was never printed. Now it always is.
+if [[ -z "$ON_BEHALF_OF" ]]; then
+  echo "  ⚠️  OWNER: the API key's own identity (test_user_e2e)."
+  echo "      This job will NOT appear on the founder's signed-in home page."
+  echo "      For anything a human must SEE, pass:  --on-behalf-of <user_…>"
+else
+  echo "  OWNER: $ON_BEHALF_OF — visible in that account's library."
+fi
 OBO_ARGS=()
 if [[ -n "$ON_BEHALF_OF" ]]; then
   # `X-On-Behalf-Of` is a CLERK USER ID, never an email. The api validates it with
