@@ -75,6 +75,53 @@ def is_single_voice_format(job: dict) -> bool:
     return isinstance(fmt, str) and fmt.strip().lower() in SINGLE_VOICE_FORMATS
 
 
+def _prefs_blobs(job: dict) -> list:
+    """Every dict the SSOT might receive as ``preferences``.
+
+    The cast sketch is written to BOTH ``preferences`` and
+    ``episode_profile.user_preferences``, and only one of them may carry
+    ``cast_size`` (job 33cdaa8d has cast_size=3 under episode_profile and only
+    ``characters`` under preferences), so both are consulted.
+    """
+    out = []
+    for path in (("preferences",), ("episode_profile", "user_preferences")):
+        v = dig(job, *path)
+        if isinstance(v, dict):
+            out.append(v)
+    return out
+
+
+def cast_floor(job: dict) -> int:
+    """Mirror of kitesforu-workers _apply_cast_voice_floor / _cast_size_from_preferences.
+
+    The format only sets a BASE. A planned multi-character cast RAISES it:
+    ``_apply_cast_voice_floor`` fires when the cast is > 2 and rewrites
+    narration/monologue/dialogue to the drama template so the voices get used.
+    Mirroring only the format map made this census blind to exactly the
+    collapse it exists to catch -- job 33cdaa8d is a ``short`` with
+    ``_cast_sketch.cast_size=3``, a contract naming those same 3 characters,
+    and a delivered script of ``['Narrator']``: a real 3->1 collapse that an
+    unconditional ``return 1`` dropped from the denominator entirely.
+
+    Capped at 6, as the SSOT caps it.
+    """
+    best = 0
+    for prefs in _prefs_blobs(job):
+        cs = prefs.get("_cast_sketch")
+        if isinstance(cs, dict):
+            n = cs.get("cast_size")
+            if isinstance(n, int) and n > 0:
+                best = max(best, min(n, 6))
+            else:
+                chars = cs.get("characters")
+                if isinstance(chars, list) and chars:
+                    best = max(best, min(len(chars), 6))
+        vm = prefs.get("_persona_voice_map")
+        if isinstance(vm, dict) and len(vm) > 2:
+            best = max(best, min(len(vm), 6))
+    return best
+
+
 def cast_size(job: dict) -> tuple[int | None, str]:
     """How many voices was this job CAST with? Returns (n, which_source).
 
@@ -102,9 +149,12 @@ def cast_size(job: dict) -> tuple[int | None, str]:
     MIN also reproduces the worker-log cross-check recorded in qa#138: the 9
     jobs with speaker_count=3, real cast=2, delivered=2 score as no-loss.
     """
-    # Formats that deliver one voice BY DESIGN can never under-deliver.
+    # Formats that deliver one voice BY DESIGN can never under-deliver --
+    # UNLESS a planned multi-character cast raised the count, which is what
+    # _apply_cast_voice_floor does in the SSOT. Format is the base, not the answer.
     if is_single_voice_format(job):
-        return 1, "single-voice-format"
+        floor = cast_floor(job)
+        return (floor, "single-voice-format/cast-floor") if floor > 2 else (1, "single-voice-format")
     vm = dig(job, "voice_cast", "contract", "voice_map")
     sc = dig(job, "audio_config", "speaker_count")
     have_vm = isinstance(vm, dict) and bool(vm)
@@ -112,7 +162,9 @@ def cast_size(job: dict) -> tuple[int | None, str]:
     if have_vm and have_sc and len(vm) != sc:
         return min(len(vm), sc), "disagree/min"
     if have_vm:
-        return len(vm), "contract"
+        base = len(vm)
+        floor = cast_floor(job)
+        return (floor, "cast-floor") if floor > 2 and floor > base else (base, "contract")
     return (sc, "speaker_count") if have_sc else (None, "none")
 
 
@@ -132,7 +184,30 @@ def cast_disagreement(job: dict) -> tuple[int, int] | None:
 
 
 def classify(job: dict) -> str | None:
-    """Which stage lost the voices, or None when nothing was lost."""
+    """Which stage lost the voices, or None when nothing was lost.
+
+    ATTRIBUTION IS UPSTREAM-FIRST AND READS REAL FIELDS.
+
+    Both properties were wrong until 2026-08-27 and they compounded:
+
+    1. The trim test was a SUBSTRING match on the whole document --
+       ``'"applied": true' in json.dumps(job)`` -- so any unrelated ``applied``
+       field anywhere in the job attributed the loss to the trim. Job
+       0c5d1055 carries ``sub_capsule_trim.applied = false``
+       (``reason: within_band``: the trim never ran) and was still labelled
+       "trim collapsed it".
+
+    2. The trim was tested BEFORE the script, so a job whose attempt 1 was
+       already single-speaker was labelled with the trim that ran afterwards.
+       MEASURED over the 121 jobs eligible since 2026-08-01: the census
+       reported ZERO "script single-speaker from attempt 1", while 11 of the
+       37 under-delivering jobs had attempt 1 deliver exactly one speaker.
+       Every one was labelled "trim collapsed it".
+
+    The trim runs on the regen (``branch: regen_pre_tts``), so an attempt 1
+    that already speaks with one voice was authored that way -- the script is
+    the more upstream cause and is now tested first.
+    """
     cast, _src = cast_size(job)
     qg = dig(job, "stages", "quality_gate") or {}
     present = [a for a in _ATTEMPTS if isinstance(qg.get(a), dict)]
@@ -142,16 +217,15 @@ def classify(job: dict) -> str | None:
     if not final or len(final) >= cast:
         return None
 
-    blob = json.dumps(job, default=str)
-    # The trim records its own verdict; prefer the stamp over inference.
-    if '"sub_capsule_trim"' in blob and '"applied": true' in blob.lower():
-        return "trim collapsed it"
-    if '"regen_deleted_a_speaker": true' in blob.lower():
-        return "regen traded a host (caught by the new guard)"
-    first = _speakers(qg, "attempt_1_metrics")
-    if len(first) == 1:
+    # UPSTREAM FIRST: a single-voice attempt 1 predates every later stage.
+    if len(_speakers(qg, "attempt_1_metrics")) == 1:
         return "script single-speaker from attempt 1"
-    if len(final) < len(first):
+    # Real field reads -- never a substring of the serialised document.
+    if dig(qg, "sub_capsule_trim", "applied") is True:
+        return "trim collapsed it"
+    if dig(qg, "regen_deleted_a_speaker") is True:
+        return "regen traded a host (caught by the new guard)"
+    if len(final) < len(_speakers(qg, "attempt_1_metrics")):
         return "regen traded a host"
     return "cast never reached by any attempt"
 

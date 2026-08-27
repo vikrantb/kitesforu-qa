@@ -119,3 +119,67 @@ def test_a_disagreement_is_reported_not_hidden():
     assert census.cast_disagreement(_job(contract=1, count=3)) == (1, 3)
     assert census.cast_disagreement(_job(contract=2, count=2)) is None
     assert census.cast_disagreement(_job(count=2)) is None
+
+
+# ---------------------------------------------------------------------------
+# The FORMAT is only the BASE. A planned multi-character cast RAISES it.
+#
+# Caught by an adversarial review of the first version of this fix, which
+# mirrored HALF the SSOT: it copied select_base_script_template's format->count
+# map and ignored _apply_cast_voice_floor, which the docstring itself named.
+#
+# The two live jobs that discriminate (re-read from Firestore):
+#   8f1c4416  short, speaker_count=1, contract of 5 CANDIDATE personas, no
+#             _cast_sketch -> floor does not fire -> cast 1. Correctly silent.
+#   33cdaa8d  short, speaker_count=1, _cast_sketch.cast_size=3 naming Elias
+#             Vorn / High Priestess Seris / Initiate Kalen, a contract for
+#             exactly those 3, and a delivered script of ['Narrator'].
+#             SSOT cast 3. An unconditional `return 1` dropped this genuine
+#             3->1 collapse out of the denominator entirely.
+# ---------------------------------------------------------------------------
+
+
+def test_a_cast_sketch_raises_a_single_voice_format():
+    census = _census()
+    job = {"audio_config": {"audio_format": "short", "speaker_count": 1},
+           "preferences": {"_cast_sketch": {"cast_size": 3}}}
+    assert census.cast_size(job) == (3, "single-voice-format/cast-floor")
+
+
+def test_the_sketch_is_read_from_either_carrier():
+    """cast_size lives under episode_profile on 33cdaa8d and only `characters`
+    under preferences, so both carriers are consulted."""
+    census = _census()
+    job = {"audio_config": {"audio_format": "short", "speaker_count": 1},
+           "episode_profile": {"user_preferences": {"_cast_sketch": {"cast_size": 3}}}}
+    assert census.cast_size(job)[0] == 3
+    job2 = {"audio_config": {"audio_format": "narration", "speaker_count": 1},
+            "preferences": {"_cast_sketch": {"characters": [{}, {}, {}, {}]}}}
+    assert census.cast_size(job2)[0] == 4
+
+
+@pytest.mark.parametrize("sketch", [{"cast_size": 1}, {"cast_size": 2},
+                                    {"characters": [{}, {}]}, {}, None])
+def test_the_floor_only_fires_above_two(sketch):
+    """`_apply_cast_voice_floor` fires only when the cast is > 2, and only ever
+    RAISES. A 2-hander must not disturb a single-voice format."""
+    census = _census()
+    job = {"audio_config": {"audio_format": "short", "speaker_count": 1},
+           "preferences": {"_cast_sketch": sketch}}
+    assert census.cast_size(job) == (1, "single-voice-format")
+
+
+def test_the_floor_is_capped_at_six_like_the_ssot():
+    census = _census()
+    job = {"audio_config": {"audio_format": "short"},
+           "preferences": {"_cast_sketch": {"cast_size": 40}}}
+    assert census.cast_size(job)[0] == 6
+
+
+def test_the_floor_never_lowers_a_larger_contract():
+    """Additive only: the floor raises, it must never shrink a real cast."""
+    census = _census()
+    job = {"audio_config": {"audio_format": "drama", "speaker_count": 5},
+           "voice_cast": {"contract": {"voice_map": {f"S{i}": i for i in range(5)}}},
+           "preferences": {"_cast_sketch": {"cast_size": 3}}}
+    assert census.cast_size(job) == (5, "contract")
