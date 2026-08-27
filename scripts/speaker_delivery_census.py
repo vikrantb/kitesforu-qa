@@ -60,30 +60,75 @@ def _speakers(qg, attempt):
 
 
 
+#: Formats that deliver ONE voice BY DESIGN. A job in one of these cannot
+#: "under-deliver" — comparing it against a multi-entry cast contract is
+#: meaningless. Mirrors the SSOT in kitesforu-workers
+#: stages/script/cast_voice_sizing.select_base_script_template, which maps
+#: NARRATION/MONOLOGUE/SHORT -> speaker_count 1 (the born-short single-voice
+#: invariant) and DRAMA/MULTI_VOICE -> 3, default -> 2.
+SINGLE_VOICE_FORMATS = frozenset({"short", "narration", "monologue"})
+
+
+def is_single_voice_format(job: dict) -> bool:
+    """True when the job's format delivers one voice by design."""
+    fmt = dig(job, "audio_config", "audio_format")
+    return isinstance(fmt, str) and fmt.strip().lower() in SINGLE_VOICE_FORMATS
+
+
 def cast_size(job: dict) -> tuple[int | None, str]:
-    """The number of voices this job was ACTUALLY cast with, and where it came from.
+    """How many voices was this job CAST with? Returns (n, which_source).
 
-    `audio_config.speaker_count` is a PLANNING number and it can disagree with the
-    cast that was actually resolved. Measured 2026-08-27 over the full collection:
-    of 295 census-eligible jobs, 197 (66%) carry `voice_cast.contract.voice_map`
-    (written by `persona/cast_contract.persist_cast_contract`), and on **39** of
-    them the voice_map size differs from speaker_count.
+    Two fields claim to answer this and they DISAGREE on 106 of 420 jobs, in
+    BOTH directions. Neither is authoritative, so the rule is deliberately
+    CONSERVATIVE: a job counts as under-delivering only when delivery is below
+    BOTH candidates.
 
-    Those 39 are why this census over-counted. Cross-checked against the worker log
-    line `cast_contract.persisted job_id=... speakers=N` on the 48 under-delivering
-    jobs still inside log retention: 9 were jobs where delivered == the REAL cast
-    (nothing was lost, the denominator was simply wrong) and 39 were genuine losses.
-    Every one of the 9 had the same signature: speaker_count=3, real cast=2,
-    delivered=2.
+    MEASURED 2026-08-27 over the 57 disagreeing jobs that have a measurable
+    delivery (positive control: 643 jobs carry >=1 quality_gate attempt):
 
-    So: prefer the contract, fall back to speaker_count, and TELL THE READER which
-    one was used — a denominator you cannot attribute is a number you cannot defend.
+        19  delivered == contract      < speaker_count   (speaker_count over-plans)
+        11  delivered == speaker_count < contract        (contract over-lists)
+        16  delivered <  both                            (a real loss either way)
+         6  delivered >= both                            (no loss either way)
+         5  delivered between the two
+
+    Taking the MAX would score the first, second and fifth rows as losses --
+    30 false positives out of 57. Taking the MIN scores all five rows the way
+    the delivered audio actually reads. An inflated census is not harmless: on
+    2026-08-27 a contract-preferring denominator made born-short 8f1c4416 the
+    ONLY "under-delivering" job in the post-deploy window, i.e. the instrument
+    manufactured the single data point it would have reported.
+
+    MIN also reproduces the worker-log cross-check recorded in qa#138: the 9
+    jobs with speaker_count=3, real cast=2, delivered=2 score as no-loss.
+    """
+    # Formats that deliver one voice BY DESIGN can never under-deliver.
+    if is_single_voice_format(job):
+        return 1, "single-voice-format"
+    vm = dig(job, "voice_cast", "contract", "voice_map")
+    sc = dig(job, "audio_config", "speaker_count")
+    have_vm = isinstance(vm, dict) and bool(vm)
+    have_sc = isinstance(sc, int) and bool(sc)
+    if have_vm and have_sc and len(vm) != sc:
+        return min(len(vm), sc), "disagree/min"
+    if have_vm:
+        return len(vm), "contract"
+    return (sc, "speaker_count") if have_sc else (None, "none")
+
+
+def cast_disagreement(job: dict) -> tuple[int, int] | None:
+    """(contract, speaker_count) when the two sources disagree, else None.
+
+    Reported as its own line rather than folded into the under-delivery total:
+    a cast contract that collapsed below the planned speaker_count is an
+    UPSTREAM defect, and conflating it with a delivery loss is what made the
+    headline number untrustworthy.
     """
     vm = dig(job, "voice_cast", "contract", "voice_map")
-    if isinstance(vm, dict) and vm:
-        return len(vm), "contract"
     sc = dig(job, "audio_config", "speaker_count")
-    return (sc, "speaker_count") if sc else (None, "none")
+    if isinstance(vm, dict) and vm and isinstance(sc, int) and sc and len(vm) != sc:
+        return len(vm), sc
+    return None
 
 
 def classify(job: dict) -> str | None:
@@ -124,7 +169,7 @@ def main() -> None:
             since = since.replace(tzinfo=datetime.timezone.utc)
 
     db = firestore.Client(project=args.project)
-    scanned = eligible = under = 0
+    scanned = eligible = under = disagreed = 0
     causes: Counter[str] = Counter()
     denom: Counter[str] = Counter()
     oldest = newest = None
@@ -141,6 +186,8 @@ def main() -> None:
         newest = created if newest is None or created > newest else newest
 
         cast, cast_src = cast_size(job)
+        if cast_disagreement(job):
+            disagreed += 1
         qg = dig(job, "stages", "quality_gate") or {}
         if not cast or cast < 2 or not any(isinstance(qg.get(a), dict) for a in _ATTEMPTS):
             continue
@@ -161,15 +208,29 @@ def main() -> None:
     pct = 100 * under / eligible
     print(f"  delivered FEWER voices than cast: {under}  ({pct:.0f}%)")
     # A denominator you cannot attribute is a number you cannot defend.
-    print("  denominator used — the cast contract where available, else the "
-          "PLANNING number:")
+    print("  denominator used — NEITHER field is authoritative; on a "
+          "disagreement the SMALLER wins,")
+    print("  so a job counts as under-delivering only when it is below BOTH:")
     for src, n in denom.most_common():
-        label = {"contract": "voice_cast.contract.voice_map (the REAL cast)",
-                 "speaker_count": "audio_config.speaker_count (planning — can "
-                                  "disagree with the cast)"}.get(src, src)
+        label = {
+            "contract": "voice_cast.contract.voice_map",
+            "speaker_count": "audio_config.speaker_count",
+            "single-voice-format": "format delivers 1 voice BY DESIGN "
+                                   "(short/narration/monologue) — never a loss",
+            "disagree/min": "the two DISAGREED — took the smaller",
+        }.get(src, src)
         print(f"      {n:4d}  {label}")
+    print()
+    print("  CAUSES of under-delivery:")
     for cause, n in causes.most_common():
         print(f"      {n:4d}  {cause}")
+    if disagreed:
+        print()
+        print(f"  ⚠ {disagreed} eligible job(s) had a contract that disagreed with the")
+        print("    planned speaker_count. Reported SEPARATELY, not folded into the")
+        print("    total above: a contract that collapsed below the plan is an")
+        print("    UPSTREAM defect, and conflating it with a delivery loss is what")
+        print("    made this headline number untrustworthy before 2026-08-27.")
 
 
 if __name__ == "__main__":
