@@ -487,9 +487,14 @@ def main() -> None:
         pids = {c["persona_id"] for c in with_pid}
         months = sorted({r["month"] for r in staged if r["month"] != "?"})
         print(f"  POSITIVE CONTROL — jobs carrying voice_cast.contract.voice_map: {len(staged)}")
-        print(f"     (of {len(rows)} that DELIVERED audio — hop 1 needs no delivery, so this "
-              "population is\n      deliberately WIDER: a job cast but never rendered is still "
-              "checkable here.)")
+        # NOT "N of M". This population is INDEPENDENT of delivery, so it is not a
+        # subset of the delivered set and an "of" would invite exactly the wrong
+        # reading — the same quietly-wrong denominator statement this section was
+        # just fixed for. The two sets OVERLAP and neither contains the other:
+        # a job may be cast without rendering, or render without a contract.
+        print("     This population is INDEPENDENT of delivery — hop 1 needs none.")
+        print(f"     For scale, {len(rows)} job(s) in this window delivered audio; the two sets")
+        print("     overlap and NEITHER CONTAINS THE OTHER.")
         if _raw != len(entries):
             # A silent 1 is how a silent 100 starts.
             print(f"     ⚠ {_raw - len(entries)} raw entr(ies) collapsed by label "
