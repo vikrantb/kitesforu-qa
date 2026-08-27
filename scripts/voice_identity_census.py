@@ -171,6 +171,18 @@ def main() -> None:
                 if isinstance(v, dict) and v.get("voice_id")
             },
             delivered_by_label={l: {vid for _p, vid in vs} for l, vs in lab2voice.items()},
+            # The SAME question under the BARE-ID key. Reported alongside the pair
+            # key because the two disagree by design and two lanes once published
+            # 146 and 199 for "the same" measurement -- the gap is entirely jobs
+            # where one id string was rendered on two DIFFERENT providers.
+            fractured_bare={l for l, vs in lab2voice.items() if len({v for _p, v in vs}) > 1},
+            # Did any segment of a FRACTURED label carry a fallback? Job-level
+            # UPPER BOUND: one fractured label may fall back while another does not.
+            frac_had_fallback=any(
+                bool(s.get("fallback_used")) for s in segs
+                if norm_label(s["speaker"]) in
+                {l for l, vs in lab2voice.items() if len({v for _p, v in vs}) > 1}
+            ),
         ))
 
     print(f"scanned {scanned} podcast_jobs docs; {with_logs} carry tts_segment_logs")
@@ -220,6 +232,23 @@ def main() -> None:
     print(f"     {sum(1 for r in frac if r['any_fallback']):4d}  had >=1 fallback_used row")
     print(f"     {sum(1 for r in frac if not r['switches'] and not r['any_fallback']):4d}"
           "  had NEITHER  <- nothing failed; the selector simply decided differently")
+
+    # BOTH KEYS, side by side. These legitimately differ and the difference is
+    # informative, so neither is reported alone.
+    fb = [r for r in rows if r["fractured_bare"]]
+    print(f"\n  SAME QUESTION, BARE voice_id KEY:            {len(fb)}"
+          f"  ({100*len(fb)/len(rows):.0f}%)")
+    print(f"  the difference ({len(frac) - len(fb)} jobs) is one id string rendered on TWO providers")
+    print("     -- a real audible change, so the PAIR key is the correct one; but check the")
+    print("        month table before treating it as live, it is the EL->google failover class.")
+    both = [r for r in rows if r["fractured_bare"] and len(r["labels"]) > len(r["voices"])]
+    print(f"  BOTH fractured AND collapsed in one job:      {len(both)}")
+    print("     -- if this is small, the two directions are DIFFERENT JOBS and should be")
+    print("        investigated as two bugs until evidence unifies them.")
+    print(f"\n  CAUSAL SPLIT on the {len(fb)} bare-key fractures:")
+    hadfb = sum(1 for r in fb if r["frac_had_fallback"])
+    print(f"     {hadfb:4d}  a fractured label contains a FALLBACK segment  (job-level UPPER BOUND)")
+    print(f"     {len(fb)-hadfb:4d}  NO fallback anywhere in the fractured label  <- NOT failover")
     for f, c in Counter(r["fmt"] for r in frac).most_common(8):
         print(f"       {c:4d}  {f}")
 
