@@ -59,9 +59,36 @@ def _speakers(qg, attempt):
     return sorted(dist) if isinstance(dist, dict) else []
 
 
+
+def cast_size(job: dict) -> tuple[int | None, str]:
+    """The number of voices this job was ACTUALLY cast with, and where it came from.
+
+    `audio_config.speaker_count` is a PLANNING number and it can disagree with the
+    cast that was actually resolved. Measured 2026-08-27 over the full collection:
+    of 295 census-eligible jobs, 197 (66%) carry `voice_cast.contract.voice_map`
+    (written by `persona/cast_contract.persist_cast_contract`), and on **39** of
+    them the voice_map size differs from speaker_count.
+
+    Those 39 are why this census over-counted. Cross-checked against the worker log
+    line `cast_contract.persisted job_id=... speakers=N` on the 48 under-delivering
+    jobs still inside log retention: 9 were jobs where delivered == the REAL cast
+    (nothing was lost, the denominator was simply wrong) and 39 were genuine losses.
+    Every one of the 9 had the same signature: speaker_count=3, real cast=2,
+    delivered=2.
+
+    So: prefer the contract, fall back to speaker_count, and TELL THE READER which
+    one was used — a denominator you cannot attribute is a number you cannot defend.
+    """
+    vm = dig(job, "voice_cast", "contract", "voice_map")
+    if isinstance(vm, dict) and vm:
+        return len(vm), "contract"
+    sc = dig(job, "audio_config", "speaker_count")
+    return (sc, "speaker_count") if sc else (None, "none")
+
+
 def classify(job: dict) -> str | None:
     """Which stage lost the voices, or None when nothing was lost."""
-    cast = dig(job, "audio_config", "speaker_count")
+    cast, _src = cast_size(job)
     qg = dig(job, "stages", "quality_gate") or {}
     present = [a for a in _ATTEMPTS if isinstance(qg.get(a), dict)]
     if not cast or cast < 2 or not present:
@@ -99,6 +126,7 @@ def main() -> None:
     db = firestore.Client(project=args.project)
     scanned = eligible = under = 0
     causes: Counter[str] = Counter()
+    denom: Counter[str] = Counter()
     oldest = newest = None
 
     for doc in db.collection("podcast_jobs").stream():  # UNORDERED — see METHOD
@@ -112,11 +140,12 @@ def main() -> None:
         oldest = created if oldest is None or created < oldest else oldest
         newest = created if newest is None or created > newest else newest
 
-        cast = dig(job, "audio_config", "speaker_count")
+        cast, cast_src = cast_size(job)
         qg = dig(job, "stages", "quality_gate") or {}
         if not cast or cast < 2 or not any(isinstance(qg.get(a), dict) for a in _ATTEMPTS):
             continue
         eligible += 1
+        denom[cast_src] += 1
         cause = classify(job)
         if cause:
             under += 1
@@ -131,6 +160,14 @@ def main() -> None:
     print(f"  jobs CAST with >=2 voices and a measurable final script: {eligible}")
     pct = 100 * under / eligible
     print(f"  delivered FEWER voices than cast: {under}  ({pct:.0f}%)")
+    # A denominator you cannot attribute is a number you cannot defend.
+    print("  denominator used — the cast contract where available, else the "
+          "PLANNING number:")
+    for src, n in denom.most_common():
+        label = {"contract": "voice_cast.contract.voice_map (the REAL cast)",
+                 "speaker_count": "audio_config.speaker_count (planning — can "
+                                  "disagree with the cast)"}.get(src, src)
+        print(f"      {n:4d}  {label}")
     for cause, n in causes.most_common():
         print(f"      {n:4d}  {cause}")
 
