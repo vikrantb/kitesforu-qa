@@ -3,35 +3,70 @@
 
     python3 scripts/speaker_delivery_census.py [--since 2026-08-27T00:30:00]
 
-Answers one question: of the jobs CAST with >=2 voices, how many DELIVERED
-fewer than they were cast with — and which stage lost them.
+Answers two questions, kept separate on purpose: of the jobs CAST with >=2
+voices, how many DELIVERED fewer than they were cast with and which stage lost
+them -- and, independently, how many delivered MORE.
 
 WHY THIS EXISTS. On 2026-08-26 the founder's "I always hear the 2 voices" was
 traced to four independent causes, and the only way to know which fixes worked
-is the SAME command on both arms. Baseline that day (n=398 datetime-dated jobs,
-2026-07-19..2026-08-26, of 4145 docs):
+is the SAME command on both arms.
 
-    166 jobs cast >=2 voices with a measurable final script
-     55 delivered FEWER than cast  (33%)
-        40  the sub-capsule trim collapsed it   -> fixed 941376db (#2732)
-         9  the regen traded a host for length  -> fixed a1d4481c (#2733)
-         4  script single-speaker from attempt 1 -> #2734 (held)
-         2  cast never reached (audio_config self-contradiction)
+CURRENT BASELINE (2026-08-27, full unordered scan of 4155 docs):
 
-METHOD — two traps this script exists to avoid:
+    283 jobs cast >=2 voices with a measurable delivered script
+     71 delivered FEWER than cast  (25%)
+        30  script single-speaker from attempt 1  -> #2734 (open decision)
+        20  the sub-capsule trim collapsed it     -> fixed 941376db (#2732)
+        15  the regen traded a host for length    -> fixed a1d4481c (#2733)
+         6  cast never reached by any attempt     -> #2735
+    130 delivered MORE voices than cast
+     75  of those render several LABELS through FEWER voice_ids
+
+The 2026-08-26 baseline this file used to carry (166 eligible / 55 under / 33%,
+with "script single-speaker" at 4) came from an instrument with SIX defects and
+must not be quoted. It is preserved in
+.claude/handoffs/2026-08-26-voices-under-delivery.md for provenance only.
+
+METHOD — four traps this script exists to avoid:
 
  1. UNORDERED FULL SCAN. `podcast_jobs.created_at` is MIXED-TYPE (measured
     2026-08-26: 1198 datetime / 1 str / 1 None per 1200), so
-    `order_by("created_at").limit(N)` TYPE-CLIPS — the string-dated rows eat
-    slots in the ordered window. On that date it cost 2 of 400 slots and missed
-    ZERO real jobs, but the margin is not guaranteed. Scan everything and filter
-    in Python.
+    `order_by("created_at").limit(N)` TYPE-CLIPS -- the string-dated rows eat
+    slots in the ordered window. Scan everything and filter in Python.
 
- 2. THE FINAL ATTEMPT IS NOT attempt_1. Read the HIGHEST attempt_N_metrics
-    present; comparing the cast against attempt 1 measures the script the
-    pipeline threw away.
+ 2. READ THE TAKE THAT SHIPPED, NOT THE LATEST ONE.
+    ** This entry previously said the OPPOSITE -- "read the HIGHEST
+    attempt_N_metrics present" -- and that instruction WAS the bug. **
+    When the regen cap bails to attempt 1, the gate still stamps attempt 2's
+    metrics, so the highest attempt describes the take that was THROWN AWAY.
+    MEASURED 2026-08-27 (positive control: 2896 jobs carry tts_segment_logs):
+    149 jobs stamped `regen_cap_bailed_to_attempt_1` have delivered segments;
+    on 26 the attempts name different speakers, and on all 26 the highest
+    attempt was the discarded one. Job 38507678 shipped ['Host1','Host2'] while
+    attempt 2 recorded ['Host1'].
+    Delivery therefore comes from `tts_segment_logs` -- the real TTS input, so
+    the shipped take by construction -- falling back to the gate only when no
+    log exists. See delivered_speakers().
 
-Use --since to isolate post-deploy traffic. Same command, both arms.
+ 3. NEITHER CAST FIELD IS AUTHORITATIVE. `audio_config.speaker_count` and
+    `voice_cast.contract.voice_map` disagree on 106 of 420 jobs, in BOTH
+    directions, so a disagreement takes the SMALLER and a job counts as
+    under-delivering only when it is below both. And the FORMAT is only the
+    BASE: `_apply_cast_voice_floor` raises it for a planned multi-character
+    cast. See cast_size().
+
+ 4. ATTRIBUTE ON REAL FIELDS, UPSTREAM FIRST. The cause test was once a
+    substring match over `json.dumps(job)`, so any unrelated `applied` field
+    attributed the loss to the trim. Read the field; and test the script before
+    the trim, because the trim runs on the regen. See classify().
+
+LABELS ARE NOT VOICES. Everything above counts speaker LABELS. Several labels
+can render through one voice_id, in which case the script has a cast and the
+audio does not -- which is what the founder's sentence is actually about. That
+number is reported separately via delivered_voices(); never fold it in.
+
+Use --since to isolate post-deploy traffic. Same command, both arms. At a ~25%
+base rate a window under ~50 eligible jobs cannot decide anything -- say the n.
 """
 from __future__ import annotations
 
