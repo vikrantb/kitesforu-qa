@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 from collections import Counter
 
 from google.cloud import firestore
@@ -183,6 +184,58 @@ def cast_disagreement(job: dict) -> tuple[int, int] | None:
     return None
 
 
+def _norm(name) -> str:
+    """Speaker labels drift in punctuation between stages: the gate records
+    ``Prof_ James Okafor`` where the TTS log records ``Prof. James Okafor``.
+    Compare on the letters so a formatting difference is not read as a
+    different speaker."""
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
+def delivered_speakers(job: dict) -> tuple[set, str]:
+    """Distinct speaker labels in the audio that ACTUALLY SHIPPED.
+
+    ``tts_segment_logs`` is the real TTS input, so it is the shipped take by
+    construction. The gate's ``attempt_N_metrics`` are NOT: when the regen cap
+    bails to attempt 1, the gate still stamps the metrics of attempt 2, and the
+    census's "latest attempt" then describes the take that was THROWN AWAY.
+
+    MEASURED 2026-08-27 (positive control: 2896 jobs carry tts_segment_logs):
+    149 jobs are stamped ``regen_cap_bailed_to_attempt_1`` and have delivered
+    segments; on 26 of them attempt 1 and attempt 2 name different speakers,
+    and on all 26 the census read attempt 2 while the audio was attempt 1.
+    Job 38507678 shipped ['Host1','Host2'] while attempt 2 recorded ['Host1'] --
+    scored as an under-delivery that never happened.
+    """
+    segs = job.get("tts_segment_logs")
+    if isinstance(segs, list) and segs:
+        names = {_norm(s.get("speaker")) for s in segs
+                 if isinstance(s, dict) and s.get("speaker")}
+        names.discard("")
+        if names:
+            return names, "tts_segment_logs"
+    qg = dig(job, "stages", "quality_gate") or {}
+    present = [a for a in _ATTEMPTS if isinstance(qg.get(a), dict)]
+    if present:
+        return {_norm(x) for x in _speakers(qg, present[0])}, "gate/latest-attempt"
+    return set(), "none"
+
+
+def delivered_voices(job: dict) -> set:
+    """Distinct voice_ids actually rendered -- what a listener HEARS.
+
+    Not the same question as the labels. Several cast labels can render
+    through ONE voice_id, in which case the script has a cast and the audio
+    does not. "I always hear the 2 voices" is a claim about THIS number, so it
+    is reported alongside the labels rather than folded into them.
+    """
+    segs = job.get("tts_segment_logs")
+    if not isinstance(segs, list):
+        return set()
+    return {str(s.get("voice_id")) for s in segs
+            if isinstance(s, dict) and s.get("voice_id")}
+
+
 def classify(job: dict) -> str | None:
     """Which stage lost the voices, or None when nothing was lost.
 
@@ -211,11 +264,13 @@ def classify(job: dict) -> str | None:
     cast, _src = cast_size(job)
     qg = dig(job, "stages", "quality_gate") or {}
     present = [a for a in _ATTEMPTS if isinstance(qg.get(a), dict)]
-    if not cast or cast < 2 or not present:
+    if not cast or cast < 2:
         return None
-    final = _speakers(qg, present[0])
+    final, _how = delivered_speakers(job)
     if not final or len(final) >= cast:
         return None
+    if not present:
+        return "cast never reached by any attempt"
 
     # UPSTREAM FIRST: a single-voice attempt 1 predates every later stage.
     if len(_speakers(qg, "attempt_1_metrics")) == 1:
@@ -244,6 +299,8 @@ def main() -> None:
 
     db = firestore.Client(project=args.project)
     scanned = eligible = under = disagreed = collapsed_out = 0
+    over = over_one_voice = 0
+    over_by_fmt: Counter[str] = Counter()
     causes: Counter[str] = Counter()
     denom: Counter[str] = Counter()
     oldest = newest = None
@@ -260,6 +317,17 @@ def main() -> None:
         newest = created if newest is None or created > newest else newest
 
         cast, cast_src = cast_size(job)
+        # OVER-delivery: measured for EVERY job, including the cast<2 ones the
+        # under-delivery census skips. Distinct voice_ids are tracked
+        # separately because several labels can share one voice -- a script
+        # with a cast and audio without one.
+        shipped, _how = delivered_speakers(job)
+        if cast and shipped and len(shipped) > cast:
+            over += 1
+            over_by_fmt[(dig(job, "audio_config", "audio_format") or "?")] += 1
+            voices = delivered_voices(job)
+            if voices and len(voices) < len(shipped):
+                over_one_voice += 1
         qg = dig(job, "stages", "quality_gate") or {}
         measurable = any(isinstance(qg.get(a), dict) for a in _ATTEMPTS)
         disagree = cast_disagreement(job)
@@ -273,6 +341,10 @@ def main() -> None:
         eligible += 1
         if disagree:
             disagreed += 1
+        # OVER-delivery is a different defect and was previously INVISIBLE:
+        # the loop skipped cast < 2, so a one-voice format that shipped three
+        # voices could never be seen. A born-short is exactly that shape.
+        # (checked below against every job, not just cast >= 2 ones)
         denom[cast_src] += 1
         cause = classify(job)
         if cause:
@@ -305,6 +377,18 @@ def main() -> None:
     print("  CAUSES of under-delivery:")
     for cause, n in causes.most_common():
         print(f"      {n:4d}  {cause}")
+    if over:
+        print()
+        print(f"  DELIVERED MORE VOICES THAN CAST: {over}")
+        print("    A DIFFERENT defect, and invisible before 2026-08-27: the loop")
+        print("    skipped cast < 2, so a one-voice format that shipped several")
+        print("    voices could never be counted. Born-short 8f1c4416 shipped")
+        print("    Narrator + Nadia + Theo against speaker_count=1.")
+        for f, n in over_by_fmt.most_common(8):
+            print(f"      {n:4d}  {f}")
+        if over_one_voice:
+            print(f"    of these, {over_one_voice} render several LABELS through FEWER")
+            print("      voice_ids — the script has a cast, the audio does not.")
     if disagreed or collapsed_out:
         print()
         print("  ⚠ UPSTREAM — the two cast fields DISAGREED. Reported separately, never")

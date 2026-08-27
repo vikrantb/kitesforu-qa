@@ -183,3 +183,63 @@ def test_the_floor_never_lowers_a_larger_contract():
            "voice_cast": {"contract": {"voice_map": {f"S{i}": i for i in range(5)}}},
            "preferences": {"_cast_sketch": {"cast_size": 3}}}
     assert census.cast_size(job) == (5, "contract")
+
+
+# ---------------------------------------------------------------------------
+# DELIVERY MUST BE READ FROM THE TAKE THAT SHIPPED.
+#
+# The gate stamps attempt 2's metrics even when the regen cap bails to attempt
+# 1, so "the latest attempt" describes the take that was THROWN AWAY.
+# MEASURED 2026-08-27 (positive control: 2896 jobs carry tts_segment_logs):
+# 149 jobs are stamped regen_cap_bailed_to_attempt_1 and have delivered
+# segments; on 26 the two attempts name different speakers, and on all 26 the
+# census read attempt 2 while the audio was attempt 1. Job 38507678 shipped
+# ['Host1','Host2'] while attempt 2 recorded ['Host1'].
+# ---------------------------------------------------------------------------
+
+
+def test_delivery_prefers_the_tts_log_over_the_gate():
+    census = _census()
+    job = {"tts_segment_logs": [{"speaker": "Host1"}, {"speaker": "Host2"}],
+           "stages": {"quality_gate": {"attempt_2_metrics": {
+               "speaker_balance": {"distribution": {"Host1": 1}}}}}}
+    names, how = census.delivered_speakers(job)
+    assert how == "tts_segment_logs"
+    assert len(names) == 2, "the gate said one voice; the audio had two"
+
+
+def test_the_38507678_shape_is_no_longer_a_false_under_delivery():
+    census = _census()
+    job = {"audio_config": {"audio_format": "dialogue", "speaker_count": 2},
+           "tts_segment_logs": [{"speaker": "Host1"}, {"speaker": "Host2"}],
+           "stages": {"quality_gate": {
+               "attempt_1_metrics": {"speaker_balance": {"distribution": {"Host1": 1, "Host2": 1}}},
+               "attempt_2_metrics": {"speaker_balance": {"distribution": {"Host1": 1}}}}}}
+    assert census.classify(job) is None
+
+
+def test_label_punctuation_drift_is_not_a_different_speaker():
+    """The gate writes 'Prof_ James Okafor'; the TTS log writes 'Prof. James
+    Okafor'. Nine of the 26 bail jobs differed only this way."""
+    census = _census()
+    assert census._norm("Prof_ James Okafor") == census._norm("Prof. James Okafor")
+
+
+def test_delivery_falls_back_to_the_gate_when_no_tts_log_exists():
+    census = _census()
+    job = {"stages": {"quality_gate": {"attempt_1_metrics": {
+        "speaker_balance": {"distribution": {"A": 1, "B": 1}}}}}}
+    names, how = census.delivered_speakers(job)
+    assert how == "gate/latest-attempt" and len(names) == 2
+
+
+def test_voices_heard_is_a_different_question_from_labels():
+    """Several cast labels can render through ONE voice_id: the script has a
+    cast and the audio does not. 75 of the 130 over-delivering jobs are this."""
+    census = _census()
+    job = {"tts_segment_logs": [
+        {"speaker": "Narrator", "voice_id": "v1"},
+        {"speaker": "Nadia", "voice_id": "v1"},
+        {"speaker": "Theo", "voice_id": "v1"}]}
+    assert len(census.delivered_speakers(job)[0]) == 3
+    assert len(census.delivered_voices(job)) == 1
