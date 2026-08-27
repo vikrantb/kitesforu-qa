@@ -222,8 +222,17 @@ def cast_disagreement(job: dict) -> tuple[int, int] | None:
 def _norm(name) -> str:
     """Speaker labels drift in punctuation between stages: the gate records
     ``Prof_ James Okafor`` where the TTS log records ``Prof. James Okafor``.
-    Compare on the letters so a formatting difference is not read as a
-    different speaker."""
+
+    Compare on letters AND DIGITS. The digit is LOAD-BEARING: it is the only
+    thing separating ``Host1`` from ``Host2``. A letters-only normaliser merges
+    every two-host cast into a single speaker, and MEASURED 2026-08-27 that is
+    1889 of the 2896 jobs carrying ``tts_segment_logs`` (65%), 1870 of them the
+    plain ``['Host1','Host2']`` pair. The census would then report the entire
+    two-host corpus as a total voice collapse -- silently, with no error, and
+    looking exactly like a dramatic real finding.
+
+    ``test_the_digit_in_host1_is_load_bearing`` fails if this is ever narrowed.
+    """
     return re.sub(r"[^a-z0-9]+", "", str(name).lower())
 
 
