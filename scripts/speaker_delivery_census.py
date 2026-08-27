@@ -169,7 +169,7 @@ def main() -> None:
             since = since.replace(tzinfo=datetime.timezone.utc)
 
     db = firestore.Client(project=args.project)
-    scanned = eligible = under = disagreed = 0
+    scanned = eligible = under = disagreed = collapsed_out = 0
     causes: Counter[str] = Counter()
     denom: Counter[str] = Counter()
     oldest = newest = None
@@ -186,12 +186,19 @@ def main() -> None:
         newest = created if newest is None or created > newest else newest
 
         cast, cast_src = cast_size(job)
-        if cast_disagreement(job):
-            disagreed += 1
         qg = dig(job, "stages", "quality_gate") or {}
-        if not cast or cast < 2 or not any(isinstance(qg.get(a), dict) for a in _ATTEMPTS):
+        measurable = any(isinstance(qg.get(a), dict) for a in _ATTEMPTS)
+        disagree = cast_disagreement(job)
+        # A disagreement that drives the cast below 2 makes the job INELIGIBLE,
+        # so it silently leaves the census. Count it rather than lose it: that
+        # is the upstream cast-collapse defect, not an absence of one.
+        if disagree and measurable and (not cast or cast < 2):
+            collapsed_out += 1
+        if not cast or cast < 2 or not measurable:
             continue
         eligible += 1
+        if disagree:
+            disagreed += 1
         denom[cast_src] += 1
         cause = classify(job)
         if cause:
@@ -224,13 +231,15 @@ def main() -> None:
     print("  CAUSES of under-delivery:")
     for cause, n in causes.most_common():
         print(f"      {n:4d}  {cause}")
-    if disagreed:
+    if disagreed or collapsed_out:
         print()
-        print(f"  ⚠ {disagreed} eligible job(s) had a contract that disagreed with the")
-        print("    planned speaker_count. Reported SEPARATELY, not folded into the")
-        print("    total above: a contract that collapsed below the plan is an")
-        print("    UPSTREAM defect, and conflating it with a delivery loss is what")
+        print("  ⚠ UPSTREAM — the two cast fields DISAGREED. Reported separately, never")
+        print("    folded into the total above: a contract that collapsed below the plan")
+        print("    is an upstream defect, and conflating it with a delivery loss is what")
         print("    made this headline number untrustworthy before 2026-08-27.")
+        print(f"      {disagreed:4d}  of the {eligible} ELIGIBLE jobs (these took the smaller)")
+        print(f"      {collapsed_out:4d}  measurable job(s) the disagreement drove BELOW a cast of 2,")
+        print("            so they left the census entirely — the cast-collapse class")
 
 
 if __name__ == "__main__":
