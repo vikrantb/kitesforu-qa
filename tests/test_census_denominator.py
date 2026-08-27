@@ -243,3 +243,29 @@ def test_voices_heard_is_a_different_question_from_labels():
         {"speaker": "Theo", "voice_id": "v1"}]}
     assert len(census.delivered_speakers(job)[0]) == 3
     assert len(census.delivered_voices(job)) == 1
+
+
+def test_the_digit_in_host1_is_load_bearing():
+    """A letters-only normaliser would merge Host1 and Host2 into one speaker.
+
+    MEASURED 2026-08-27: 1889 of the 2896 jobs carrying tts_segment_logs (65%)
+    would collapse, 1870 of them the plain ['Host1','Host2'] pair. The census
+    would report the entire two-host corpus as a total voice collapse --
+    silently, and it would look like a real finding.
+
+        cd kitesforu-qa/scripts && GCP_PROJECT_ID=kitesforu-dev python3 -c \
+          '<stream podcast_jobs; per job compare len({alnum(l)}) vs len({alpha(l)})
+            over the tts_segment_logs speaker labels>'
+
+    This test exists so `_norm` can never be "aligned" to a prose description
+    that omits the digit. It is the guard, not the docstring.
+    """
+    census = _census()
+    assert census._norm("Host1") != census._norm("Host2")
+    assert census._norm("Sister 1") != census._norm("Sister 2")
+    # ...while the drift it DOES exist to absorb still normalises together.
+    assert census._norm("Prof_ James Okafor") == census._norm("Prof. James Okafor")
+    assert census._norm("Co-host") == census._norm("co-host")
+
+    job = {"tts_segment_logs": [{"speaker": "Host1"}, {"speaker": "Host2"}]}
+    assert len(census.delivered_speakers(job)[0]) == 2, "the two-host corpus"
