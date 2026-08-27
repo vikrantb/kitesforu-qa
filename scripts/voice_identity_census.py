@@ -87,6 +87,114 @@ def id_namespace(voice_id) -> str:
     return "other"
 
 
+def persona_cast(job: dict) -> dict:
+    """``{normalised label: {persona_id, provider, voice_id}}`` from the contract.
+
+    This is the per-job PERSONA STAMP. It is what makes the cast-time question
+    answerable at all: ``voice_cast.contract.voice_map[<label>].persona_id``
+    names WHICH persona was cast, alongside the provider and voice_id it was
+    cast WITH.
+
+    Entries without a voice_id are dropped (nothing to compare); entries without
+    a persona_id are KEPT with ``persona_id=None`` so the coverage line can
+    report them honestly rather than making the stamp look universal.
+    """
+    out = {}
+    for label, cfg in (dig(job, "voice_cast", "contract", "voice_map") or {}).items():
+        if not isinstance(cfg, dict) or not cfg.get("voice_id"):
+            continue
+        out[norm_label(label)] = {
+            "persona_id": cfg.get("persona_id") or None,
+            "provider": cfg.get("provider"),
+            "voice_id": str(cfg["voice_id"]),
+        }
+    return out
+
+
+def load_persona_voices(personas_dir: str) -> dict:
+    """``{persona_id: {provider: declared voice}}`` from ``personas/*.yaml``.
+
+    Lives in kitesforu-workers, not here, so this is OPTIONAL and takes an
+    explicit path (``--personas``). Returns {} when the directory is absent or
+    PyYAML is missing — hop 1 then reports only its repo-local half rather than
+    failing the whole census.
+    """
+    import glob
+    import os
+
+    try:
+        import yaml  # noqa: PLC0415 — optional dependency, section is opt-in
+    except ImportError:
+        return {}
+
+    out = {}
+    for path in sorted(glob.glob(os.path.join(personas_dir, "*.yaml"))):
+        try:
+            doc = yaml.safe_load(open(path))
+        except Exception:  # noqa: BLE001 — a malformed persona must not kill the scan
+            continue
+        if not isinstance(doc, dict):
+            continue
+        pid = doc.get("id") or os.path.basename(path).rsplit(".", 1)[0]
+        found: dict = {}
+
+        def walk(node, found=found):
+            if isinstance(node, dict):
+                for key, val in node.items():
+                    # Providers do NOT agree on the key: the inworld block says
+                    # ``voice:`` and the elevenlabs block says ``voice_id:``
+                    # (measured over personas/*.yaml — 50 inworld ``voice``, 29
+                    # elevenlabs ``voice_id``). Reading only one of them makes
+                    # this silently blind to a third of the declarations while
+                    # still reporting a confident-looking number.
+                    declared = None
+                    if isinstance(val, dict):
+                        for candidate in ("voice", "voice_id"):
+                            if isinstance(val.get(candidate), str):
+                                declared = val[candidate]
+                                break
+                    if declared is not None:
+                        found[key] = declared
+                    else:
+                        walk(val, found)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item, found)
+
+        walk(doc, found)
+        if found:
+            out[pid] = found
+    return out
+
+
+def hop1_substitutions(cast: dict, persona_voices: dict) -> list:
+    """Rows where the CONTRACT's voice differs from the persona's DECLARED one.
+
+    Returns ``[(label, persona_id, declared, contracted)]``.
+
+    Compared PER PROVIDER — a persona declares a voice per provider, so an
+    inworld contract entry is only ever checked against the persona's inworld
+    declaration. Comparing across providers would report every provider swap as
+    a substitution, which is the same bare-id mistake this script warns about
+    for delivery (an id only means something next to its provider).
+
+    Silent on entries with no persona_id, no provider, or a persona this
+    directory does not define — those are UNCHECKABLE, not matching, and the
+    caller counts them separately.
+    """
+    rows = []
+    for label, cfg in sorted(cast.items()):
+        pid, provider = cfg.get("persona_id"), cfg.get("provider")
+        if not pid or not provider:
+            continue
+        declared = (persona_voices.get(pid) or {}).get(provider)
+        if not declared:
+            continue
+        if str(cfg["voice_id"]) != str(declared):
+            rows.append((label, pid, str(declared), str(cfg["voice_id"])))
+    return rows
+
+
 def usable_segments(job: dict) -> list:
     """Rendered rows carrying both a speaker and a voice, in TIME order."""
     segs = [
@@ -106,6 +214,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", default="kitesforu-dev")
     ap.add_argument("--since", help="ISO8601; only jobs created at/after this")
+    ap.add_argument("--personas",
+                    help="path to kitesforu-workers/personas/ — enables the HOP 1 "
+                         "comparison of each persona's DECLARED voice against the "
+                         "voice the contract actually cast. Optional: that directory "
+                         "lives in another repo, so without it hop 1 reports only its "
+                         "repo-local half (stamp coverage + per-persona variation).")
     ap.add_argument("--namespace", action="store_true",
                     help="print the provider/voice_id namespace control (trap 1)")
     args = ap.parse_args()
@@ -171,6 +285,9 @@ def main() -> None:
                 if isinstance(v, dict) and v.get("voice_id")
             },
             delivered_by_label={l: {vid for _p, vid in vs} for l, vs in lab2voice.items()},
+            # The per-job PERSONA STAMP — see persona_cast(). Kept whole (not
+            # flattened to voice_id) because hop 1 needs persona_id + provider.
+            cast=persona_cast(job),
             # The SAME question under the BARE-ID key. Reported alongside the pair
             # key because the two disagree by design and two lanes once published
             # 146 and 199 for "the same" measurement -- the gap is entirely jobs
@@ -294,6 +411,104 @@ def main() -> None:
                     print(f"     {r['job'][:8]} {r['fmt']}: label {l!r} contracted "
                           f"{r['contract'][l]!r}, delivered {sorted(r['delivered_by_label'][l])}")
                     break
+
+    print("\n" + "=" * 72)
+    print("HOP 1 — THE PERSONA STAMP: what was CAST vs what the persona DECLARES")
+    print("=" * 72)
+    print("  stamp: voice_cast.contract.voice_map[<label>].persona_id (+ .provider, .voice_id)")
+    print("  NOTE the chain is TWO hops and they are different questions:")
+    print("     hop 1  persona YAML voice -> contract voice_id   (cast-time substitution, here)")
+    print("     hop 2  contract voice_id  -> delivered voice_id  (delivery drift, section above)")
+    staged = [r for r in rows if r["cast"]]
+    if not staged:
+        print("  no job in this window carries a cast contract — nothing to report.")
+    else:
+        entries = [c for r in staged for c in r["cast"].values()]
+        with_pid = [c for c in entries if c["persona_id"]]
+        pids = {c["persona_id"] for c in with_pid}
+        months = sorted({r["month"] for r in staged if r["month"] != "?"})
+        print(f"  POSITIVE CONTROL — jobs carrying voice_cast.contract.voice_map: "
+              f"{len(staged)} of {len(rows)}")
+        print(f"     voice_map entries: {len(entries)}   with a persona_id: {len(with_pid)}"
+              f"  ({100*len(with_pid)/len(entries):.0f}%)")
+        print(f"     distinct persona_ids ever stamped: {len(pids)}")
+        if months:
+            # A reader seeing "31 personas" without this will over-read it as fleet history.
+            print(f"  ⚠ COVERAGE LIMIT: the stamp exists only for {months[0]}..{months[-1]} "
+                  f"({len(staged)} jobs).")
+            print("     It is NOT fleet history — do not read these counts as all-time.")
+
+        # Repo-local half: does ONE persona get cast with DIFFERENT voices across jobs?
+        # Needs no persona YAML, so it always runs.
+        per_persona = defaultdict(Counter)
+        for r in staged:
+            for c in r["cast"].values():
+                if c["persona_id"]:
+                    per_persona[c["persona_id"]][(c["provider"], c["voice_id"])] += 1
+        unstable = {p: v for p, v in per_persona.items() if len(v) > 1}
+        print(f"\n  personas cast with MORE THAN ONE (provider, voice_id) across jobs: "
+              f"{len(unstable)} of {len(per_persona)}")
+        for pid, counts in sorted(unstable.items(), key=lambda kv: -sum(kv[1].values()))[:6]:
+            shown = " · ".join(f"{p}:{v}×{n}" for (p, v), n in counts.most_common(4))
+            print(f"     {pid:<24s} {shown}")
+
+        if args.personas:
+            pv = load_persona_voices(args.personas)
+            if not pv:
+                print(f"\n  --personas {args.personas}: no persona YAMLs read "
+                      "(missing directory or PyYAML) — hop 1 comparison skipped.")
+            else:
+                print(f"\n  comparing against {len(pv)} persona YAML(s) in {args.personas}")
+                bym = defaultdict(lambda: [0, 0])
+                subs = Counter()
+                for r in staged:
+                    checkable = [
+                        c for c in r["cast"].values()
+                        if c["persona_id"] and c["provider"]
+                        and (pv.get(c["persona_id"]) or {}).get(c["provider"])
+                    ]
+                    bym[r["month"]][0] += len(checkable)
+                    for _label, pid, declared, got in hop1_substitutions(r["cast"], pv):
+                        bym[r["month"]][1] += 1
+                        subs[(pid, declared, got)] += 1
+                # BY PROVIDER is the informative cut, and it is easy to get
+                # silently wrong: reading only the inworld key shape once made
+                # this look like an inworld-only phenomenon when elevenlabs
+                # substitutes at the same rate. Providers are reported
+                # separately so that mistake cannot hide again.
+                by_prov = defaultdict(lambda: [0, 0])
+                for r in staged:
+                    for c in r["cast"].values():
+                        if (c["persona_id"] and c["provider"]
+                                and (pv.get(c["persona_id"]) or {}).get(c["provider"])):
+                            by_prov[c["provider"]][0] += 1
+                    for _label, pid, _declared, got in hop1_substitutions(r["cast"], pv):
+                        prov = next((c["provider"] for c in r["cast"].values()
+                                     if c["persona_id"] == pid and c["voice_id"] == got), None)
+                        if prov:
+                            by_prov[prov][1] += 1
+                total = sum(n for n, _ in bym.values())
+                bad = sum(b for _, b in bym.values())
+                print(f"  checkable entries (persona has a declaration for that provider): {total}")
+                if total:
+                    print(f"  contract voice DIFFERS from the declaration: {bad}  "
+                          f"({100*bad/total:.0f}%)")
+                    for m in sorted(bym):
+                        n, b = bym[m]
+                        if n:
+                            print(f"     {m}  {b:4d}/{n:<5d}  ({100*b/n:.0f}%)")
+                    print("  BY PROVIDER (a persona declares a voice per provider):")
+                    for prov in sorted(by_prov):
+                        n, b = by_prov[prov]
+                        if n:
+                            print(f"     {prov:<12s} checkable {n:4d}   substituted {b:4d}"
+                                  f"  ({100*b/n:.0f}%)")
+                    print("  most frequent (persona: declared -> cast):")
+                    for (pid, declared, got), n in subs.most_common(6):
+                        print(f"     {n:4d}  {pid:<24s} {declared!r} -> {got!r}")
+                    print("  NOTE a substitution is NOT evidence the declared voice is invalid —")
+                    print("     check whether it is delivered elsewhere in the fleet before")
+                    print("     concluding anything about the voice existing.")
 
     print("\n" + "=" * 72)
     print("BY MONTH — so a fix that landed mid-window cannot hide in an average")
