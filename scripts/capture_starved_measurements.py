@@ -84,7 +84,18 @@ def probe_character_consistency(job: dict[str, Any]) -> dict[str, Any]:
     visual = job.get("visual") or {}
     clips = visual.get("clips") or []
     characters = ((visual.get("world_bible") or {}).get("characters")) or []
-    fields = ("appearance", "wardrobe", "ethnicity", "age_range")
+    # THE FOUR FIELDS THE CONSUMER ACTUALLY READS. Not a guess — these are the
+    # exact four `prompt_assembler.build_shot_prompt` joins into the subject
+    # label (`descriptor, wardrobe, ethnicity, age_range`).
+    #
+    # This tuple said "appearance" until 2026-08-27, and NOTHING WRITES THAT KEY.
+    # A world_bible character carries `descriptor` / `distinguishing_features` /
+    # `skin_tone_mst` — never `appearance` — so the verdict returned
+    # "INCOMPLETE — at least one character is missing a field" for every job with
+    # a cast, forever. Measured on job 762f70f1 (2 characters, both complete):
+    # the probe called it INCOMPLETE while all four REAL fields were populated.
+    # A gate that cannot pass is worse than no gate; it trains you to ignore it.
+    fields = ("descriptor", "wardrobe", "ethnicity", "age_range")
     per_member = [
         {"name": m.get("name"), **{f: bool(m.get(f)) for f in fields}}
         for m in characters if isinstance(m, dict)
