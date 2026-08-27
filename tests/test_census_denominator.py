@@ -269,3 +269,27 @@ def test_the_digit_in_host1_is_load_bearing():
 
     job = {"tts_segment_logs": [{"speaker": "Host1"}, {"speaker": "Host2"}]}
     assert len(census.delivered_speakers(job)[0]) == 2, "the two-host corpus"
+
+
+def test_voice_identity_is_the_provider_id_pair():
+    """A bare voice_id merges two genuinely different renders.
+
+    MEASURED 2026-08-27 over 56,377 segment rows: 14,376 (25.5%, across 900 of
+    the 2896 jobs carrying tts_segment_logs) hold a voice_id from a different
+    provider's namespace — almost all an ElevenLabs id logged under
+    provider='google', 100% of them fallback_used=True. On an EL failover the
+    log records the REQUESTED id, not the Google voice heard.
+
+    This test exists because the fleet-wide "which voices dominate" question is
+    the founder's actual sentence, and a bare key answers it wrongly.
+    """
+    census = _census()
+    job = {"tts_segment_logs": [
+        {"speaker": "Host1", "voice_id": "21m00Tcm4TlvDq8ikWAM", "provider": "elevenlabs"},
+        {"speaker": "Host2", "voice_id": "21m00Tcm4TlvDq8ikWAM", "provider": "google"}]}
+    assert len(census.delivered_voices(job)) == 2, (
+        "same id, two providers — two different renders, not one voice")
+    same = {"tts_segment_logs": [
+        {"speaker": "Host1", "voice_id": "v1", "provider": "google"},
+        {"speaker": "Host2", "voice_id": "v1", "provider": "google"}]}
+    assert len(census.delivered_voices(same)) == 1, "genuinely one voice"

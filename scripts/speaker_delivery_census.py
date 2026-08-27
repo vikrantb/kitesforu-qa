@@ -269,14 +269,29 @@ def delivered_voices(job: dict) -> set:
     """Distinct voice_ids actually rendered -- what a listener HEARS.
 
     Not the same question as the labels. Several cast labels can render
-    through ONE voice_id, in which case the script has a cast and the audio
-    does not. "I always hear the 2 voices" is a claim about THIS number, so it
-    is reported alongside the labels rather than folded into them.
+    through ONE voice, in which case the script has a cast and the audio does
+    not. "I always hear the 2 voices" is a claim about THIS number, so it is
+    reported alongside the labels rather than folded into them.
+
+    IDENTITY IS THE (provider, voice_id) PAIR, NEVER voice_id ALONE.
+    MEASURED 2026-08-27 over 56,377 segment rows: 14,376 (25.5%, across 900 of
+    the 2896 jobs with delivery) carry a voice_id from a DIFFERENT provider's
+    namespace -- almost all an ElevenLabs id logged under provider='google',
+    and 100% of those rows are fallback_used=True. On an ElevenLabs failover
+    the log records the REQUESTED id, not the Google voice actually heard, so a
+    bare-voice_id key merges two genuinely different renders.
+
+    HONEST SCOPE: this does NOT move the within-job counts this census reports
+    -- measured, the collapse count is 75 under both keys, because inside one
+    job an id is consistently logged under one provider. It matters for
+    CROSS-JOB aggregation ("which voices dominate the fleet"), which is exactly
+    the question the founder's sentence asks, so the pair is used here rather
+    than left as a trap for the next reader.
     """
     segs = job.get("tts_segment_logs")
     if not isinstance(segs, list):
         return set()
-    return {str(s.get("voice_id")) for s in segs
+    return {(str(s.get("provider")), str(s.get("voice_id"))) for s in segs
             if isinstance(s, dict) and s.get("voice_id")}
 
 
