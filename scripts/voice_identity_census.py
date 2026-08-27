@@ -163,6 +163,14 @@ def main() -> None:
             switches=sum(1 for a, b in zip(providers, providers[1:]) if a != b),
             any_fallback=any(s.get("fallback_used") for s in segs),
             providers=sorted(set(providers)),
+            # The CAST contract's own voice_id per label — so "did the cast
+            # reach the listener" is answerable without a second scan.
+            contract={
+                norm_label(k): str(v["voice_id"])
+                for k, v in (dig(job, "voice_cast", "contract", "voice_map") or {}).items()
+                if isinstance(v, dict) and v.get("voice_id")
+            },
+            delivered_by_label={l: {vid for _p, vid in vs} for l, vs in lab2voice.items()},
         ))
 
     print(f"scanned {scanned} podcast_jobs docs; {with_logs} carry tts_segment_logs")
@@ -224,6 +232,39 @@ def main() -> None:
         shown = ", ".join(f"{p}:{v}" for p, v in sorted(vs))
         print(f"     {c:5d}  {100*c/len(multi):5.1f}%  {{{shown}}}")
     print(f"     distinct voice SETS across {len(multi)} multi-label jobs: {len(sets)}")
+
+    print("\n" + "=" * 72)
+    print("THE CAST CONTRACT vs WHAT SHIPPED")
+    print("=" * 72)
+    print("  voice_cast.contract.voice_map[label].voice_id  vs  tts_segment_logs")
+    withc = [r for r in rows if r["contract"]
+             and any(l in r["delivered_by_label"] for l in r["contract"])]
+    if not withc:
+        print("  no job in this window carries both a cast contract and delivered segments.")
+    else:
+        bad = []
+        for r in withc:
+            common = [l for l in r["contract"] if l in r["delivered_by_label"]]
+            if any(r["delivered_by_label"][l] != {r["contract"][l]} for l in common):
+                bad.append(r)
+        print(f"  jobs with BOTH a contract (with voice_ids) and delivered segments: {len(withc)}")
+        print(f"  >=1 label delivered a voice the contract did NOT name:  {len(bad)}"
+              f"  ({100*len(bad)/len(withc):.0f}%)")
+        bym = defaultdict(lambda: [0, 0])
+        for r in withc:
+            bym[r["month"]][0] += 1
+        for r in bad:
+            bym[r["month"]][1] += 1
+        for m in sorted(bym):
+            n, b = bym[m]
+            print(f"     {m}  {b:4d}/{n:<5d}  ({100*b/n:.0f}%)")
+        for r in bad[:3]:
+            common = [l for l in r["contract"] if l in r["delivered_by_label"]]
+            for l in common:
+                if r["delivered_by_label"][l] != {r["contract"][l]}:
+                    print(f"     {r['job'][:8]} {r['fmt']}: label {l!r} contracted "
+                          f"{r['contract'][l]!r}, delivered {sorted(r['delivered_by_label'][l])}")
+                    break
 
     print("\n" + "=" * 72)
     print("BY MONTH — so a fix that landed mid-window cannot hide in an average")
