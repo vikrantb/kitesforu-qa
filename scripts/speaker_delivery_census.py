@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 from collections import Counter
 
 from google.cloud import firestore
@@ -60,53 +61,226 @@ def _speakers(qg, attempt):
 
 
 
+#: Formats that deliver ONE voice BY DESIGN. A job in one of these cannot
+#: "under-deliver" — comparing it against a multi-entry cast contract is
+#: meaningless. Mirrors the SSOT in kitesforu-workers
+#: stages/script/cast_voice_sizing.select_base_script_template, which maps
+#: NARRATION/MONOLOGUE/SHORT -> speaker_count 1 (the born-short single-voice
+#: invariant) and DRAMA/MULTI_VOICE -> 3, default -> 2.
+SINGLE_VOICE_FORMATS = frozenset({"short", "narration", "monologue"})
+
+
+def is_single_voice_format(job: dict) -> bool:
+    """True when the job's format delivers one voice by design."""
+    fmt = dig(job, "audio_config", "audio_format")
+    return isinstance(fmt, str) and fmt.strip().lower() in SINGLE_VOICE_FORMATS
+
+
+def _prefs_blobs(job: dict) -> list:
+    """Every dict the SSOT might receive as ``preferences``.
+
+    The cast sketch is written to BOTH ``preferences`` and
+    ``episode_profile.user_preferences``, and only one of them may carry
+    ``cast_size`` (job 33cdaa8d has cast_size=3 under episode_profile and only
+    ``characters`` under preferences), so both are consulted.
+    """
+    out = []
+    for path in (("preferences",), ("episode_profile", "user_preferences")):
+        v = dig(job, *path)
+        if isinstance(v, dict):
+            out.append(v)
+    return out
+
+
+def cast_floor(job: dict) -> int:
+    """Mirror of kitesforu-workers _apply_cast_voice_floor / _cast_size_from_preferences.
+
+    The format only sets a BASE. A planned multi-character cast RAISES it:
+    ``_apply_cast_voice_floor`` fires when the cast is > 2 and rewrites
+    narration/monologue/dialogue to the drama template so the voices get used.
+    Mirroring only the format map made this census blind to exactly the
+    collapse it exists to catch -- job 33cdaa8d is a ``short`` with
+    ``_cast_sketch.cast_size=3``, a contract naming those same 3 characters,
+    and a delivered script of ``['Narrator']``: a real 3->1 collapse that an
+    unconditional ``return 1`` dropped from the denominator entirely.
+
+    Capped at 6, as the SSOT caps it.
+    """
+    best = 0
+    for prefs in _prefs_blobs(job):
+        cs = prefs.get("_cast_sketch")
+        if isinstance(cs, dict):
+            n = cs.get("cast_size")
+            if isinstance(n, int) and n > 0:
+                best = max(best, min(n, 6))
+            else:
+                chars = cs.get("characters")
+                if isinstance(chars, list) and chars:
+                    best = max(best, min(len(chars), 6))
+        vm = prefs.get("_persona_voice_map")
+        if isinstance(vm, dict) and len(vm) > 2:
+            best = max(best, min(len(vm), 6))
+    return best
+
+
 def cast_size(job: dict) -> tuple[int | None, str]:
-    """The number of voices this job was ACTUALLY cast with, and where it came from.
+    """How many voices was this job CAST with? Returns (n, which_source).
 
-    `audio_config.speaker_count` is a PLANNING number and it can disagree with the
-    cast that was actually resolved. Measured 2026-08-27 over the full collection:
-    of 295 census-eligible jobs, 197 (66%) carry `voice_cast.contract.voice_map`
-    (written by `persona/cast_contract.persist_cast_contract`), and on **39** of
-    them the voice_map size differs from speaker_count.
+    Two fields claim to answer this and they DISAGREE on 106 of 420 jobs, in
+    BOTH directions. Neither is authoritative, so the rule is deliberately
+    CONSERVATIVE: a job counts as under-delivering only when delivery is below
+    BOTH candidates.
 
-    Those 39 are why this census over-counted. Cross-checked against the worker log
-    line `cast_contract.persisted job_id=... speakers=N` on the 48 under-delivering
-    jobs still inside log retention: 9 were jobs where delivered == the REAL cast
-    (nothing was lost, the denominator was simply wrong) and 39 were genuine losses.
-    Every one of the 9 had the same signature: speaker_count=3, real cast=2,
-    delivered=2.
+    MEASURED 2026-08-27 over the 57 disagreeing jobs that have a measurable
+    delivery (positive control: 643 jobs carry >=1 quality_gate attempt):
 
-    So: prefer the contract, fall back to speaker_count, and TELL THE READER which
-    one was used — a denominator you cannot attribute is a number you cannot defend.
+        19  delivered == contract      < speaker_count   (speaker_count over-plans)
+        11  delivered == speaker_count < contract        (contract over-lists)
+        16  delivered <  both                            (a real loss either way)
+         6  delivered >= both                            (no loss either way)
+         5  delivered between the two
+
+    Taking the MAX would score the first, second and fifth rows as losses --
+    30 false positives out of 57. Taking the MIN scores all five rows the way
+    the delivered audio actually reads. An inflated census is not harmless: on
+    2026-08-27 a contract-preferring denominator made born-short 8f1c4416 the
+    ONLY "under-delivering" job in the post-deploy window, i.e. the instrument
+    manufactured the single data point it would have reported.
+
+    MIN also reproduces the worker-log cross-check recorded in qa#138: the 9
+    jobs with speaker_count=3, real cast=2, delivered=2 score as no-loss.
+    """
+    # Formats that deliver one voice BY DESIGN can never under-deliver --
+    # UNLESS a planned multi-character cast raised the count, which is what
+    # _apply_cast_voice_floor does in the SSOT. Format is the base, not the answer.
+    if is_single_voice_format(job):
+        floor = cast_floor(job)
+        return (floor, "single-voice-format/cast-floor") if floor > 2 else (1, "single-voice-format")
+    vm = dig(job, "voice_cast", "contract", "voice_map")
+    sc = dig(job, "audio_config", "speaker_count")
+    have_vm = isinstance(vm, dict) and bool(vm)
+    have_sc = isinstance(sc, int) and bool(sc)
+    if have_vm and have_sc and len(vm) != sc:
+        return min(len(vm), sc), "disagree/min"
+    if have_vm:
+        base = len(vm)
+        floor = cast_floor(job)
+        return (floor, "cast-floor") if floor > 2 and floor > base else (base, "contract")
+    return (sc, "speaker_count") if have_sc else (None, "none")
+
+
+def cast_disagreement(job: dict) -> tuple[int, int] | None:
+    """(contract, speaker_count) when the two sources disagree, else None.
+
+    Reported as its own line rather than folded into the under-delivery total:
+    a cast contract that collapsed below the planned speaker_count is an
+    UPSTREAM defect, and conflating it with a delivery loss is what made the
+    headline number untrustworthy.
     """
     vm = dig(job, "voice_cast", "contract", "voice_map")
-    if isinstance(vm, dict) and vm:
-        return len(vm), "contract"
     sc = dig(job, "audio_config", "speaker_count")
-    return (sc, "speaker_count") if sc else (None, "none")
+    if isinstance(vm, dict) and vm and isinstance(sc, int) and sc and len(vm) != sc:
+        return len(vm), sc
+    return None
+
+
+def _norm(name) -> str:
+    """Speaker labels drift in punctuation between stages: the gate records
+    ``Prof_ James Okafor`` where the TTS log records ``Prof. James Okafor``.
+    Compare on the letters so a formatting difference is not read as a
+    different speaker."""
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
+def delivered_speakers(job: dict) -> tuple[set, str]:
+    """Distinct speaker labels in the audio that ACTUALLY SHIPPED.
+
+    ``tts_segment_logs`` is the real TTS input, so it is the shipped take by
+    construction. The gate's ``attempt_N_metrics`` are NOT: when the regen cap
+    bails to attempt 1, the gate still stamps the metrics of attempt 2, and the
+    census's "latest attempt" then describes the take that was THROWN AWAY.
+
+    MEASURED 2026-08-27 (positive control: 2896 jobs carry tts_segment_logs):
+    149 jobs are stamped ``regen_cap_bailed_to_attempt_1`` and have delivered
+    segments; on 26 of them attempt 1 and attempt 2 name different speakers,
+    and on all 26 the census read attempt 2 while the audio was attempt 1.
+    Job 38507678 shipped ['Host1','Host2'] while attempt 2 recorded ['Host1'] --
+    scored as an under-delivery that never happened.
+    """
+    segs = job.get("tts_segment_logs")
+    if isinstance(segs, list) and segs:
+        names = {_norm(s.get("speaker")) for s in segs
+                 if isinstance(s, dict) and s.get("speaker")}
+        names.discard("")
+        if names:
+            return names, "tts_segment_logs"
+    qg = dig(job, "stages", "quality_gate") or {}
+    present = [a for a in _ATTEMPTS if isinstance(qg.get(a), dict)]
+    if present:
+        return {_norm(x) for x in _speakers(qg, present[0])}, "gate/latest-attempt"
+    return set(), "none"
+
+
+def delivered_voices(job: dict) -> set:
+    """Distinct voice_ids actually rendered -- what a listener HEARS.
+
+    Not the same question as the labels. Several cast labels can render
+    through ONE voice_id, in which case the script has a cast and the audio
+    does not. "I always hear the 2 voices" is a claim about THIS number, so it
+    is reported alongside the labels rather than folded into them.
+    """
+    segs = job.get("tts_segment_logs")
+    if not isinstance(segs, list):
+        return set()
+    return {str(s.get("voice_id")) for s in segs
+            if isinstance(s, dict) and s.get("voice_id")}
 
 
 def classify(job: dict) -> str | None:
-    """Which stage lost the voices, or None when nothing was lost."""
+    """Which stage lost the voices, or None when nothing was lost.
+
+    ATTRIBUTION IS UPSTREAM-FIRST AND READS REAL FIELDS.
+
+    Both properties were wrong until 2026-08-27 and they compounded:
+
+    1. The trim test was a SUBSTRING match on the whole document --
+       ``'"applied": true' in json.dumps(job)`` -- so any unrelated ``applied``
+       field anywhere in the job attributed the loss to the trim. Job
+       0c5d1055 carries ``sub_capsule_trim.applied = false``
+       (``reason: within_band``: the trim never ran) and was still labelled
+       "trim collapsed it".
+
+    2. The trim was tested BEFORE the script, so a job whose attempt 1 was
+       already single-speaker was labelled with the trim that ran afterwards.
+       MEASURED over the 121 jobs eligible since 2026-08-01: the census
+       reported ZERO "script single-speaker from attempt 1", while 11 of the
+       37 under-delivering jobs had attempt 1 deliver exactly one speaker.
+       Every one was labelled "trim collapsed it".
+
+    The trim runs on the regen (``branch: regen_pre_tts``), so an attempt 1
+    that already speaks with one voice was authored that way -- the script is
+    the more upstream cause and is now tested first.
+    """
     cast, _src = cast_size(job)
     qg = dig(job, "stages", "quality_gate") or {}
     present = [a for a in _ATTEMPTS if isinstance(qg.get(a), dict)]
-    if not cast or cast < 2 or not present:
+    if not cast or cast < 2:
         return None
-    final = _speakers(qg, present[0])
+    final, _how = delivered_speakers(job)
     if not final or len(final) >= cast:
         return None
+    if not present:
+        return "cast never reached by any attempt"
 
-    blob = json.dumps(job, default=str)
-    # The trim records its own verdict; prefer the stamp over inference.
-    if '"sub_capsule_trim"' in blob and '"applied": true' in blob.lower():
-        return "trim collapsed it"
-    if '"regen_deleted_a_speaker": true' in blob.lower():
-        return "regen traded a host (caught by the new guard)"
-    first = _speakers(qg, "attempt_1_metrics")
-    if len(first) == 1:
+    # UPSTREAM FIRST: a single-voice attempt 1 predates every later stage.
+    if len(_speakers(qg, "attempt_1_metrics")) == 1:
         return "script single-speaker from attempt 1"
-    if len(final) < len(first):
+    # Real field reads -- never a substring of the serialised document.
+    if dig(qg, "sub_capsule_trim", "applied") is True:
+        return "trim collapsed it"
+    if dig(qg, "regen_deleted_a_speaker") is True:
+        return "regen traded a host (caught by the new guard)"
+    if len(final) < len(_speakers(qg, "attempt_1_metrics")):
         return "regen traded a host"
     return "cast never reached by any attempt"
 
@@ -124,7 +298,9 @@ def main() -> None:
             since = since.replace(tzinfo=datetime.timezone.utc)
 
     db = firestore.Client(project=args.project)
-    scanned = eligible = under = 0
+    scanned = eligible = under = disagreed = collapsed_out = 0
+    over = over_one_voice = 0
+    over_by_fmt: Counter[str] = Counter()
     causes: Counter[str] = Counter()
     denom: Counter[str] = Counter()
     oldest = newest = None
@@ -141,10 +317,34 @@ def main() -> None:
         newest = created if newest is None or created > newest else newest
 
         cast, cast_src = cast_size(job)
+        # OVER-delivery: measured for EVERY job, including the cast<2 ones the
+        # under-delivery census skips. Distinct voice_ids are tracked
+        # separately because several labels can share one voice -- a script
+        # with a cast and audio without one.
+        shipped, _how = delivered_speakers(job)
+        if cast and shipped and len(shipped) > cast:
+            over += 1
+            over_by_fmt[(dig(job, "audio_config", "audio_format") or "?")] += 1
+            voices = delivered_voices(job)
+            if voices and len(voices) < len(shipped):
+                over_one_voice += 1
         qg = dig(job, "stages", "quality_gate") or {}
-        if not cast or cast < 2 or not any(isinstance(qg.get(a), dict) for a in _ATTEMPTS):
+        measurable = any(isinstance(qg.get(a), dict) for a in _ATTEMPTS)
+        disagree = cast_disagreement(job)
+        # A disagreement that drives the cast below 2 makes the job INELIGIBLE,
+        # so it silently leaves the census. Count it rather than lose it: that
+        # is the upstream cast-collapse defect, not an absence of one.
+        if disagree and measurable and (not cast or cast < 2):
+            collapsed_out += 1
+        if not cast or cast < 2 or not measurable:
             continue
         eligible += 1
+        if disagree:
+            disagreed += 1
+        # OVER-delivery is a different defect and was previously INVISIBLE:
+        # the loop skipped cast < 2, so a one-voice format that shipped three
+        # voices could never be seen. A born-short is exactly that shape.
+        # (checked below against every job, not just cast >= 2 ones)
         denom[cast_src] += 1
         cause = classify(job)
         if cause:
@@ -161,15 +361,43 @@ def main() -> None:
     pct = 100 * under / eligible
     print(f"  delivered FEWER voices than cast: {under}  ({pct:.0f}%)")
     # A denominator you cannot attribute is a number you cannot defend.
-    print("  denominator used — the cast contract where available, else the "
-          "PLANNING number:")
+    print("  denominator used — NEITHER field is authoritative; on a "
+          "disagreement the SMALLER wins,")
+    print("  so a job counts as under-delivering only when it is below BOTH:")
     for src, n in denom.most_common():
-        label = {"contract": "voice_cast.contract.voice_map (the REAL cast)",
-                 "speaker_count": "audio_config.speaker_count (planning — can "
-                                  "disagree with the cast)"}.get(src, src)
+        label = {
+            "contract": "voice_cast.contract.voice_map",
+            "speaker_count": "audio_config.speaker_count",
+            "single-voice-format": "format delivers 1 voice BY DESIGN "
+                                   "(short/narration/monologue) — never a loss",
+            "disagree/min": "the two DISAGREED — took the smaller",
+        }.get(src, src)
         print(f"      {n:4d}  {label}")
+    print()
+    print("  CAUSES of under-delivery:")
     for cause, n in causes.most_common():
         print(f"      {n:4d}  {cause}")
+    if over:
+        print()
+        print(f"  DELIVERED MORE VOICES THAN CAST: {over}")
+        print("    A DIFFERENT defect, and invisible before 2026-08-27: the loop")
+        print("    skipped cast < 2, so a one-voice format that shipped several")
+        print("    voices could never be counted. Born-short 8f1c4416 shipped")
+        print("    Narrator + Nadia + Theo against speaker_count=1.")
+        for f, n in over_by_fmt.most_common(8):
+            print(f"      {n:4d}  {f}")
+        if over_one_voice:
+            print(f"    of these, {over_one_voice} render several LABELS through FEWER")
+            print("      voice_ids — the script has a cast, the audio does not.")
+    if disagreed or collapsed_out:
+        print()
+        print("  ⚠ UPSTREAM — the two cast fields DISAGREED. Reported separately, never")
+        print("    folded into the total above: a contract that collapsed below the plan")
+        print("    is an upstream defect, and conflating it with a delivery loss is what")
+        print("    made this headline number untrustworthy before 2026-08-27.")
+        print(f"      {disagreed:4d}  of the {eligible} ELIGIBLE jobs (these took the smaller)")
+        print(f"      {collapsed_out:4d}  measurable job(s) the disagreement drove BELOW a cast of 2,")
+        print("            so they left the census entirely — the cast-collapse class")
 
 
 if __name__ == "__main__":
