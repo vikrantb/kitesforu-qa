@@ -187,3 +187,74 @@ class TestUncheckableIsNotMatching:
     )
     def test_silent_rather_than_counted_either_way(self, cast, voices):
         assert _census().hop1_substitutions(cast, voices) == []
+
+
+# ===========================================================================
+# HOP 1 IS DELIVERY-INDEPENDENT — the population bug (2026-08-27)
+# ===========================================================================
+
+
+class TestHop1NeedsNoDeliveredAudio:
+    """The section sourced its population from the DELIVERY rows, which skip
+    jobs with no rendered audio. Hop 1 compares the persona YAML against the
+    CONTRACT and never reads tts_segment_logs, so a job that was cast but never
+    rendered is still perfectly checkable — and 13 such jobs / 27 entries (3.2%
+    of the denominator) were being silently dropped.
+
+    MEASURED 2026-08-27, full unordered scan of 4155 docs:
+        jobs with a cast contract carrying voice_ids : 420
+        of those, WITH delivered segments            : 407   <- the old population
+        of those, WITHOUT                            :  13
+        contract entries, all such jobs              : 848
+        contract entries, delivered jobs only        : 821   <- the old denominator
+
+    That 848 also reconciles a standing disagreement between two lanes' scans:
+    848 = 820 (the old reported figure) + 27 (this bug) + 1 (a label-normalisation
+    collision, pinned below).
+    """
+
+    def test_a_job_that_never_delivered_audio_still_counts(self):
+        job = _job({"Host1": {
+            "persona_id": "p", "provider": "inworld", "voice_id": "Ronan",
+        }})
+        assert "tts_segment_logs" not in job, "premise: this job rendered nothing"
+        entry = _census().hop1_entry(job)
+        assert entry is not None, (
+            "a cast-but-never-rendered job is checkable for hop 1 — excluding it "
+            "narrows the denominator by 3.2% while the section still prints it as "
+            "the population"
+        )
+        assert entry["cast"]["host1"]["voice_id"] == "Ronan"
+
+    def test_an_uncast_job_contributes_nothing(self):
+        assert _census().hop1_entry({}) is None
+        assert _census().hop1_entry({"tts_segment_logs": [{"speaker": "x"}]}) is None
+
+
+class TestLabelCollisionIsVisibleNotSilent:
+    """persona_cast keys by NORMALISED label, so two raw labels that normalise to
+    one key collapse. Fleet-wide that is exactly ONE entry (job 8f1c4416 carries
+    both ``_narrator`` and ``Narrator``) — but a silent 1 is how a silent 100
+    starts, so the raw count is reported alongside it."""
+
+    def test_raw_count_exceeds_the_normalised_count_on_a_collision(self):
+        job = _job({
+            "_narrator": {"persona_id": "p", "provider": "inworld", "voice_id": "Claire"},
+            "Narrator": {"persona_id": "p", "provider": "inworld", "voice_id": "Carter"},
+        })
+        assert _census().raw_contract_entries(job) == 2
+        assert len(_census().persona_cast(job)) == 1, "both normalise to 'narrator'"
+        assert _census().hop1_entry(job)["raw_entries"] == 2, (
+            "the raw count must survive so the section can report the difference"
+        )
+
+    def test_no_collision_means_the_counts_agree(self):
+        job = _job({
+            "Host1": {"persona_id": "p", "provider": "inworld", "voice_id": "Ronan"},
+            "Host2": {"persona_id": "q", "provider": "inworld", "voice_id": "Zoe"},
+        })
+        assert _census().raw_contract_entries(job) == len(_census().persona_cast(job)) == 2
+
+    def test_entries_without_a_voice_id_are_not_counted_raw_either(self):
+        job = _job({"Host1": {"persona_id": "p", "provider": "inworld"}})
+        assert _census().raw_contract_entries(job) == 0

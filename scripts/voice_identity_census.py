@@ -111,6 +111,44 @@ def persona_cast(job: dict) -> dict:
     return out
 
 
+def raw_contract_entries(job: dict) -> int:
+    """How many voice_map entries carry a voice_id, BEFORE label normalisation.
+
+    ``persona_cast`` keys its result by NORMALISED label, so two raw labels that
+    normalise to the same key collapse into one. Measured over the full scan
+    that is exactly ONE entry — job ``8f1c4416`` carries both ``_narrator`` and
+    ``Narrator`` — but a silent 1 is how a silent 100 starts, so the section
+    reports the difference rather than letting it vanish.
+    """
+    return sum(
+        1 for v in (dig(job, "voice_cast", "contract", "voice_map") or {}).values()
+        if isinstance(v, dict) and v.get("voice_id")
+    )
+
+
+def hop1_entry(job: dict) -> dict | None:
+    """This job's HOP 1 contribution — or ``None`` when it was never cast.
+
+    DELIVERY-INDEPENDENT BY CONSTRUCTION, and that is the whole point. Hop 1
+    compares the persona YAML against the CONTRACT; it never reads
+    ``tts_segment_logs``. Sourcing this from the delivery rows (which skip jobs
+    with no rendered audio) silently dropped 13 jobs / 27 entries — 3.2% of the
+    denominator — and made the section answer a narrower question than the one
+    it printed. Measured 2026-08-27: 420 jobs carry a contract with voice_ids;
+    only 407 of them delivered.
+    """
+    cast = persona_cast(job)
+    if not cast:
+        return None
+    created = job.get("created_at")
+    return {
+        "month": created.isoformat()[:7]
+        if isinstance(created, datetime.datetime) else "?",
+        "cast": cast,
+        "raw_entries": raw_contract_entries(job),
+    }
+
+
 def load_persona_voices(personas_dir: str) -> dict:
     """``{persona_id: {provider: declared voice}}`` from ``personas/*.yaml``.
 
@@ -234,6 +272,7 @@ def main() -> None:
 
     scanned = with_logs = 0
     rows = []
+    cast_rows = []  # HOP 1 — cast, delivered or not
     ns_mismatch = Counter()
     ns_total = 0
     seg_by_voice = Counter()
@@ -241,14 +280,31 @@ def main() -> None:
     for doc in db.collection("podcast_jobs").stream():  # UNORDERED — see trap 3
         job = doc.to_dict() or {}
         scanned += 1
+        created = job.get("created_at")
+        _in_window = (not since) or (
+            isinstance(created, datetime.datetime) and created >= since
+        )
+
+        # HOP 1 POPULATION — collected HERE, BEFORE the delivery filter below.
+        # Hop 1 compares the persona YAML against the CONTRACT and needs no
+        # delivered audio at all, so a job that was cast but never rendered is
+        # still perfectly checkable. Gathering it from ``rows`` (which exists to
+        # answer delivery questions and therefore skips undelivered jobs)
+        # silently dropped 13 jobs / 27 entries — 3.2% of the denominator —
+        # and made this section quietly answer a narrower question than the one
+        # it prints. Measured 2026-08-27: 420 jobs carry a contract with
+        # voice_ids, only 407 of them delivered.
+        if _in_window:
+            _hop1 = hop1_entry(job)
+            if _hop1:
+                cast_rows.append(_hop1)
+
         segs = usable_segments(job)
         if not segs:
             continue
         with_logs += 1
-        created = job.get("created_at")
-        if since:
-            if not isinstance(created, datetime.datetime) or created < since:
-                continue
+        if not _in_window:
+            continue
 
         lab2voice = defaultdict(set)
         voice2lab = defaultdict(set)
@@ -419,16 +475,25 @@ def main() -> None:
     print("  NOTE the chain is TWO hops and they are different questions:")
     print("     hop 1  persona YAML voice -> contract voice_id   (cast-time substitution, here)")
     print("     hop 2  contract voice_id  -> delivered voice_id  (delivery drift, section above)")
-    staged = [r for r in rows if r["cast"]]
+    # NOT `rows` — see the note at the collection site. `rows` requires DELIVERED
+    # audio; hop 1 does not, and using it silently narrowed this denominator.
+    staged = cast_rows
     if not staged:
         print("  no job in this window carries a cast contract — nothing to report.")
     else:
         entries = [c for r in staged for c in r["cast"].values()]
+        _raw = sum(r["raw_entries"] for r in staged)
         with_pid = [c for c in entries if c["persona_id"]]
         pids = {c["persona_id"] for c in with_pid}
         months = sorted({r["month"] for r in staged if r["month"] != "?"})
-        print(f"  POSITIVE CONTROL — jobs carrying voice_cast.contract.voice_map: "
-              f"{len(staged)} of {len(rows)}")
+        print(f"  POSITIVE CONTROL — jobs carrying voice_cast.contract.voice_map: {len(staged)}")
+        print(f"     (of {len(rows)} that DELIVERED audio — hop 1 needs no delivery, so this "
+              "population is\n      deliberately WIDER: a job cast but never rendered is still "
+              "checkable here.)")
+        if _raw != len(entries):
+            # A silent 1 is how a silent 100 starts.
+            print(f"     ⚠ {_raw - len(entries)} raw entr(ies) collapsed by label "
+                  "normalisation (two raw labels -> one key).")
         print(f"     voice_map entries: {len(entries)}   with a persona_id: {len(with_pid)}"
               f"  ({100*len(with_pid)/len(entries):.0f}%)")
         print(f"     distinct persona_ids ever stamped: {len(pids)}")
