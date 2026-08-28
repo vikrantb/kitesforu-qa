@@ -11,6 +11,15 @@ a WRONG number on 2026-08-27, and they are all baked in here so the next run can
       A `maps_sequence` clip carries `edge_count: 0`. Keying on key-presence counted 2 map
       visuals as flowcharts and would have reported a FALSE FAILURE of the deploy.
       A real boxes-and-arrows figure is `kind == "concept_mermaid"` with edges > 0.
+  TRAP 4 — A FILTER THAT RUNS BEFORE THE ACCOUNTING MAKES THE DENOMINATOR A LIE.
+      `if not clips: continue` sat BEFORE `is_fiction(j)`, so a fiction job that rendered
+      nothing was dropped in the same branch as every non-fiction job and never counted as
+      fiction at all. Measured 2026-08-28: the script printed "fiction WITH rendered clips: 1"
+      while THREE fiction jobs existed in the window; the two missing ones (67d9cb16, 5580f4e8)
+      were audio-only. They were not in `skipped` either, so `skipped 0` read as "nothing
+      pending" while two fiction jobs had in fact arrived. Fiction is now classified FIRST and
+      every fiction job lands in exactly one named bucket, with a balance check that shouts if
+      the buckets do not sum to the fiction count.
   TRAP 3 — READ ONLY WHAT IS TERMINAL.
       `status == completed` is NOT terminal for visuals, and neither is `video_status == ready`
       (observed: video ready while the clip array was still being rewritten). One job read
@@ -140,13 +149,22 @@ def main() -> int:
     db = firestore.Client(project=PROJECT)
 
     scanned = fiction = settled = 0
+    # TRAP 4 — every fiction job is ACCOUNTED FOR, in a bucket, by name. The original loop ran
+    # `if not clips: continue` BEFORE `is_fiction`, so a fiction job that rendered nothing was
+    # dropped in the same branch as every non-fiction job and never counted as fiction at all.
+    # Observed 2026-08-28: two new fiction jobs (67d9cb16, 5580f4e8) were invisible, and they
+    # were not in `skipped` either — so `skipped 0` read as "nothing pending" while two fiction
+    # jobs had in fact arrived. A denominator that silently loses rows is a claim about the
+    # filter, not about the population.
+    no_visual_stage = []   # `visual` absent/empty -> visuals never ran for this job
+    visual_no_clips = []   # visuals ran but produced no clips -> a real signal, not a non-event
+    unsettled = []         # clips present, no settle stamp -> still being rewritten
     with_bible = 0
     fig_jobs = 0
     fig_total = 0
     fiction_beat_jobs = 0
     tree_mermaid_jobs = 0
     cost_exact = cost_under = cost_over = 0
-    skipped_unsettled = 0
     kinds: collections.Counter = collections.Counter()
 
     for d in db.collection(COLLECTION).stream():
@@ -155,18 +173,25 @@ def main() -> int:
         if created is None or created < since_dt:
             continue
         scanned += 1
-        v = j.get("visual") or {}
-        clips = [c for c in (v.get("clips") or []) if isinstance(c, dict)]
-        if not clips:
-            continue
+        # Classify FICTION FIRST. Whether a job rendered anything is a property of the job we
+        # are reporting on, never a reason to stop counting it.
         if not is_fiction(j):
             continue
         fiction += 1
+        v = j.get("visual") or {}
+        clips = [c for c in (v.get("clips") or []) if isinstance(c, dict)]
+
+        if not v:
+            no_visual_stage.append(d.id[:8])
+            continue
+        if not clips:
+            visual_no_clips.append(d.id[:8])
+            continue
 
         # TRAP 3 — only a non-empty settle stamp means the array is the delivered one.
         stamp = v.get("clips_settled_at")
         if not (isinstance(stamp, str) and stamp):
-            skipped_unsettled += 1
+            unsettled.append(d.id[:8])
             continue
         settled += 1
 
@@ -203,12 +228,30 @@ def main() -> int:
 
     print(f"POST-DEPLOY FICTION CENSUS — jobs created since {since}")
     print(f"  (deploy of e4741405 on worker-visuals: {DEPLOY_UTC})\n")
+    def _ids(bucket: list) -> str:
+        if not bucket:
+            return ""
+        shown = ", ".join(bucket[:6])
+        return f"   [{shown}{', +%d more' % (len(bucket) - 6) if len(bucket) > 6 else ''}]"
+
     print(f"  jobs created in window        : {scanned}")
-    print(f"  ...fiction WITH rendered clips: {fiction}")
-    print(f"  ...of those, SETTLED (usable) : {settled}   (skipped {skipped_unsettled} unsettled)")
+    print(f"  ...FICTION jobs               : {fiction}")
+    print(f"       visuals never ran        : {len(no_visual_stage)}{_ids(no_visual_stage)}")
+    print(f"       visuals ran, 0 clips     : {len(visual_no_clips)}{_ids(visual_no_clips)}")
+    print(f"       clips present, unsettled : {len(unsettled)}{_ids(unsettled)}")
+    print(f"       SETTLED (usable, n)      : {settled}")
+    accounted = len(no_visual_stage) + len(visual_no_clips) + len(unsettled) + settled
+    if accounted != fiction:  # the whole point of the funnel — it must balance
+        print(f"  !! ACCOUNTING GAP: {fiction} fiction jobs but {accounted} bucketed — a row is "
+              f"being dropped silently. Do not trust the numbers below.")
     if not settled:
         print("\n  NO SETTLED FICTION JOBS YET — this is not evidence either way.")
-        print("  Re-run when new fiction jobs have accumulated.")
+        if no_visual_stage or visual_no_clips:
+            print(f"  Note: {len(no_visual_stage)} fiction job(s) never ran visuals and "
+                  f"{len(visual_no_clips)} ran but produced no clips. Those cannot answer a "
+                  f"visuals question — they are not 'pending', and they are not a failure "
+                  f"signal for the fixes either.")
+        print("  Re-run when a fiction job with visuals has SETTLED.")
         return 0
     print()
     print(f"  1) REAL mermaid flowcharts (edges>0) : {fig_total} figures across {fig_jobs} job(s)")
