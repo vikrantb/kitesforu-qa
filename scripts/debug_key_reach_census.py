@@ -62,6 +62,11 @@ BASELINE = pathlib.Path(__file__).resolve().parent / "debug_key_reach_baseline.j
 SLICES: dict[str, tuple[str, ...]] = {
     "QualityGateCard.tsx": ("stages", "quality_gate"),
     "ComposerLogPanel.tsx": ("stages", "job-script", "composer_log"),
+    # `<CharacterSystemPanel data={debugInfo.character_system} />` — the api passes the job doc
+    # through, so this is the TOP-LEVEL `character_system` key. (A grep of kitesforu-api for
+    # "character_system" returns 0 hits, which looks like "the api never sets it" and is a false
+    # reading — the doc census is what settles it: present at `character_system` on real jobs.)
+    "CharacterSystemPanel.tsx": ("character_system",),
 }
 
 #: Components fed a CONSTRUCTED literal by the page (`data={{ … }}`). Their props are assembled in
@@ -117,7 +122,7 @@ def slice_of(doc: dict, path: tuple[str, ...]):
     return cur
 
 
-def keys_present(days: int, limit: int) -> tuple[dict[str, set[str]], dict[str, set[str]], int, int]:
+def keys_present(days: int, limit: int) -> tuple[dict[str, set[str]], dict[str, set[str]], int, int, dict[str, int]]:
     """(keys present, keys ever non-null) per declared slice, plus doc and slice-hit counts."""
     from google.cloud import firestore
 
@@ -134,6 +139,11 @@ def keys_present(days: int, limit: int) -> tuple[dict[str, set[str]], dict[str, 
     # next reader to fix the frontend when the writer is what is empty.
     present: dict[str, set[str]] = {c: set() for c in SLICES}
     nonnull: dict[str, set[str]] = {c: set() for c in SLICES}
+    # PER-COMPONENT n, not just a total. An accusation resting on 3 jobs and one resting on 32 read
+    # identically without it — and the first is not evidence. `character_system` resolved on 3 of 89
+    # docs (a shadow system, mostly off), which is how `provider_rendering_decisions` came to be
+    # reported as ALWAYS NULL on the strength of three empty lists.
+    hits_per: dict[str, int] = {c: 0 for c in SLICES}
     hits = 0
     for d in docs:
         o = d.to_dict() or {}
@@ -141,11 +151,12 @@ def keys_present(days: int, limit: int) -> tuple[dict[str, set[str]], dict[str, 
             sl = slice_of(o, path)
             if isinstance(sl, dict):
                 hits += 1
+                hits_per[comp] += 1
                 for k, v in sl.items():
                     present[comp].add(k)
                     if v not in (None, "", [], {}):
                         nonnull[comp].add(k)
-    return present, nonnull, len(docs), hits
+    return present, nonnull, len(docs), hits, hits_per
 
 
 def main() -> int:
@@ -157,7 +168,7 @@ def main() -> int:
     args = ap.parse_args()
 
     reads = keys_read()
-    present, nonnull, ndocs, hits = keys_present(args.days, args.limit)
+    present, nonnull, ndocs, hits, hits_per = keys_present(args.days, args.limit)
 
     # THE CONTROL. A slice path that never resolves makes EVERY key under it look dead — the exact
     # false positive that turns a scan into a liar. Refuse to report rather than accuse wrongly.
@@ -181,7 +192,8 @@ def main() -> int:
 
     print(f"job docs walked : {ndocs} ({args.days} d), {hits} slice hits")
     for comp, path in SLICES.items():
-        print(f"  {comp:<24} slice={'.'.join(path):<34} reads={len(reads[comp]):>3} present={len(present[comp]):>3}")
+        thin = "  ⚠️ THIN — n too low to accuse" if hits_per[comp] < 10 else ""
+        print(f"  {comp:<24} slice={'.'.join(path):<34} n={hits_per[comp]:>3} reads={len(reads[comp]):>3} present={len(present[comp]):>3}{thin}")
     print(f"\nOUT OF SCOPE (page-constructed props, not judgeable here): {', '.join(OUT_OF_SCOPE)}")
     print(f"\nDEAD READS (key absent — the consumer reads a fiction): {len(dead)}")
 
@@ -193,7 +205,8 @@ def main() -> int:
     print(f"\nALWAYS NULL (key written, value never set — the WRITER is the defect): {len(always_null)}")
     for k in sorted(always_null):
         why = base.get(k, {}).get("reason", "")
-        print(f"  {'NEW ' if k not in base else '    '}{k:<30} read by {always_null[k]}{('  — ' + why) if why else ''}")
+        ns = ",".join(f"n={hits_per[c]}" for c in always_null[k])
+        print(f"  {'NEW ' if k not in base else '    '}{k:<30} read by {always_null[k]} [{ns}]{('  — ' + why) if why else ''}")
     new.update({k: v for k, v in always_null.items() if k not in base})
 
     if args.update:
