@@ -58,6 +58,7 @@ text_share = []
 clips_per_job = []
 clips_per_completed = []
 clips_per_requested = []   # wants_visuals is True — 0 clips here is a DEFECT
+zero_clip_causes = Counter()  # WHY each opted-in job delivered nothing
 n_declined = 0             # wants_visuals is False — 0 clips here is CORRECT
 n_unspecified = 0          # field ABSENT — intent unknown, never folded into a rate
 unspecified_with_clips = 0
@@ -86,6 +87,16 @@ for d in db.collection("podcast_jobs").limit(LIMIT).stream():
         pass  # canonical predicate unavailable — the opt-in keys are omitted below, loudly
     elif job_opted_in(j):
         clips_per_requested.append(len(clips))
+        if not clips:
+            # Name the cause from PERSISTED evidence only. `visual.error` is what the stage
+            # itself recorded; the other two are shapes, not diagnoses, and are labelled as
+            # such. Deliberately NOT keyed on `stages.visuals` — it is absent on 65 of 289
+            # opted-in jobs that DID deliver clips (measured 2026-08-28), so its absence
+            # proves nothing about whether the stage ran.
+            err = vis.get("error")
+            zero_clip_causes[str(err) if err else
+                             ("no visual compartment" if not vis else
+                              "compartment present, no error recorded")] += 1
     elif visuals_disabled is not None and visuals_disabled(j):
         n_declined += 1
     else:
@@ -153,6 +164,7 @@ out = {
         "visuals_requested": len(clips_per_requested),
         "median_clips_per_requested_job": med(clips_per_requested),
         "requested_but_zero_clips": sum(1 for c in clips_per_requested if c == 0),
+        "zero_clip_causes": dict(zero_clip_causes.most_common()),
         "visuals_declined": n_declined,
         "visuals_unspecified": n_unspecified,
         "unspecified_with_clips": unspecified_with_clips,
