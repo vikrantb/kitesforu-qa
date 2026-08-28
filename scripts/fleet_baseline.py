@@ -29,6 +29,7 @@ have_distinctness = 0
 pictorial = []
 text_share = []
 clips_per_job = []
+clips_per_completed = []
 unlabelled = 0
 clips_total = 0
 
@@ -40,6 +41,10 @@ for d in db.collection("podcast_jobs").limit(LIMIT).stream():
     completed += 1
     vis = j.get("visual") or {}
     clips = vis.get("clips") or []
+    # TWO different questions, so two medians (see the out dict):
+    #   clips_per_job       — only jobs that HAVE clips (the 2026-08-17 baseline's arm)
+    #   clips_per_completed — every completed job; no clips counts as 0
+    clips_per_completed.append(len(clips))
     if clips:
         clips_per_job.append(len(clips))
         for c in clips:
@@ -81,11 +86,16 @@ out = {
     "clip_kinds": dict(clip_kinds.most_common(8)),
     "unlabelled_clips": unlabelled,
     "unlabelled_pct": round(100.0 * unlabelled / max(clips_total, 1), 1),
+    # `median_clips_per_job` stays over jobs that HAVE clips: FLEET-BASELINE-2026-08-17.json
+    # stores 14 from this same arm and this script exists to be diffed against it ("same
+    # command both arms"). Redefining it in place would make that diff read 14 -> ~0 as a
+    # collapse that never happened. `median_clips_per_completed_job` is the fleet-wide answer.
     # `clips_per_job` only collects jobs that HAVE clips (the `if clips:` above), so this
     # median is NOT over `completed`. Name its denominator, exactly as
     # `jobs_with_distinctness` already does for the two medians below it.
     "jobs_with_clips": len(clips_per_job),
     "median_clips_per_job": med(clips_per_job),
+    "median_clips_per_completed_job": med(clips_per_completed),
     "jobs_with_distinctness": have_distinctness,
     "median_pictorial_share": med(pictorial),
     "median_text_share": med(text_share),
