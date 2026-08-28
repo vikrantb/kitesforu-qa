@@ -1,6 +1,8 @@
 """Continuous canary loop — fires 1-min Cairo horror prompts on a 30-min cadence.
 
-Per /Users/vikrantbhosale/.claude/projects/-Users-vikrantbhosale-gitprojects-kitesforu/memory/reference_live_job_verification_recipe.md
+Per the memory `reference_live_job_verification_recipe` (Claude project memory for this
+workspace). Cited by SLUG, not by an absolute path — the old form named one machine's
+home directory and resolved nowhere else.
 
 Each iteration:
   1. Playwright sign-in → mint Clerk JWT
