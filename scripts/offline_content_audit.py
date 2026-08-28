@@ -95,7 +95,11 @@ def main() -> int:
     print("=" * 66)
     print("OFFLINE CONTENT AUDIT — reliable deterministic battery vs content_craft")
     print("=" * 66)
-    print(f"completed educational scanned={scanned}  audited={audited}")
+    # The genre filter admits BOTH educational and explainer (see the `genre not in`
+    # guard in the scan loop); saying "educational" understated it. A count's label is a
+    # claim about its filter, so it names the filter that actually ran.
+    _genre_label = args.genre if args.genre else "educational+explainer"
+    print(f"completed {_genre_label} scanned={scanned}  audited={audited}")
     print("\n── RELIABLE deterministic defects ($0; mechanical / banned-literal) ──")
     for cid, n in reliable:
         print(f"  {n:4d}  {cid:42s}  e.g. {examples.get(cid,'')}")
