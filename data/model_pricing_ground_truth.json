@@ -1,0 +1,161 @@
+{
+  "_README": "Provider-published prices read from official pricing pages on 2026-08-27 and adversarially re-verified by a second agent against the same URL. Consumed by scripts/apply_catalog_refresh.py. Each entry states the unit EXPLICITLY because the #1 error mode is a unit mismatch (a per-image figure compared against a per-1M-token figure looks like a 160x price change).",
+  "read_date": "2026-08-27",
+  "price_corrections": [
+    {
+      "model_id": "eleven_flash_v2_5",
+      "old": 91.65,
+      "new": 50.0,
+      "unit": "per 1M characters",
+      "source": "https://elevenlabs.io/pricing/api",
+      "evidence": "FAQ verbatim: 'API usage is billed in US dollars, not credits. Text to Speech $0.10 per 1,000 characters (v2/v3) or $0.05 (Flash/Turbo).' $/1K identical in all six plan columns. Cross-check: Creator $22 / 220,000 chars = $0.10 per 1K exactly.",
+      "why_we_were_wrong": "Our 91.65 was derived on the CREDITS basis (0.5 credits/char). The API is billed in USD, not credits, so the derivation used the wrong basis and overstated cost by 83%.",
+      "verified": "4/4 confirmed by adversarial verifier"
+    },
+    {
+      "model_id": "eleven_turbo_v2_5",
+      "old": 91.65,
+      "new": 50.0,
+      "unit": "per 1M characters",
+      "source": "https://elevenlabs.io/pricing/api",
+      "evidence": "Priced on the same 'Flash / Turbo' product card at $0.05 per 1,000 characters.",
+      "why_we_were_wrong": "Same credits-basis derivation error.",
+      "verified": "confirmed"
+    },
+    {
+      "model_id": "eleven_multilingual_v2",
+      "old": 183.3,
+      "new": 100.0,
+      "unit": "per 1M characters",
+      "source": "https://elevenlabs.io/pricing/api",
+      "evidence": "'v2 Multilingual' card: $0.10 per 1,000 characters, plan-independent.",
+      "why_we_were_wrong": "Same credits-basis derivation error.",
+      "verified": "confirmed"
+    },
+    {
+      "model_id": "eleven_v3",
+      "old": 183.3,
+      "new": 100.0,
+      "unit": "per 1M characters",
+      "source": "https://elevenlabs.io/pricing/api",
+      "evidence": "'v3' card: $0.10 per 1,000 characters, plan-independent.",
+      "why_we_were_wrong": "Same credits-basis derivation error.",
+      "verified": "confirmed"
+    }
+  ],
+  "confirmed_correct_no_change": [
+    {
+      "model_id": "gemini-2.5-flash-image",
+      "value": 0.039,
+      "unit": "per image",
+      "evidence": "Footnote: 'Image output is priced at $30 per 1,000,000 tokens. Output images up to 1024x1024px consume 1290 tokens and are equivalent to $0.039 per image.'"
+    },
+    {
+      "model_id": "gemini-3-pro-image",
+      "value": 0.134,
+      "unit": "per image",
+      "evidence": "$120.00 per 1M image output tokens = $0.134 per 1K/2K image. Catalog matches source exactly."
+    },
+    {
+      "model_id": "gemini-3.1-flash-image",
+      "value": 0.067,
+      "unit": "per image",
+      "evidence": "$60.00 per 1M image output tokens = $0.067 per 1K image. Catalog matches source exactly."
+    },
+    {
+      "model_id": "gemini-3.1-flash-lite-image",
+      "value": 0.0336,
+      "unit": "per image",
+      "evidence": "$30.00 per 1M image output tokens = $0.0336 per 1K image. Catalog matches source exactly."
+    }
+  ],
+  "lifecycle": [
+    {
+      "model_id": "gemini-2.5-flash-image",
+      "eol_date": "2026-10-02",
+      "already_set": true,
+      "source": "https://ai.google.dev/gemini-api/docs/deprecations",
+      "note": "URGENT - 36 days out and this is the current image_ref/anchor provider. Google names gemini-3.1-flash-image-preview as the replacement; gemini-3.1-flash-image is already enabled."
+    },
+    {
+      "model_id": "gpt-image-1",
+      "eol_date": "2026-10-23",
+      "already_set": false,
+      "source": "https://developers.openai.com/api/docs/deprecations",
+      "note": "Announced 2026-04-22, shutdown Oct 23 2026, replacement gpt-image-2. Still priced and serving today."
+    },
+    {
+      "model_id": "gpt-image-1-mini",
+      "eol_date": "2026-12-01",
+      "already_set": false,
+      "source": "https://developers.openai.com/api/docs/deprecations",
+      "note": "Announced 2026-06-02, removal Dec 1 2026, replacement gpt-image-2. Still priced and serving today."
+    },
+    {
+      "model_id": "gpt-4.1-nano",
+      "eol_date": "2026-10-23",
+      "already_set": "WRONG_DATE",
+      "old_eol": "2026-12-11",
+      "source": "https://developers.openai.com/api/docs/deprecations",
+      "note": "Catalog carried 2026-12-11, which is LATER than the announced shutdown - the row would have been selectable for 7 weeks after it stopped serving."
+    },
+    {
+      "model_id": "gemini-3.1-flash-lite",
+      "eol_date": "2027-05-07",
+      "already_set": false,
+      "source": "https://ai.google.dev/gemini-api/docs/deprecations",
+      "note": "Far future; recorded so it is never a surprise."
+    }
+  ],
+  "scope_warnings_do_not_apply_eol": [
+    {
+      "model_ids": [
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano"
+      ],
+      "announced_shutdown": "2026-12-11",
+      "why_not_applied": "The deprecation entry names the DATED SNAPSHOT (gpt-5-2025-08-07 etc.), NOT the bare alias. The bare aliases still carry live, unannotated pricing rows. eol_date is an ACTIVE SWITCH (selector._is_eol drops any row on/after the date), so writing the snapshot's date onto the alias would disable a model that may still be serving. Left unset deliberately; revisit before 2026-12-11.",
+      "note": "gpt-5-mini and gpt-5-nano ALREADY carry eol_date 2026-12-11 in the catalog from a previous refresh - flagged for review, not changed in this pass."
+    }
+  ],
+  "unit_defects_flagged_not_changed": [
+    {
+      "model_id": "gemini-2.5-flash-preview-tts",
+      "catalog": "8.0 per 1M characters",
+      "provider_basis": "$0.50 per 1M input TEXT TOKENS, $10.00 per 1M output AUDIO TOKENS. Footnote: 'Audio tokens correspond to 25 tokens per second of audio.'",
+      "why_not_changed": "Genuine unit mismatch, but converting characters to audio-seconds needs a speech-rate assumption our catalog does not encode. Correcting it blind would swap one wrong number for another. Filed for a dedicated fix.",
+      "rough_direction": "At ~15 chars/sec, 1M chars is ~66,667s ~ 1.67M audio tokens ~ $16.67 per 1M chars, i.e. we may be UNDERSTATING by ~2x."
+    },
+    {
+      "model_id": "gpt-4o-mini-tts",
+      "catalog": "12.0 per 1M characters",
+      "provider_basis": "$0.60 text input / $12.00 audio output. Two reads of the same page disagreed on tokens vs characters; the VALUES were stable.",
+      "why_not_changed": "Unit unresolved at source. Value matches the audio-output figure either way, so the ranking input is not obviously wrong."
+    }
+  ],
+  "reverted_plan_dependent": [
+    {
+      "model_id": "inworld-tts-2",
+      "proposed": 25.0,
+      "kept": 30.0,
+      "why_reverted": "Inworld pricing is PLAN-DEPENDENT and the catalog row records our plan: 'Per-plan: Creator $30/M / Developer $25/M / Growth $20/M. We are on Creator so $30/M applies.' The research read the $25 on-demand/pay-as-you-go rate, which is a DIFFERENT basis. Contrast ElevenLabs, where the researcher explicitly verified the API rate is identical across all six plan columns - that is why the EL correction stands and this one does not.",
+      "to_resolve": "Confirm the current Inworld plan in the Inworld console billing page, then set 30.0 (Creator), 25.0 (Developer) or 20.0 (Growth)."
+    }
+  ],
+  "verified_but_deliberately_not_applied": [
+    {
+      "model_id": "gpt-5.6-sol",
+      "old": 5.0,
+      "new": 4.0,
+      "unit": "per 1M input tokens",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "evidence": "Pricing page shows $4.00 in / $20.00 out. Footnote verbatim: 'GPT-5.6 Sol's promotional pricing is available at least through November 21, 2026.'",
+      "caveat": "PROMOTIONAL and SHORT-CONTEXT ONLY. Verifier catch: the $4.00 row is the <272K-context column; prompts over 272K input tokens are priced at 2x input and 1.5x output for the full request, and we advertise a 1,050,000-token window. Believed list price $5/$30 was NOT found on an official page - treat as unverified.",
+      "review_by": "2026-11-21",
+      "verified": "confirmed with caveat",
+      "status": "NOT APPLIED - promotional price must not re-tier a frontier row",
+      "why_not_applied": "cost_per_unit drives frontier tiering. $4.00 drops gpt-5.6-sol below the $5 frontier boundary, collapsing the frontier set to {ANTHROPIC} (provider monoculture, Tenet-1 concern) and lifting DEFAULT_WILLINGNESS_TO_PAY_USD 3.00 -> 4.00, which widens the cost normalisation band every cheap tier is scored under. A 12-week discount is not a durable cost structure. Re-check 2026-11-21 - if $4/$20 becomes list, change it WITH the frontier boundary."
+    }
+  ]
+}
