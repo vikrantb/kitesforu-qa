@@ -360,9 +360,22 @@ def main() -> None:
 
     print(f"scanned {scanned} podcast_jobs docs; {with_logs} carry tts_segment_logs")
     print(f"POPULATION: {len(rows)} jobs" + (f" created >= {args.since}" if since else ""))
-    if not rows:
+    if not rows and not cast_rows:
         print("  nothing in this window.")
         return
+    if not rows:
+        # DELIVERY rows are empty, but HOP 1 NEEDS NO DELIVERY. qa#146 made
+        # `hop1_entry` delivery-independent and this early return silently undid
+        # that one layer up: a window whose jobs are CAST but not yet RENDERED
+        # reported "nothing in this window" while carrying a perfectly checkable
+        # contract. Hit live on 2026-08-28 measuring a post-deploy job that was
+        # still running — the census said 0 jobs while the doc count had already
+        # risen by one.
+        # The return was LOAD-BEARING (the delivery rates divide by len(rows),
+        # ZeroDivisionError), so the divisions are guarded rather than the guard
+        # removed. Delivery-dependent sections now report zeros honestly.
+        print("  no DELIVERED audio in this window — delivery-dependent sections")
+        print("  report zeros. HOP 1 needs no delivery and still runs below.")
 
     if args.namespace:
         print("\n" + "=" * 72)
@@ -395,7 +408,7 @@ def main() -> None:
     print("DIRECTION 2 — FRACTURE (ONE label rendered by SEVERAL voices)")
     print("=" * 72)
     print(f"  jobs with >=1 label on >1 (provider,voice_id):  {len(frac)}"
-          f"  of {len(rows)}  ({100*len(frac)/len(rows):.0f}%)")
+          f"  of {len(rows)}  ({100*len(frac)/max(1, len(rows)):.0f}%)")
     intra = sum(
         1 for r in frac
         if any(len({p for p, _ in v}) == 1 for v in r["fractured"].values())
@@ -410,7 +423,7 @@ def main() -> None:
     # informative, so neither is reported alone.
     fb = [r for r in rows if r["fractured_bare"]]
     print(f"\n  SAME QUESTION, BARE voice_id KEY:            {len(fb)}"
-          f"  ({100*len(fb)/len(rows):.0f}%)")
+          f"  ({100*len(fb)/max(1, len(rows)):.0f}%)")
     print(f"  the difference ({len(frac) - len(fb)} jobs) is one id string rendered on TWO providers")
     print("     -- a real audible change, so the PAIR key is the correct one; but check the")
     print("        month table before treating it as live, it is the EL->google failover class.")
