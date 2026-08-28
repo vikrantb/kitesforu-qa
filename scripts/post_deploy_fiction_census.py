@@ -11,6 +11,16 @@ a WRONG number on 2026-08-27, and they are all baked in here so the next run can
       A `maps_sequence` clip carries `edge_count: 0`. Keying on key-presence counted 2 map
       visuals as flowcharts and would have reported a FALSE FAILURE of the deploy.
       A real boxes-and-arrows figure is `kind == "concept_mermaid"` with edges > 0.
+  TRAP 6 — `fiction_beat` IS POSITIVE EVIDENCE ONLY; ITS ABSENCE PROVES NOTHING.
+      It is a DECLINE emitted by the imagination tree's depiction router
+      (imagination_tree/depiction_router.py:363), so it can only fire on beats that REACHED the
+      tree. A fiction beat routed to scene earlier, by the modality selector
+      (modality_selector.py:484 `rule1:fiction_or_diagrams_off→scene`), never consults the tree
+      and correctly emits no `fiction_beat`. Measured 2026-08-28 at n=2: job 0082f988 fired it,
+      job 1bffccbe did not — and BOTH produced zero real mermaid flowcharts, which is the
+      outcome actually under test. Reading "1 of 2" as a half-failure is wrong; the two jobs
+      took different routes to the same correct result.
+
   TRAP 5 — THE FICTION MARKER IS LATE-BOUND, SO IN-FLIGHT JOBS UNDER-COUNT.
       `is_fiction` reads `audio_config.content_type`, which the pipeline writes during format
       planning — NOT at creation. A job still in `job-initiate` is not yet classifiable, so
