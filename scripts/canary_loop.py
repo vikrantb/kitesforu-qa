@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -97,7 +96,8 @@ MAX_POLL_MINUTES = 10
 SLEEP_BETWEEN_ITERATIONS_SEC = 30 * 60  # 30 minutes
 MAX_ITERATIONS = 24                      # 12-hour cap
 
-REPORTS_DIR = Path("/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-qa/reports")
+# Repo-relative, not a path on one laptop: scripts/ -> parents[1] is the repo root.
+REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
 LOG_FILE = REPORTS_DIR / "canary-loop-log.md"
 
 SLACK_CHANNEL = "C09QXLV86C8"
