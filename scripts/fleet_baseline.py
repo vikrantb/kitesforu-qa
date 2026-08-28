@@ -81,6 +81,10 @@ out = {
     "clip_kinds": dict(clip_kinds.most_common(8)),
     "unlabelled_clips": unlabelled,
     "unlabelled_pct": round(100.0 * unlabelled / max(clips_total, 1), 1),
+    # `clips_per_job` only collects jobs that HAVE clips (the `if clips:` above), so this
+    # median is NOT over `completed`. Name its denominator, exactly as
+    # `jobs_with_distinctness` already does for the two medians below it.
+    "jobs_with_clips": len(clips_per_job),
     "median_clips_per_job": med(clips_per_job),
     "jobs_with_distinctness": have_distinctness,
     "median_pictorial_share": med(pictorial),
