@@ -11,6 +11,15 @@ a WRONG number on 2026-08-27, and they are all baked in here so the next run can
       A `maps_sequence` clip carries `edge_count: 0`. Keying on key-presence counted 2 map
       visuals as flowcharts and would have reported a FALSE FAILURE of the deploy.
       A real boxes-and-arrows figure is `kind == "concept_mermaid"` with edges > 0.
+  TRAP 5 — THE FICTION MARKER IS LATE-BOUND, SO IN-FLIGHT JOBS UNDER-COUNT.
+      `is_fiction` reads `audio_config.content_type`, which the pipeline writes during format
+      planning — NOT at creation. A job still in `job-initiate` is not yet classifiable, so
+      during active traffic the FICTION line under-counts and the count RISES as jobs progress.
+      Observed live 2026-08-28: job 1bffccbe read as non-fiction one moment (FICTION 3) and
+      fiction the next (FICTION 4) with no code change, then moved bucket from "visuals never
+      ran" to "visuals ran, 0 clips" as its compartment appeared. That is the funnel working,
+      not drift — but do not read a single run during traffic as a settled denominator.
+
   TRAP 4 — A FILTER THAT RUNS BEFORE THE ACCOUNTING MAKES THE DENOMINATOR A LIE.
       `if not clips: continue` sat BEFORE `is_fiction(j)`, so a fiction job that rendered
       nothing was dropped in the same branch as every non-fiction job and never counted as
