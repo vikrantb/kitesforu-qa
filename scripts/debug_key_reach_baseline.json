@@ -3,13 +3,19 @@
     "read_by": [
       "QualityGateCard.tsx"
     ],
-    "reason": "KNOWN DEFECT, unfixed. Nothing has ever written stages.quality_gate.final_verdict (0/88 jobs, 14 d); the card renders `\u2014`. Either the gate should persist a verdict or the card should stop asking. Not fixed in #1238, which only restored the metrics block."
+    "reason": "FIXED in frontend #1240. Nothing ever wrote stages.quality_gate.final_verdict (0/88, 14 d) \u2014 and nothing ever COMPUTED one: the only two matches in workers/src are an unrelated local in narrative_beats_check.py:533 and a comment in pipeline_runner.py:2300. The card now falls back to `outcome` ('released', 88/88), which IS the gate's verdict under a different name. The read stays first in case a writer ever emits it."
   },
   "metrics": {
     "read_by": [
       "QualityGateCard.tsx"
     ],
     "reason": "ACCEPTED. QualityGateCard keeps `data.metrics` as the FIRST branch of resolveMetrics so a job that ever nests them wins; the spread fallback is what renders today. Not a defect since frontend #1238 \u2014 remove this entry only if that fallback is removed."
+  },
+  "provider_rendering_decisions": {
+    "read_by": [
+      "CharacterSystemPanel.tsx"
+    ],
+    "reason": "NOT A DEFECT \u2014 n=3. `character_system` resolves on only 3 of 89 jobs (a shadow system, mostly off), and on those 3 the value is `[]`, not null. An empty decisions list is a legitimate outcome, and three jobs is not evidence of anything. Revisit only if the shadow system is turned on broadly and it is STILL empty at a real n."
   },
   "total_dynamic_section_chars": {
     "read_by": [
