@@ -327,6 +327,13 @@ def main() -> None:
             tier=job.get("quality_tier") or job.get("subscription_tier") or "?",
             labels=set(lab2voice), voices=set(voice2lab),
             fractured=fractured,
+            # The PROVIDER-PAIR each fractured label spans, e.g. frozenset
+            # {"inworld","openai"}. This is what separates the fracture CLASSES
+            # from one another; without it "no-fallback fracture" reads as one
+            # bug when it is three, each of which dominated a different month.
+            frac_provider_sets={
+                frozenset(p for p, _v in vs) for vs in fractured.values()
+            },
             collapsed={v: l for v, l in voice2lab.items() if len(l) > 1},
             # A MID-EPISODE switch is a provider CHANGE along the timeline, which
             # is a different defect from a job that used one provider throughout.
@@ -419,8 +426,6 @@ def main() -> None:
     print(f"     {sum(1 for r in frac if not r['switches'] and not r['any_fallback']):4d}"
           "  had NEITHER  <- nothing failed; the selector simply decided differently")
 
-    # BOTH KEYS, side by side. These legitimately differ and the difference is
-    # informative, so neither is reported alone.
     fb = [r for r in rows if r["fractured_bare"]]
     print(f"\n  SAME QUESTION, BARE voice_id KEY:            {len(fb)}"
           f"  ({100*len(fb)/max(1, len(rows)):.0f}%)")
@@ -435,6 +440,38 @@ def main() -> None:
     hadfb = sum(1 for r in fb if r["frac_had_fallback"])
     print(f"     {hadfb:4d}  a fractured label contains a FALLBACK segment  (job-level UPPER BOUND)")
     print(f"     {len(fb)-hadfb:4d}  NO fallback anywhere in the fractured label  <- NOT failover")
+
+    # THE NO-FALLBACK CLASSES, BROKEN OUT. "No-fallback fracture" is not one bug:
+    # measured 2026-08-27 over the 49 such jobs, it was THREE, each dominating a
+    # different month — within-inworld (May-Jun, 30), other cross-provider (Jul,
+    # 8), inworld<->openai (Aug, 11). Reporting the total alone hides that, and
+    # hid it for a day.
+    #
+    # THE PREDICATE THIS EXISTS TO TEST: the final expressive seam fix (workers
+    # #2763, deployed 2026-08-27 in image 6c509904) targets the
+    # inworld<->openai class specifically, which was 11 of 11 live August cases.
+    # If the fix works, that row goes to ZERO on post-deploy traffic while the
+    # others are unaffected. Run with --since <deploy timestamp> to test it.
+    # n MATTERS: at a ~6% base rate a handful of jobs cannot distinguish a fix
+    # from luck, so check the job count before reading anything into a zero.
+    nofb = [r for r in fb if not r["frac_had_fallback"]]
+    if nofb:
+        print(f"\n     ...and those {len(nofb)} split by PROVIDER SPAN — they are DIFFERENT bugs:")
+        klass: Counter = Counter()
+        for r in nofb:
+            for ps in r["frac_provider_sets"]:
+                if len(ps) == 1:
+                    klass[f"within {next(iter(ps))} (upstream re-resolution)"] += 1
+                else:
+                    klass["<->".join(sorted(ps))] += 1
+        for name, n in klass.most_common():
+            mark = ("   <-- the class workers#2763 fixes"
+                    if name == "inworld<->openai" else "")
+            print(f"     {n:4d}  {name}{mark}")
+
+    # BOTH KEYS, side by side. These legitimately differ and the difference is
+    # informative, so neither is reported alone.
+
     for f, c in Counter(r["fmt"] for r in frac).most_common(8):
         print(f"       {c:4d}  {f}")
 
