@@ -1,0 +1,26 @@
+{
+  "final_verdict": {
+    "read_by": [
+      "QualityGateCard.tsx"
+    ],
+    "reason": "KNOWN DEFECT, unfixed. Nothing has ever written stages.quality_gate.final_verdict (0/88 jobs, 14 d); the card renders `\u2014`. Either the gate should persist a verdict or the card should stop asking. Not fixed in #1238, which only restored the metrics block."
+  },
+  "metrics": {
+    "read_by": [
+      "QualityGateCard.tsx"
+    ],
+    "reason": "ACCEPTED. QualityGateCard keeps `data.metrics` as the FIRST branch of resolveMetrics so a job that ever nests them wins; the spread fallback is what renders today. Not a defect since frontend #1238 \u2014 remove this entry only if that fallback is removed."
+  },
+  "total_dynamic_section_chars": {
+    "read_by": [
+      "ComposerLogPanel.tsx"
+    ],
+    "reason": "ALWAYS NULL, writer-side. debug_logging.py:1613-14 declares total_static_chars/total_dynamic_chars = None and NEVER assigns them, then passes both into ComposerFiringLog (:1662-63). Present on 32/32 jobs, value None on all. The composer DOES compute them (composer.py:202 logs 'static=%d chars, dynamic=%d') \u2014 they are simply not threaded through. Fix is at the writer, not the panel."
+  },
+  "total_static_section_chars": {
+    "read_by": [
+      "ComposerLogPanel.tsx"
+    ],
+    "reason": "ALWAYS NULL, writer-side. debug_logging.py:1613-14 declares total_static_chars/total_dynamic_chars = None and NEVER assigns them, then passes both into ComposerFiringLog (:1662-63). Present on 32/32 jobs, value None on all. The composer DOES compute them (composer.py:202 logs 'static=%d chars, dynamic=%d') \u2014 they are simply not threaded through. Fix is at the writer, not the panel."
+  }
+}
