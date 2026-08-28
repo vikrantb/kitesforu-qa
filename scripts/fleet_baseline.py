@@ -15,8 +15,30 @@ Run again after traffic resumes and diff. Same command both arms.
 """
 from __future__ import annotations
 import json, sys
+from pathlib import Path
 from collections import Counter
 from google.cloud import firestore
+
+# The opt-in question is decided by PRODUCTION's predicate, never a copy of it here.
+# `wants_visuals` is only one of three opt-in keys (`visual_scenes`,
+# `visual_scenes_requested`) across three containers (top-level, `inputs`, `preferences`),
+# and the api persists it TRUTHY-ONLY — so "absent" does not mean "off". A local
+# reimplementation agreed with `job_opted_in` on all 2158 completed jobs on 2026-08-28 and
+# would still have silently diverged the first time a job used one of the other keys.
+# If workers/src is not importable the opt-in keys are OMITTED and say so: a missing number
+# is honest, a lookalike from a second implementation is not.
+import os
+_WORKERS_SRC = os.environ.get("WORKERS_SRC") or str(
+    Path(__file__).resolve().parents[2] / "kitesforu-workers" / "src")
+job_opted_in = None
+visuals_disabled = None
+_OPTIN_IMPORT_ERR = ""
+try:
+    if _WORKERS_SRC not in sys.path:
+        sys.path.insert(0, _WORKERS_SRC)
+    from workers.stages.visuals.flags import job_opted_in, _visuals_disabled as visuals_disabled
+except Exception as _e:  # noqa: BLE001
+    _OPTIN_IMPORT_ERR = f"{type(_e).__name__}: {_e}"
 
 LIMIT = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
 db = firestore.Client(project="kitesforu-dev")
@@ -30,6 +52,10 @@ pictorial = []
 text_share = []
 clips_per_job = []
 clips_per_completed = []
+clips_per_requested = []   # wants_visuals is True — 0 clips here is a DEFECT
+n_declined = 0             # wants_visuals is False — 0 clips here is CORRECT
+n_unspecified = 0          # field ABSENT — intent unknown, never folded into a rate
+unspecified_with_clips = 0
 unlabelled = 0
 clips_total = 0
 
@@ -45,6 +71,22 @@ for d in db.collection("podcast_jobs").limit(LIMIT).stream():
     #   clips_per_job       — only jobs that HAVE clips (the 2026-08-17 baseline's arm)
     #   clips_per_completed — every completed job; no clips counts as 0
     clips_per_completed.append(len(clips))
+    # wants_visuals has THREE states and they are NOT two. Censused 2026-08-28 over 2158
+    # completed jobs: True=223 (95% got clips), False=3 (0% — correct), ABSENT=1932 of which
+    # 374 got clips ANYWAY. So absent does NOT mean 'declined'; treating it as such would
+    # exclude 374 jobs that demonstrably received visuals. The absent rows carry their own
+    # count instead of being folded into either rate. (Absent-with-clips is also era-bounded:
+    # 2026-06-22..2026-08-21, so it is not even one population.)
+    if job_opted_in is None:
+        pass  # canonical predicate unavailable — the opt-in keys are omitted below, loudly
+    elif job_opted_in(j):
+        clips_per_requested.append(len(clips))
+    elif visuals_disabled is not None and visuals_disabled(j):
+        n_declined += 1
+    else:
+        n_unspecified += 1
+        if clips:
+            unspecified_with_clips += 1
     if clips:
         clips_per_job.append(len(clips))
         for c in clips:
@@ -96,6 +138,19 @@ out = {
     "jobs_with_clips": len(clips_per_job),
     "median_clips_per_job": med(clips_per_job),
     "median_clips_per_completed_job": med(clips_per_completed),
+    # The denominator that separates "wanted visuals and got none" from "never asked".
+    # requested + declined + unspecified == completed, by construction.
+    **({
+        "visuals_requested": len(clips_per_requested),
+        "median_clips_per_requested_job": med(clips_per_requested),
+        "requested_but_zero_clips": sum(1 for c in clips_per_requested if c == 0),
+        "visuals_declined": n_declined,
+        "visuals_unspecified": n_unspecified,
+        "unspecified_with_clips": unspecified_with_clips,
+    } if job_opted_in is not None else {
+        "visuals_optin_breakdown": f"UNAVAILABLE — {_OPTIN_IMPORT_ERR}. "
+                                   f"Set WORKERS_SRC to kitesforu-workers/src.",
+    }),
     "jobs_with_distinctness": have_distinctness,
     "median_pictorial_share": med(pictorial),
     "median_text_share": med(text_share),
