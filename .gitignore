@@ -101,6 +101,10 @@ dmypy.json
 /output/
 *.json
 !pyproject.toml
+# Ratchet baselines are SOURCE, not output — a baseline that does not ship makes its gate report
+# every known finding as NEW on a fresh clone, i.e. a gate that cries wolf until someone silences
+# it. Mirrors kitesforu-workers/config/{mechanism_reach,orphan}_baseline.json, which are committed.
+!scripts/*_baseline.json
 
 # Docker
 docker/output/
