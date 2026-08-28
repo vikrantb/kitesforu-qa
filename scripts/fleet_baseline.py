@@ -7,7 +7,12 @@ shipped #2476 (fact contract), #2477 (format matrix), #2478 (audio dynamics) and
 predicate. NO JOB HAS RUN AGAINST THEM YET (0 job-bearing worker log lines), so every completed job
 in Firestore is still a clean "before" — but only until traffic resumes.
 
-METHOD. Full UNORDERED scan. `podcast_jobs.created_at` is MIXED-TYPE, so
+METHOD. CAPPED unordered scan — `limit(LIMIT)`, default 3000, argv[1] to change.
+The collection held 4159 docs on 2026-08-28, so the default reads ~72% of it and the
+REST IS ARBITRARY (unordered). `scanned` is therefore the size of a slice, not of the
+fleet; the output now carries `limit` and `limit_reached` so a truncated run cannot be
+read as a fleet-wide one. The default stays 3000 so this run remains comparable with
+FLEET-BASELINE-2026-08-17.json, which was captured at the same cap. `podcast_jobs.created_at` is MIXED-TYPE, so
 `order_by("created_at").limit(N)` TYPE-CLIPS to an arbitrary slice rather than "the N most recent" —
 every ordered figure quoted in tonight's census is suspect for exactly this reason.
 
@@ -124,6 +129,10 @@ def med(v):
 
 out = {
     "scanned": n, "completed": completed,
+    # `scanned` is bounded by LIMIT. Without these two keys a capped run is
+    # indistinguishable from a fleet-wide one in the output.
+    "limit": LIMIT,
+    "limit_reached": n >= LIMIT,
     "clips_total": clips_total,
     "clip_kinds": dict(clip_kinds.most_common(8)),
     "unlabelled_clips": unlabelled,
