@@ -73,8 +73,27 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os as _os
 import re
+import sys
 from collections import Counter
+from pathlib import Path
+
+_WORKERS_SRC = _os.environ.get("WORKERS_SRC") or str(
+    Path(__file__).resolve().parents[2] / "kitesforu-workers" / "src")
+if _WORKERS_SRC not in sys.path:
+    sys.path.insert(0, _WORKERS_SRC)
+try:
+    from workers.stages.script.cast_voice_sizing import (
+        _cast_size_from_preferences as _prod_cast_size,
+    )
+except Exception as _exc:  # noqa: BLE001
+    raise SystemExit(
+        f"speaker_delivery_census: cannot import production's cast sizing ({type(_exc).__name__}: "
+        f"{_exc}).\nSet WORKERS_SRC to kitesforu-workers/src. Refusing to run: the cast floor is "
+        f"this census's denominator, and a local re-implementation of it drifted LOW on 43 of "
+        f"4160 jobs before it was deleted."
+    ) from _exc
 
 from google.cloud import firestore
 
@@ -128,34 +147,28 @@ def _prefs_blobs(job: dict) -> list:
 
 
 def cast_floor(job: dict) -> int:
-    """Mirror of kitesforu-workers _apply_cast_voice_floor / _cast_size_from_preferences.
+    """Planned cast size — from PRODUCTION's own function, not a copy of it.
 
-    The format only sets a BASE. A planned multi-character cast RAISES it:
-    ``_apply_cast_voice_floor`` fires when the cast is > 2 and rewrites
-    narration/monologue/dialogue to the drama template so the voices get used.
-    Mirroring only the format map made this census blind to exactly the
-    collapse it exists to catch -- job 33cdaa8d is a ``short`` with
-    ``_cast_sketch.cast_size=3``, a contract naming those same 3 characters,
-    and a delivered script of ``['Narrator']``: a real 3->1 collapse that an
-    unconditional ``return 1`` dropped from the denominator entirely.
+    This used to be a hand-written mirror of `_cast_size_from_preferences`, and it had drifted.
+    Measured 2026-08-28 over the full collection (n=4160): the mirror was **LOWER on 43 jobs
+    (1.03%) and higher on none** — one-directional under-counting, so switching to the real
+    function loses nothing.
 
-    Capped at 6, as the SSOT caps it.
+    It read only `_cast_sketch` and `_persona_voice_map`. Production also consults the
+    AudioDramaConfig cast, and then max'es in `_canonical_cast_floor` — the blueprint canonical
+    cast, which exists precisely because "a STALE api `_cast_sketch` (cast_size=1) used to shadow
+    a richer architect cast" (job 81ad9db9: sketch said one narrator, the covenant put 3 named
+    characters in the script prompt). The mirror was blind to exactly that case.
+
+    Why it matters HERE: an under-counted floor understates under-delivery. A job whose real
+    floor is 4, measured as 2, delivering 2 voices looks compliant and is not.
+
+    The earlier mirror had already been widened once for the same class of blindness — its own
+    note recorded that "mirroring only the format map made this census blind to exactly the
+    collapse it exists to catch" (job 33cdaa8d). Widening a copy twice is the argument for not
+    keeping a copy.
     """
-    best = 0
-    for prefs in _prefs_blobs(job):
-        cs = prefs.get("_cast_sketch")
-        if isinstance(cs, dict):
-            n = cs.get("cast_size")
-            if isinstance(n, int) and n > 0:
-                best = max(best, min(n, 6))
-            else:
-                chars = cs.get("characters")
-                if isinstance(chars, list) and chars:
-                    best = max(best, min(len(chars), 6))
-        vm = prefs.get("_persona_voice_map")
-        if isinstance(vm, dict) and len(vm) > 2:
-            best = max(best, min(len(vm), 6))
-    return best
+    return max([_prod_cast_size(b) for b in _prefs_blobs(job)] or [0])
 
 
 def cast_size(job: dict) -> tuple[int | None, str]:
