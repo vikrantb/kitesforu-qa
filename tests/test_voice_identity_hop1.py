@@ -258,3 +258,47 @@ class TestLabelCollisionIsVisibleNotSilent:
     def test_entries_without_a_voice_id_are_not_counted_raw_either(self):
         job = _job({"Host1": {"persona_id": "p", "provider": "inworld"}})
         assert _census().raw_contract_entries(job) == 0
+
+
+# --- the early return hid hop 1 when nothing in the window had DELIVERED -----
+#
+# qa#146 made `hop1_entry` delivery-independent. `main()` then undid it one
+# layer up: `if not rows: return`, where `rows` is the DELIVERY population. A
+# window whose jobs are CAST but not yet RENDERED reported "nothing in this
+# window" while carrying a perfectly checkable contract.
+#
+# Hit live on 2026-08-28 measuring a post-deploy job that was still running:
+# the census said 0 jobs while the scanned doc count had already risen by one.
+#
+# The return was LOAD-BEARING — the delivery rates divide by len(rows) and an
+# empty window raised ZeroDivisionError — so the divisions are guarded rather
+# than the guard removed.
+
+
+def _main_src():
+    import inspect
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "vic", pathlib.Path(__file__).resolve().parents[1] / "scripts" / "voice_identity_census.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return inspect.getsource(mod.main)
+
+
+def test_the_delivery_rates_are_zero_safe():
+    """The reason the early return existed. Both rates divide by len(rows)."""
+    src = _main_src()
+    assert "len(rows)" in src, "positive control: the rates do divide by len(rows)"
+    for frag in ("100*len(frac)/max(1, len(rows))", "100*len(fb)/max(1, len(rows))"):
+        assert frag in src, f"unguarded division would raise on an empty window: {frag}"
+
+
+def test_hop1_is_not_skipped_merely_because_nothing_delivered():
+    """The bare `if not rows: return` is what hid hop 1. It must also require
+    that there is no CAST row, since hop 1 needs no delivery."""
+    src = _main_src()
+    assert "if not rows and not cast_rows:" in src, (
+        "the early return must not fire on delivery alone — hop 1 needs none")
+    assert "if not rows:\n" in src, "the delivery-only branch must still exist"
