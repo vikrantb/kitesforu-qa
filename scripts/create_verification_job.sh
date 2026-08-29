@@ -70,7 +70,10 @@ while [[ $# -gt 0 ]]; do
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
-    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email
+    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
+                    # VISIBILITY (2026-08-28): the default test_user_e2e's jobs NEVER render in the
+                    # signed-in Playwright library (different account). A job that must be OBSERVED
+                    # on the beta surface needs --on-behalf-of <the browser test account's user_… id>.
     --on-behalf-of-email) ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
     -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
