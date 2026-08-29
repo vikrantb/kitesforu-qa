@@ -71,7 +71,21 @@ def main() -> None:
 
     db = firestore.Client()
     gcs = storage.Client()
-    doc = db.collection("podcast_jobs").document(job_id).get().to_dict() or {}
+    snap = db.collection("podcast_jobs").document(job_id).get()
+    if not snap.exists and len(job_id) >= 8 and "-" not in job_id:
+        # Resolve a short prefix (canary ids are quoted 8-hex everywhere). A missing doc
+        # must NEVER read as measured=0 — that zero is indistinguishable from an empty
+        # job (the scan-that-errors class; this script shipped with exactly that hole
+        # and burned a canary comparison on 2026-08-29).
+        hits = [d for d in db.collection("podcast_jobs")
+                .where("job_id", ">=", job_id).where("job_id", "<", job_id + "\uf8ff")
+                .limit(2).stream()]
+        if len(hits) == 1:
+            job_id = hits[0].id
+            snap = db.collection("podcast_jobs").document(job_id).get()
+    if not snap.exists:
+        raise SystemExit(f"JOB NOT FOUND: {job_id!r} — refusing to print measured=0 for a missing doc")
+    doc = snap.to_dict() or {}
     clips = (doc.get("visual") or {}).get("clips") or []
     rows, by_engine = [], defaultdict(list)
     measured = skipped = 0
