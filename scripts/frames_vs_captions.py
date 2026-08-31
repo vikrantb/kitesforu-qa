@@ -36,6 +36,8 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
+import ssl
 import subprocess
 import sys
 import urllib.request
@@ -70,6 +72,31 @@ def _surfaced_url(job: dict) -> str:
         if isinstance(url, str) and url.startswith("gs://"):
             raise SystemExit(f"{key} is a bare gs:// path — a surfacing FAIL, not a source")
     raise SystemExit("no surfaced master URL on this job (visuals may not have completed)")
+
+
+def _download(url: str, dest: pathlib.Path) -> None:
+    """Fetch the master, surviving a macOS Python with no usable trust store.
+
+    A framework Python on macOS ships no CA bundle, so ``urlretrieve`` dies with
+    CERTIFICATE_VERIFY_FAILED on a perfectly valid storage.googleapis.com URL. That failure
+    is about the LOCAL interpreter, not the artifact — reporting it as "could not fetch the
+    video" would read as a pipeline defect. Try certifi, then fall back to curl, and only
+    then admit defeat."""
+    try:
+        import certifi  # noqa: PLC0415
+
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(url, context=ctx) as r, dest.open("wb") as f:  # noqa: S310
+            shutil.copyfileobj(r, f)
+        return
+    except Exception:  # noqa: BLE001 — fall through to curl
+        pass
+    rc = subprocess.run(["curl", "-fsSL", "-o", str(dest), url], check=False).returncode
+    if rc != 0 or not dest.exists() or dest.stat().st_size == 0:
+        raise SystemExit(
+            f"could not fetch the master ({url[:80]}). Neither certifi nor curl worked — "
+            "this is a LOCAL fetch failure, not evidence about the artifact."
+        )
 
 
 def _duration_ms(path: str) -> int:
@@ -140,7 +167,7 @@ def main() -> int:
     local = out_dir / "master.mp4"
     if not local.exists():
         print(f"fetching {url[:96]} ...")
-        urllib.request.urlretrieve(url, local)  # noqa: S310 — our own job doc's https URL
+        _download(url, local)
 
     total = _duration_ms(str(local))
     # Interior samples only: t=0 is a title card and t=end an outro on most artifacts, and
