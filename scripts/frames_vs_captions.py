@@ -80,8 +80,8 @@ def _duration_ms(path: str) -> int:
     ).stdout.strip()
     try:
         return int(float(out) * 1000)
-    except ValueError:
-        raise SystemExit(f"ffprobe could not read a duration from {path}")
+    except ValueError as exc:
+        raise SystemExit(f"ffprobe could not read a duration from {path}") from exc
 
 
 def _cue_at(cues: list, ms: int) -> str:
