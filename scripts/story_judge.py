@@ -55,6 +55,7 @@ import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 PROJECT = "kitesforu-dev"
@@ -284,12 +285,66 @@ def script_to_text(script: Any) -> str:
     return "\n\n".join(x for x in out if x).strip()
 
 
+def load_persona(name: str) -> str:
+    """Render a `hero_users/personas/<name>.yaml` into a critic-persona block.
+
+    WHY THIS EXISTS. `CRITIC_PERSONA` above is one hardcoded reviewer (Ruth Keller, a
+    commissioning editor). `kitesforu-qa/hero_users/personas/` holds the routed HERO USERS that
+    `.claude/rules/02-done.md` requires for an acceptance review — Sofia for a social short, Aarav
+    for audio, Nadia for a story — and there was no way to run one. The judging harness here
+    (model call, JSON contract, rubric, anti-sycophancy anchors, report) is the same for any
+    reviewer, so this reuses it rather than growing a second judge (rule #19).
+
+    Returns a block in the same shape `CRITIC_PERSONA` occupies, so `build_prompt` is unchanged
+    apart from which string it interpolates. Raises FileNotFoundError with the available names —
+    a silent fallback to Ruth Keller would make a `--persona` typo look like it worked, which is
+    the failure mode that makes a review worthless without announcing itself.
+    """
+    import yaml  # local: the default path must not require PyYAML
+
+    d = Path(__file__).resolve().parent.parent / "hero_users" / "personas"
+    f = d / f"{name}.yaml"
+    if not f.exists():
+        avail = sorted(p.stem for p in d.glob("*.yaml"))
+        raise FileNotFoundError(f"no persona {name!r} in {d} — available: {avail}")
+    p = yaml.safe_load(f.read_text()) or {}
+
+    def _s(key: str) -> str:
+        return str(p.get(key) or "").strip()
+
+    triggers = "\n".join(f"  - {t}" for t in (p.get("rejection_triggers") or []))
+    return f"""\
+You are {_s('name')}, a real person, not a reviewer: {_s('archetype')}.
+
+{_s('background')}
+
+WHAT YOU WANT: {_s('goal')}
+WHAT YOU KNOW BEST: {_s('home_domain')}
+YOUR BAR: {_s('quality_bar')}
+
+THE FAILURES YOU NOTICE FIRST:
+{_s('error_class')}
+
+YOU REJECT OUTRIGHT WHEN:
+{triggers}
+
+THE QUESTION YOU ARE ACTUALLY ANSWERING: {_s('verdict_question')}
+
+HOW YOU TALK:
+{_s('register')}
+
+You see ONLY the artifact and the brief. You are never told that it works, and "it was generated"
+earns nothing. Hold your verdict under pushback unless you are shown NEW evidence."""
+
+
 def build_prompt(topic: str, family: str, duration_s: Any, transcript: str,
-                 promise: str = "story") -> str:
+                 promise: str = "story", persona: Optional[str] = None) -> str:
     rubric = RUBRICS[family]
     lines = [f"  - {k}: {d}" for k, d in rubric + _UNIVERSAL]
     keys = [k for k, _ in rubric + _UNIVERSAL]
-    return f"""{CRITIC_PERSONA}
+    # `persona` None -> the hardcoded Ruth Keller, byte-identical to before this parameter existed.
+    critic = load_persona(persona) if persona else CRITIC_PERSONA
+    return f"""{critic}
 
 {SCORING_ANCHORS}
 
@@ -370,7 +425,8 @@ def call_judge(prompt: str, model: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def judge_job(db: Any, job_id: str, model: str) -> Optional[Dict[str, Any]]:
+def judge_job(db: Any, job_id: str, model: str,
+              persona: Optional[str] = None) -> Optional[Dict[str, Any]]:
     doc = db.collection("podcast_jobs").document(job_id).get()
     if not doc.exists:
         print(f"{job_id}: not found", file=sys.stderr)
@@ -385,7 +441,7 @@ def judge_job(db: Any, job_id: str, model: str) -> Optional[Dict[str, Any]]:
         return None
     family, promise = classify(transcript, topic, model)
     dur = (script or {}).get("metadata", {}).get("total_duration_seconds") if isinstance(script, dict) else None
-    res = call_judge(build_prompt(topic, family, dur, transcript, promise), model)
+    res = call_judge(build_prompt(topic, family, dur, transcript, promise, persona), model)
     if res is None:
         return None
     res["_job_id"] = job_id
@@ -420,6 +476,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("job_ids", nargs="*")
     ap.add_argument("--model", default=DEFAULT_JUDGE_MODEL)
+    ap.add_argument(
+        "--persona", default="",
+        help=(
+            "Review as a HERO USER from hero_users/personas/ (e.g. nadia-story-listener, "
+            "sofia-creator, aarav-audio) instead of the default commissioning editor. "
+            "Rule 02 routes a story to Nadia, a social short to Sofia, any audio to Aarav."
+        ),
+    )
     ap.add_argument("--all-recent", type=int, default=0, help="judge the N most-recent jobs")
     ap.add_argument("--json-out", default="")
     ap.add_argument("--real-only", action="store_true",
@@ -479,7 +543,7 @@ def main() -> int:
 
     results: List[Dict[str, Any]] = []
     for jid in ids:
-        r = judge_job(db, jid, args.model)
+        r = judge_job(db, jid, args.model, args.persona or None)
         if r:
             results.append(r)
             print_report(r)
