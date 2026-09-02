@@ -133,3 +133,77 @@ class TestTheGateCanRunAPersonaOnTheDELIVEREDVIDEO:
         the wrong reviewer, on frames."""
         with pytest.raises(FileNotFoundError):
             self._brief("nadia-storey-listener")
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# THE HOLE THE #172 CODE-CRITIC FOLLOW-UP FOUND.
+#
+# `test_every_other_persona_loads_too` asserted `len(out) > 200` and that an anchor sentence is
+# present. BOTH are satisfied by the static f-string scaffolding in `load_persona` itself — neither
+# reads a byte of the YAML. Verified by gutting `sofia-creator.yaml` to a single `name:` line:
+# len=400, anchor present, 12 tests green. Renaming any key the template reads (`register` ->
+# `voice_register`, the realistic drift) is equally invisible.
+#
+# That matters more than a normal test gap. The persona file IS the anti-rubber-stamp mechanism
+# (rule 02: "a review that agrees to be agreeable is a failed review"). A hollow persona does not
+# fail loudly — it yields a generic, uncalibrated critic that still returns a confident verdict.
+# `load_persona`'s own docstring says it exists to stop exactly this one level up: "a silent
+# fallback to Ruth Keller would make a `--persona` typo look like it worked". The typo path raises
+# correctly. The empty-or-renamed-key path did not.
+#
+# Compounding it, the old parametrize list was hardcoded to three of the seven personas, so
+# elena-ld, marcus-technical and priya-jobseeker were never loaded by any test — and a persona
+# added later would not be either. The list below GLOBS the directory so new personas are covered
+# the day they land.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+#: Every field `story_judge.load_persona` interpolates. Each must reach the rendered brief, or that
+#: section of the critic's character is silently blank.
+_RENDERED_KEYS = (
+    "name", "archetype", "background", "goal", "home_domain",
+    "quality_bar", "error_class", "verdict_question", "register",
+)
+
+_ALL_PERSONAS = sorted(p.stem for p in _PERSONA_DIR.glob("*.yaml"))
+
+
+def test_the_persona_directory_is_not_empty() -> None:
+    """POSITIVE CONTROL for the glob below: an empty directory would make every globbed test vacuously
+    pass by collecting zero cases, which is the same class of hole this section exists to close."""
+    assert len(_ALL_PERSONAS) >= 7, f"expected the 7 known personas, globbed {_ALL_PERSONAS}"
+
+
+@pytest.mark.parametrize("name", _ALL_PERSONAS)
+def test_every_persona_renders_its_own_content_not_just_scaffolding(name: str) -> None:
+    """The persona's OWN words must reach the brief. Fails if a key is renamed, emptied or dropped —
+    the drift the two length/anchor assertions could not see."""
+    import yaml
+
+    raw = yaml.safe_load((_PERSONA_DIR / f"{name}.yaml").read_text()) or {}
+    out = story_judge.load_persona(name)
+    missing = []
+    for key in _RENDERED_KEYS:
+        val = str(raw.get(key) or "").strip()
+        assert val, f"{name}.yaml has no non-empty {key!r} — the brief renders that section blank"
+        # First line is enough: several fields are multi-line prose the template re-wraps.
+        probe = val.splitlines()[0].strip()
+        if probe and probe not in out:
+            missing.append(key)
+    assert not missing, (
+        f"{name}: {missing} present in the YAML but absent from the rendered brief — "
+        f"load_persona is dropping them (renamed key, or template drift)"
+    )
+
+
+@pytest.mark.parametrize("name", _ALL_PERSONAS)
+def test_every_persona_renders_its_rejection_triggers(name: str) -> None:
+    """`rejection_triggers` is the list that makes the critic REFUSE. It renders through a separate
+    join, so it drifts independently of the scalar fields above."""
+    import yaml
+
+    raw = yaml.safe_load((_PERSONA_DIR / f"{name}.yaml").read_text()) or {}
+    triggers = [str(t).strip() for t in (raw.get("rejection_triggers") or []) if str(t).strip()]
+    assert triggers, f"{name}.yaml has no rejection_triggers — the critic refuses nothing"
+    out = story_judge.load_persona(name)
+    absent = [t for t in triggers if t.splitlines()[0].strip() not in out]
+    assert not absent, f"{name}: rejection triggers missing from the rendered brief: {absent}"
+
