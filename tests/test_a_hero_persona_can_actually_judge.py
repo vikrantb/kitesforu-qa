@@ -31,13 +31,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import story_judge as SJ  # noqa: E402
+import story_judge  # noqa: E402
 
 _PERSONA_DIR = Path(__file__).resolve().parent.parent / "hero_users" / "personas"
 
 
 def _prompt(persona=None):
-    return SJ.build_prompt("a love story", "fiction", 600, "a transcript", "story", persona)
+    return story_judge.build_prompt("a love story", "fiction", 600, "a transcript", "story", persona)
 
 
 class TestTheStoryPersonaExists:
@@ -79,7 +79,7 @@ class TestThePersonaIsLIVE:
     @pytest.mark.parametrize("name", ["sofia-creator", "aarav-audio", "maya-student"])
     def test_every_other_persona_loads_too(self, name: str):
         """This is a shared runner, not a Nadia-shaped hole."""
-        out = SJ.load_persona(name)
+        out = story_judge.load_persona(name)
         assert len(out) > 200 and "You see ONLY the artifact" in out
 
 
@@ -90,5 +90,5 @@ def test_a_typo_RAISES_instead_of_silently_using_the_default():
     worked and produce a confident report from the wrong reviewer.
     """
     with pytest.raises(FileNotFoundError) as e:
-        SJ.load_persona("no-such-persona")
+        story_judge.load_persona("no-such-persona")
     assert "available:" in str(e.value), "the error must name the valid personas"
