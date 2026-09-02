@@ -207,3 +207,30 @@ def test_every_persona_renders_its_rejection_triggers(name: str) -> None:
     absent = [t for t in triggers if t.splitlines()[0].strip() not in out]
     assert not absent, f"{name}: rejection triggers missing from the rendered brief: {absent}"
 
+
+
+def test_a_malformed_persona_file_fails_by_naming_itself(tmp_path, monkeypatch) -> None:
+    """#172 code-critic finding 8. A persona that parses to a list or a bare scalar used to escape
+    `load_persona`'s careful contract with `AttributeError: 'list' object has no attribute 'get'` —
+    which never names the file, making a malformed persona HARDER to diagnose than a typo'd name.
+    Same failure mode as the FileNotFoundError beside it, so it gets the same treatment."""
+    import yaml  # noqa: F401 — the loader imports it lazily; fail early here if it is absent
+
+    for body, kind in (("- a\n- b\n", "list"), ("just a string\n", "str")):
+        probe = _PERSONA_DIR / "zz-malformed-probe.yaml"
+        probe.write_text(body)
+        try:
+            with pytest.raises(ValueError, match=r"parsed to \w+, not a mapping"):
+                story_judge.load_persona("zz-malformed-probe")
+        finally:
+            probe.unlink(missing_ok=True)
+        assert not probe.exists(), f"{kind} probe left behind"
+
+
+def test_the_typo_path_still_raises_and_still_lists_what_exists() -> None:
+    """CONTROL for the test above: widening the error handling must not swallow the typo contract
+    `load_persona`'s docstring depends on — a silent fallback would make a `--persona` typo look
+    like it worked."""
+    with pytest.raises(FileNotFoundError) as e:
+        story_judge.load_persona("nope-not-a-persona")
+    assert "nadia-story-listener" in str(e.value), "the error no longer lists available personas"

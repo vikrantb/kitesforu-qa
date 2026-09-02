@@ -308,6 +308,15 @@ def load_persona(name: str) -> str:
         avail = sorted(p.stem for p in d.glob("*.yaml"))
         raise FileNotFoundError(f"no persona {name!r} in {d} — available: {avail}")
     p = yaml.safe_load(f.read_text()) or {}
+    # A persona that parses to a list or a bare scalar used to escape the contract two lines up
+    # with `AttributeError: 'list' object has no attribute 'get'`, which never names the file —
+    # so a malformed YAML was harder to diagnose than a typo'd name. Found by the #172 code-critic
+    # lens. Same failure mode as the FileNotFoundError above, so it gets the same treatment.
+    if not isinstance(p, dict):
+        raise ValueError(
+            f"persona {name!r} at {f} parsed to {type(p).__name__}, not a mapping — "
+            f"a persona file must be a YAML mapping of field: value"
+        )
 
     def _s(key: str) -> str:
         return str(p.get(key) or "").strip()
