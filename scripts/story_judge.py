@@ -38,9 +38,20 @@ founder's complaint is really about, for EVERY genre:
     delivered a fiction vignette. The user did not get what they asked for.)
   * ``substance`` — is there anything here, or is it atmosphere with no content?
 
-COST: one Gemini Flash call per script (~$0.001). This is a T2 judgment tier on an EXISTING
-artifact — no generation, no re-render. Reuses the persisted ``outputs.script`` and never creates a
-job (test-cost ladder).
+COST: **two** Gemini Flash calls per judged job — ``classify()`` then ``call_judge()``, both from
+``judge_job`` (~$0.001 together). The header said "one" until the #172 cost lens counted them; it
+was stale, not a new cost. This is a T2 judgment tier on an EXISTING artifact — no generation, no
+re-render. Reuses the persisted ``outputs.script`` and never creates a job (test-cost ladder).
+
+``--persona`` swaps the default ``CRITIC_PERSONA`` (1179 chars) for a rendered hero-user brief and
+so grows the judge prompt: measured 2026-09-01 with ``len(load_persona(name))`` over every YAML in
+``hero_users/personas/`` — maya +206 tok, elena +211, marcus +254, aarav +328, priya +342, sofia
++409, nadia +620, i.e. +6% to +18% of one Flash prompt, about +$0.0002 per judged job at list
+price. Omitting the flag is byte-identical to before.
+
+Worth knowing before anyone optimises the input side: ``call_judge`` sets ``maxOutputTokens: 8000``,
+and a response that fills it costs ~$0.020 at output rates — roughly 100x the persona delta. Output
+is the lever here, not the brief.
 
 USAGE
     python3 scripts/story_judge.py <job_id> [<job_id> ...]        # judge persisted scripts
