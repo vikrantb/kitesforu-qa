@@ -298,6 +298,36 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
             "next": _adversary_brief(persona)}
 
 
+#: The surface each persona was written for, read from its own YAML rather than re-listed here.
+#: `load_persona` renders 10 of the 17 declared fields and drops `surface`, so a persona could be
+#: pointed at an artifact it was never designed to judge with nothing to notice — an AUDIO-ONLY
+#: reviewer handed a directory of video frames, for one. The #172 design lens found it; the typo
+#: path raises loudly and this path was silent, which is the same defect one axis over. Rather
+#: than restrict the flag (a general `--persona` is genuinely useful for cross-checking), the
+#: brief now STATES the surface so the reviewer can flag the mismatch itself.
+def _surface_note(persona: str | None) -> str:
+    """One line naming the surface the persona was authored for, or "" when it declares none."""
+    if not persona:
+        return ""
+    import yaml
+
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "hero_users", "personas")
+    try:
+        with open(os.path.join(d, f"{persona}.yaml")) as fh:
+            raw = yaml.safe_load(fh.read()) or {}
+        surface = str(raw.get("surface") or "").strip() if isinstance(raw, dict) else ""
+    except Exception:  # noqa: BLE001 — a brief must never fail to render over a missing field
+        return ""
+    if not surface:
+        return ""
+    return (
+        f"THE SURFACE YOU WERE WRITTEN FOR: {surface}. You are being shown frames from a rendered "
+        f"video. If that is not your surface, say so FIRST and judge only what you can legitimately "
+        f"judge from these frames — do not stretch your lens to cover an artifact it does not fit.\n\n"
+    )
+
+
 def _adversary_brief(persona: str | None) -> str:
     """The instruction the ADVERSARY step is run under.
 
@@ -310,6 +340,15 @@ def _adversary_brief(persona: str | None) -> str:
     the frame system could not meet: `story_judge.py` can run a persona but reads only the SCRIPT
     (its prompt says voice, music and visuals are graded elsewhere), and this gate has the frames
     but no persona. This is the one line that joins them.
+
+    WHY THIS COEXISTS WITH `.claude/workflows/hero-user-verification.js`, which already routes a
+    persona over this gate's frames (#172 design lens). That workflow delegates RENDERING to the
+    agent — it tells the agent to read the YAML itself, so its critic sees all 17 declared keys.
+    This function is the first actual RENDERER, and it exists because `story_judge --persona` needs
+    one and an agent prompt cannot be reused from Python. They are two readers of one config with
+    different field coverage (17 keys vs the 10 `load_persona` renders), which is a split brain and
+    WILL drift. It is written down rather than fixed here because collapsing them means deciding
+    whether the workflow should shell out to this gate — a bigger call than this PR. Filed.
 
     Reuses `story_judge.load_persona` rather than re-rendering the YAML — one owner for what a
     persona brief looks like. A typo RAISES there with the valid names, deliberately: a silent
@@ -325,6 +364,7 @@ def _adversary_brief(persona: str | None) -> str:
 
     return (
         f"{load_persona(persona)}\n\n"
+        f"{_surface_note(persona)}"
         "YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in `frames_dir` — "
         "they are sampled across the FULL duration at fps=1/3, so judge the whole piece and never "
         "one hero frame. Defects first, verdict last. Refute 'ship-ready' by default; a review "
@@ -348,6 +388,16 @@ def main() -> int:
     a = ap.parse_args()
     for k in ("GRPC_VERBOSITY", "GLOG_minloglevel"):
         os.environ.setdefault(k, "NONE" if "GRPC" in k else "3")
+    # Resolve the persona BEFORE `run_gate` pays for the artifact download, ffprobe, the ffmpeg
+    # extraction and the numpy probe. `_adversary_brief` is built in run_gate's return dict, so a
+    # mistyped name used to raise only AFTER all of that: measured by the #172 latency lens at 1.22s
+    # for a 66s local clip, and a 10-minute episode adds the master download plus 5.4s of extraction
+    # before the traceback. The names are long and hyphenated, which is the input that gets
+    # mistyped. Raising here costs one file stat.
+    if a.persona:
+        from story_judge import load_persona
+
+        load_persona(a.persona)
     res = run_gate(a.job_id, a.frames_dir, a.persona or None)
     print(json.dumps(res, indent=2))
     return 0 if res["verdict"] in ("PASS_DETERMINISTIC", "REVIEW") else 1

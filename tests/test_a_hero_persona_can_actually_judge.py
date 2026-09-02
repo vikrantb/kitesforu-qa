@@ -234,3 +234,40 @@ def test_the_typo_path_still_raises_and_still_lists_what_exists() -> None:
     with pytest.raises(FileNotFoundError) as e:
         story_judge.load_persona("nope-not-a-persona")
     assert "nadia-story-listener" in str(e.value), "the error no longer lists available personas"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# ROUTING — #172 design lens F2. Nadia shipped in #171 and NOTHING routed to her: the workflow's
+# ROUTES table had no `episode` key, so a story surface fell through to the sofia/marcus default,
+# while two new `--persona` help strings asserted "Rule 02 routes story->Nadia". Four routing
+# tables said six heroes and a fifth (the CLI help) disagreed with all of them.
+#
+# A persona nothing routes to is "selected is not used" in its purest form. This makes the next one
+# impossible to ship unrouted, in the only table that lives in this repo.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+_README = _PERSONA_DIR.parent / "README.md"
+
+
+@pytest.mark.parametrize("name", _ALL_PERSONAS)
+def test_every_persona_declares_a_surface(name: str) -> None:
+    """`surface` is what routing keys on, and `load_persona` drops it — so nothing else notices."""
+    import yaml
+
+    raw = yaml.safe_load((_PERSONA_DIR / f"{name}.yaml").read_text()) or {}
+    assert str(raw.get("surface") or "").strip(), (
+        f"{name}.yaml declares no `surface` — it cannot be routed to, and the brief cannot warn "
+        f"a reviewer that it is being pointed at the wrong artifact"
+    )
+
+
+@pytest.mark.parametrize("name", _ALL_PERSONAS)
+def test_every_persona_appears_in_the_routing_table(name: str) -> None:
+    """The README routing map is the in-repo table. A persona absent from it is unreachable by the
+    routed path however good the YAML is."""
+    body = _README.read_text()
+    display = name.split("-")[0].capitalize()
+    assert display in body, (
+        f"{name} is not named anywhere in hero_users/README.md — add a routing row, or it ships "
+        f"as a persona nothing routes to (see #171/#172)"
+    )

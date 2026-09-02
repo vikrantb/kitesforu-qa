@@ -9,7 +9,7 @@ finds no fault**. This is the QA-repo home for the personas + rubric; the standi
 Full design: `kitesforu-docs/proposals/hero-user-verification-system-2026-07-15/`.
 
 ## Layers
-1. **Personas** (`personas/*.yaml`) — 6 grounded heroes, each = home_domain × error_class × verdict_question,
+1. **Personas** (`personas/*.yaml`) — 7 grounded heroes, each = home_domain × error_class × verdict_question,
    with anti-sycophancy knobs + a `known_bad_fixture` it MUST reject (rubber-stamp calibration).
 2. **Rubric** (`RUBRIC.md`) — layered: L0 deterministic $0 gates (reuse acceptance_gate) → L1 hard content
    gates (relevance/factual/chart/no-garbled — GATES, not out-votable weights) → L2 8-axis scorecard →
@@ -28,6 +28,7 @@ On ANY user-facing change, the relevant hero(es) auto-verify as an extra assuran
 | Interview-prep (topic/resume)   | **Priya** (job seeker) | Marcus (technical correctness) |
 | Course / Class / corporate      | **Elena** (L&D) | Marcus (technical), Aarav (audio) |
 | Car-Mode / podcast / any audio  | **Aarav** (ESL/audio) | — |
+| Story / drama / narrative episode| **Nadia** (story listener) | Aarav (narration) |
 | Writeup / study material        | **Maya** (AP student) | Priya, Marcus |
 | ANY artifact with numbers/charts| add **Marcus** | — (atomic-claim + chart-arithmetic checker) |
 | ANY narrated artifact           | add **Aarav**  | — (audio-only + end-decay + voice/gender) |
