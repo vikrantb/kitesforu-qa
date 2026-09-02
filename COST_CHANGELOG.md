@@ -2,6 +2,55 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-09-01 — A story persona, a runnable hero critic, and a gate that reads the whole video (cost-NEUTRAL by default, +$0.0002 on an opt-in flag)
+
+**Files:** `scripts/story_judge.py` (`load_persona`, `--persona`), `scripts/acceptance_gate.py`
+(`_sample_indices`, `_adversary_brief`, `--persona`), `hero_users/personas/nadia-story-listener.yaml`
+(new), `tests/test_a_hero_persona_can_actually_judge.py`,
+`tests/test_the_acceptance_gate_spans_the_whole_video.py`. PRs #171 + #172 (stacked).
+
+**Per-unit $ delta: $0.00 on every existing caller; +$0.00006 to +$0.00019 per judged job when
+`--persona` is passed.**
+
+Written because this repo documents cost-neutral changes too — both preceding entries are
+`(cost-NEUTRAL, $0)` — so a near-zero delta is the case these entries exist for, not an exemption.
+The #172 cost lens found this entry missing; it was right.
+
+**The default path is byte-identical.** Verified by comparing `build_prompt(...)` output across all
+6 (family x promise) combinations between the base and head modules — all equal, matching SHA-256
+prefixes — not by reading the comment that claims it.
+
+**No new provider, model or call.** `story_judge.judge_job` makes the same **two** Gemini Flash
+calls it always made (`classify` + `call_judge`); `--persona` changes only the prompt handed to the
+second. `acceptance_gate.py` makes **zero** metered calls before and after — its externals are
+ffprobe, ffmpeg, numpy/PIL and one Firestore read. `DEFAULT_JUDGE_MODEL` remains
+`gemini-2.5-flash`, temperature 0.
+
+**`--persona` prompt growth**, measured with `len(load_persona(name))` over every YAML in
+`hero_users/personas/` against the 1179-char default `CRITIC_PERSONA`:
+
+    maya-student   +206 tok    elena-ld  +211    marcus-technical +254
+    aarav-audio    +328 tok    priya     +342    sofia-creator    +409
+    nadia-story-listener +620 tok   (new in #171; the largest, +18% of one Flash prompt)
+
+At Gemini 2.5 Flash input list price that is ~+$0.0002 per judged job for nadia — under two cents
+per hundred jobs, on an opt-in flag. A hero-user review that is actually routed is worth more than
+that.
+
+**The frame-sampling change is $0 AND frame-count-neutral.** `_sample_indices` feeds
+`_pixel_invariants`, which is local numpy/PIL — not a vision model. Even so the count is unchanged:
+`len(head(n)) == len(base(n))` for all n in 1..240 (2814 frames either way). Head buys 100%
+coverage at identical cost. The intermediate ceiling-stride commit was the only arm that moved the
+number, and it moved it the wrong way — 90 fewer frames read across the range, i.e. "saving" money
+by inspecting less, which is a gate weakening. Abandoned before merge. `_extract_frames` and its
+ffmpeg invocation are untouched.
+
+**Pricing-page implication:** none. This is internal QA tooling.
+
+**Worth knowing for whoever optimises next:** `call_judge` sets `maxOutputTokens: 8000`; a response
+that fills it costs ~$0.020 at output rates, roughly 100x the persona delta added here. Output is
+the lever, not the brief. Measure real completion lengths before touching the input side.
+
 ## 2026-08-06 — Narration-sync instrument: does the picture follow the words? (cost-NEUTRAL, $0)
 
 **Files:** `src/kitesforu_qa/harness/narration_alignment.py` (new),

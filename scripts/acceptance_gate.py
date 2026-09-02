@@ -82,6 +82,38 @@ def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
     return None
 
 
+def _sample_indices(n: int, want: int = 12) -> list[int]:
+    """The frame indices `_pixel_invariants` inspects — EXTRACTED so a test can exercise the real
+    arithmetic instead of restating it.
+
+    That distinction is the reason this function exists. The first test written for this fix
+    recomputed the stride itself, so reverting the source left it green: it tested a copy of the
+    rule, not the rule. Anything that re-derives the logic under test is not testing it.
+
+    THE ORIGINAL DEFECT. Plain `n // want` FLOORS to 1 for any n in 13..23 and `[::1][:12]` then
+    takes the FIRST twelve frames, so a 22-frame video was scored on its first 36 seconds.
+    Measured 2026-09-01 with `(max(f)-min(f)+1)/n` over `_sample_indices`: 18 frames -> 67%,
+    22 -> 55%, 23 -> 52%.
+
+    WHY NOT A CEILING STRIDE. The first fix used `step = max(1, -(-n // want))`, which spans the
+    array but returns `ceil(n/step)` frames — BELOW the 12 it asks for on 55 of the 229 counts in
+    12..240, bottoming out at 7 of 13. The #172 code-critic lens caught it; re-derived here with
+    `len([n for n in range(12,241) if len(_sample_indices(n)) < min(n,12)]) == 55`. That also drags
+    both verdict thresholds down with it, since `max(2, len(samp)//2)` and `max(2, edge//3)` are
+    derived from the sample size — the gate would have become thinner AND more trigger-happy.
+
+    Even spacing wins both axes at once: exactly `min(n, want)` indices, first and last frame
+    always included (`i*(n-1)//(want-1)` lands on `n-1` at `i == want-1`, which a stride misses at
+    n=14,16,18,20,22,...), so coverage is 100% at every n. Verified 2026-09-01 across n in 2..240:
+    never short, never clustered, last index always `n-1`.
+    """
+    if n <= 0:
+        return []
+    if n <= want:
+        return list(range(n))
+    return [i * (n - 1) // (want - 1) for i in range(want)]
+
+
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
     """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
     measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
@@ -121,10 +153,28 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
         return issues
     if not frames:
         return issues
-    step = max(1, len(frames) // 12)
+    # SPAN THE WHOLE VIDEO. `len(frames) // 12` FLOORS to 1 for any count in 13..23, and
+    # `[::1][:12]` then takes the FIRST twelve frames — so a 22-frame video (about 66s at the
+    # fps=1/3 extraction above) was scored on its first 36 seconds and the rest was never looked
+    # at. Measured 2026-09-02::
+    #
+    #     frames  old step  old window   coverage
+    #        18       1       0..11         67%
+    #        22       1       0..11         55%
+    #        23       1       0..11         52%
+    #        24       2       0..22         96%   <- only once the floor reaches 2
+    #
+    # Found by correlating a real job: `0082f988` carries `maps_sequence` at beats 6-7, which
+    # occupy 57.9-66.6s = frames 19..22 — entirely outside the sampled window, so a MAJOR
+    # edge-clip verdict on that job said nothing whatever about its map frames.
+    #
+    # This is the gate `.claude/rules/02-done.md` relies on precisely because it "scores every
+    # frame across the full duration rather than one hero frame". For a whole band of realistic
+    # durations it scored the first half. `-(-n // 12)` is ceiling division, so the stride always
+    # spans the array.
     # Keep the ORIGINAL index alongside the path — it is the only thing that maps a frame back to
     # a timestamp, and therefore to the clip that authored it.
-    samp = list(enumerate(frames))[::step][:12]
+    samp = [(i, frames[i]) for i in _sample_indices(len(frames))]
     letterbox = edge_clip = 0
     edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
     edge_skipped_photo = 0
@@ -197,7 +247,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     return issues
 
 
-def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
+def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
     d = _fetch_job(job_id)
     topic = d.get("topic") or d.get("title") or ""
     vis = d.get("visual") or {}
@@ -244,19 +294,111 @@ def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
-            "next": "Run the ADVERSARY: a fresh vision agent Reads every frame in frames_dir, told to "
-                    "REFUTE 'ship-ready' vs the spec (on-topic? text cut? coherent?). Verdict is final "
-                    "only after that + the receipt in .claude/acceptance/."}
+            "persona": persona or None,
+            "next": _adversary_brief(persona)}
+
+
+#: The surface each persona was written for, read from its own YAML rather than re-listed here.
+#: `load_persona` renders 10 of the 17 declared fields and drops `surface`, so a persona could be
+#: pointed at an artifact it was never designed to judge with nothing to notice — an AUDIO-ONLY
+#: reviewer handed a directory of video frames, for one. The #172 design lens found it; the typo
+#: path raises loudly and this path was silent, which is the same defect one axis over. Rather
+#: than restrict the flag (a general `--persona` is genuinely useful for cross-checking), the
+#: brief now STATES the surface so the reviewer can flag the mismatch itself.
+def _surface_note(persona: str | None) -> str:
+    """One line naming the surface the persona was authored for, or "" when it declares none."""
+    if not persona:
+        return ""
+    import yaml
+
+    d = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "hero_users", "personas")
+    try:
+        with open(os.path.join(d, f"{persona}.yaml")) as fh:
+            raw = yaml.safe_load(fh.read()) or {}
+        surface = str(raw.get("surface") or "").strip() if isinstance(raw, dict) else ""
+    except Exception:  # noqa: BLE001 — a brief must never fail to render over a missing field
+        return ""
+    if not surface:
+        return ""
+    return (
+        f"THE SURFACE YOU WERE WRITTEN FOR: {surface}. You are being shown frames from a rendered "
+        f"video. If that is not your surface, say so FIRST and judge only what you can legitimately "
+        f"judge from these frames — do not stretch your lens to cover an artifact it does not fit.\n\n"
+    )
+
+
+def _adversary_brief(persona: str | None) -> str:
+    """The instruction the ADVERSARY step is run under.
+
+    Default: the generic refute-ship-ready brief this gate has always emitted — byte-identical
+    when `--persona` is omitted.
+
+    With a persona: the routed HERO USER's own brief, loaded from `hero_users/personas/`. Rule 02
+    routes a story to Nadia, a social short to Sofia, any audio to Aarav — and until now there was
+    no way to say so. The gate emitted frames and a generic instruction, so the persona system and
+    the frame system could not meet: `story_judge.py` can run a persona but reads only the SCRIPT
+    (its prompt says voice, music and visuals are graded elsewhere), and this gate has the frames
+    but no persona. This is the one line that joins them.
+
+    WHY THIS COEXISTS WITH `.claude/workflows/hero-user-verification.js`, which already routes a
+    persona over this gate's frames (#172 design lens). That workflow delegates RENDERING to the
+    agent — it tells the agent to read the YAML itself, so its critic sees all 17 declared keys.
+    This function is the first actual RENDERER, and it exists because `story_judge --persona` needs
+    one and an agent prompt cannot be reused from Python. They are two readers of one config with
+    different field coverage (17 keys vs the 10 `load_persona` renders), which is a split brain and
+    WILL drift. It is written down rather than fixed here because collapsing them means deciding
+    whether the workflow should shell out to this gate — a bigger call than this PR. Filed.
+
+    Reuses `story_judge.load_persona` rather than re-rendering the YAML — one owner for what a
+    persona brief looks like. A typo RAISES there with the valid names, deliberately: a silent
+    fallback would produce a confident verdict from the wrong reviewer.
+    """
+    base = ("Run the ADVERSARY: a fresh vision agent Reads every frame in frames_dir, told to "
+            "REFUTE 'ship-ready' vs the spec (on-topic? text cut? coherent?). Verdict is final "
+            "only after that + the receipt in .claude/acceptance/.")
+    if not persona:
+        return base
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from story_judge import load_persona
+
+    return (
+        f"{load_persona(persona)}\n\n"
+        f"{_surface_note(persona)}"
+        "YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in `frames_dir` — "
+        "they are sampled across the FULL duration at fps=1/3, so judge the whole piece and never "
+        "one hero frame. Defects first, verdict last. Refute 'ship-ready' by default; a review "
+        "that agrees to be agreeable is a failed review. Name the exact frame and the exact thing "
+        "that is wrong with it.\n\n"
+        f"{base}"
+    )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--job-id", required=True)
     ap.add_argument("--frames-dir", default=None)
+    ap.add_argument(
+        "--persona", default="",
+        help=("Review as a HERO USER from hero_users/personas/ (nadia-story-listener, "
+              "sofia-creator, aarav-audio, elena-ld, maya-student, marcus-technical, "
+              "priya-jobseeker). Rule 02 routes story->Nadia, social-short->Sofia, audio->Aarav. "
+              "Omitted = the generic adversary brief, byte-identical."),
+    )
     a = ap.parse_args()
     for k in ("GRPC_VERBOSITY", "GLOG_minloglevel"):
         os.environ.setdefault(k, "NONE" if "GRPC" in k else "3")
-    res = run_gate(a.job_id, a.frames_dir)
+    # Resolve the persona BEFORE `run_gate` pays for the artifact download, ffprobe, the ffmpeg
+    # extraction and the numpy probe. `_adversary_brief` is built in run_gate's return dict, so a
+    # mistyped name used to raise only AFTER all of that: measured by the #172 latency lens at 1.22s
+    # for a 66s local clip, and a 10-minute episode adds the master download plus 5.4s of extraction
+    # before the traceback. The names are long and hyphenated, which is the input that gets
+    # mistyped. Raising here costs one file stat.
+    if a.persona:
+        from story_judge import load_persona
+
+        load_persona(a.persona)
+    res = run_gate(a.job_id, a.frames_dir, a.persona or None)
     print(json.dumps(res, indent=2))
     return 0 if res["verdict"] in ("PASS_DETERMINISTIC", "REVIEW") else 1
 
