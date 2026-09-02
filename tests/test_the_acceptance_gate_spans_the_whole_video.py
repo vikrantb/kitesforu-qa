@@ -74,3 +74,52 @@ def test_the_band_that_was_broken_is_the_one_that_regressed(n: int):
 # source test was both redundant AND wrong (it inspected the function the code had left). Two
 # review lanes flagged the same shape on a sibling PR the same day — a source-text assertion pins
 # the SPELLING, not the behaviour, and goes red on the legitimate refactor it exists to protect.
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# THE HOLE THE #172 CODE-CRITIC LENS FOUND, and the reason it mattered.
+#
+# Every test above reads only `w[-1]` — how FAR the sample reaches. None reads how MANY frames it
+# returns or whether they are spread. The reviewer proved it by mutating `_sample_indices` to
+# `return sorted({0, n - 1})`: two frames for a 240-frame video, and all 14 tests stayed green.
+# That is the very defect this file exists to catch — a gate that LOOKS like it observed the video
+# and did not — reintroduced one axis over.
+#
+# It is not hypothetical: it is exactly what the first fix did. A ceiling stride reaches the end of
+# the array but thins the sample to 7 frames of 13, and because both verdict thresholds derive from
+# `len(samp)`, a thinner sample also makes the gate more trigger-happy. Coverage alone cannot see
+# that. These two assert the axis the coverage tests are blind to.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+_WANT = 12
+
+
+@pytest.mark.parametrize("n", list(range(1, 65)) + [80, 120, 199, 240])
+def test_the_sample_never_declines_the_budget_it_asks_for(n: int):
+    """A sample thinner than `want` is a gate inspecting less than it claims — and it drags
+    `max(2, len(samp) // 2)` and `max(2, edge_checked // 3)` down with it. Goes red on the ceiling
+    stride at n=13 (7 frames) and on any degenerate `{0, n-1}` sampler."""
+    from acceptance_gate import _sample_indices
+
+    w = _sample_indices(n, _WANT)
+    assert len(w) == min(n, _WANT), (
+        f"{n} frames -> only {len(w)} inspected of a {_WANT}-frame budget"
+    )
+
+
+@pytest.mark.parametrize("n", list(range(2, 65)) + [80, 120, 199, 240])
+def test_the_sample_is_spread_and_not_clustered(n: int):
+    """Reaching the last frame is not the same as covering the middle. `[0, n-1]` scores 100% on
+    every coverage test above while inspecting two frames; this fails it. The largest permitted gap
+    is one full stride — anything wider means a run of the video no frame represents."""
+    from acceptance_gate import _sample_indices
+
+    w = _sample_indices(n, _WANT)
+    assert w == sorted(set(w)), f"{n} frames -> sample is not strictly increasing: {w}"
+    # Even spacing across n-1 gaps in want-1 hops, so the widest step is ceil((n-1)/(want-1)) —
+    # NOT ceil(n/want), which is the STRIDE's bound and is too tight here (n=240 gives 22, not 21).
+    allowed = 1 if n <= _WANT else -(-(n - 1) // (_WANT - 1))
+    widest = max(b - a for a, b in zip(w, w[1:]))
+    assert widest <= allowed, (
+        f"{n} frames -> widest gap {widest} > {allowed} between inspected frames; clustered"
+    )

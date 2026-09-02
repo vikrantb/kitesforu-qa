@@ -90,14 +90,28 @@ def _sample_indices(n: int, want: int = 12) -> list[int]:
     recomputed the stride itself, so reverting the source left it green: it tested a copy of the
     rule, not the rule. Anything that re-derives the logic under test is not testing it.
 
-    `-(-n // want)` is ceiling division. Plain `n // want` FLOORS to 1 for any n in 13..23 and
-    `[::1][:12]` then takes the FIRST twelve frames, so a 22-frame video was scored on its first
-    36 seconds. Measured 2026-09-02: 18 frames -> 67%, 22 -> 55%, 23 -> 52%.
+    THE ORIGINAL DEFECT. Plain `n // want` FLOORS to 1 for any n in 13..23 and `[::1][:12]` then
+    takes the FIRST twelve frames, so a 22-frame video was scored on its first 36 seconds.
+    Measured 2026-09-01 with `(max(f)-min(f)+1)/n` over `_sample_indices`: 18 frames -> 67%,
+    22 -> 55%, 23 -> 52%.
+
+    WHY NOT A CEILING STRIDE. The first fix used `step = max(1, -(-n // want))`, which spans the
+    array but returns `ceil(n/step)` frames — BELOW the 12 it asks for on 55 of the 229 counts in
+    12..240, bottoming out at 7 of 13. The #172 code-critic lens caught it; re-derived here with
+    `len([n for n in range(12,241) if len(_sample_indices(n)) < min(n,12)]) == 55`. That also drags
+    both verdict thresholds down with it, since `max(2, len(samp)//2)` and `max(2, edge//3)` are
+    derived from the sample size — the gate would have become thinner AND more trigger-happy.
+
+    Even spacing wins both axes at once: exactly `min(n, want)` indices, first and last frame
+    always included (`i*(n-1)//(want-1)` lands on `n-1` at `i == want-1`, which a stride misses at
+    n=14,16,18,20,22,...), so coverage is 100% at every n. Verified 2026-09-01 across n in 2..240:
+    never short, never clustered, last index always `n-1`.
     """
     if n <= 0:
         return []
-    step = max(1, -(-n // want))
-    return list(range(n))[::step][:want]
+    if n <= want:
+        return list(range(n))
+    return [i * (n - 1) // (want - 1) for i in range(want)]
 
 
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
