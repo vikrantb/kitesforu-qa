@@ -92,3 +92,44 @@ def test_a_typo_RAISES_instead_of_silently_using_the_default():
     with pytest.raises(FileNotFoundError) as e:
         story_judge.load_persona("no-such-persona")
     assert "available:" in str(e.value), "the error must name the valid personas"
+
+
+class TestTheGateCanRunAPersonaOnTheDELIVEREDVIDEO:
+    """The other half of the founder's ask — the one `story_judge` structurally cannot answer.
+
+    `story_judge` scores the WRITING; its own prompt says voice, music and visuals are graded
+    elsewhere. So it cannot answer "what are the slides based animations doing here". The frames
+    live in `acceptance_gate.py`, which extracts them at fps=1/3 across the FULL duration and emits
+    a manifest — but its ADVERSARY instruction was generic, with no way to say which hero user is
+    reviewing. The persona system and the frame system could not meet.
+
+    `--persona` joins them, reusing `story_judge.load_persona` so there is ONE owner of what a
+    persona brief looks like.
+    """
+
+    def _brief(self, persona=None):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import acceptance_gate
+
+        return acceptance_gate._adversary_brief(persona)
+
+    def test_omitting_the_persona_is_byte_identical(self):
+        b = self._brief()
+        assert b.startswith("Run the ADVERSARY:")
+        assert "Nadia" not in b
+
+    def test_a_persona_brief_carries_the_reviewer_AND_the_frame_instruction(self):
+        b = self._brief("nadia-story-listener")
+        assert "Nadia" in b, "the persona did not reach the brief"
+        assert "1am" in b, "her own verdict question is missing"
+        # The half that makes it about the DELIVERED VIDEO rather than a script.
+        assert "EVERY frame" in b and "never" in b and "one hero frame" in b, (
+            "the brief does not tell the reviewer to judge the whole duration"
+        )
+        assert b.endswith(self._brief()), "the generic adversary brief was dropped, not extended"
+
+    def test_a_typo_RAISES_here_too(self):
+        """Same contract as story_judge: a silent fallback would produce a confident verdict from
+        the wrong reviewer, on frames."""
+        with pytest.raises(FileNotFoundError):
+            self._brief("nadia-storey-listener")

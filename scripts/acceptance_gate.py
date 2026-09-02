@@ -197,7 +197,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     return issues
 
 
-def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
+def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
     d = _fetch_job(job_id)
     topic = d.get("topic") or d.get("title") or ""
     vis = d.get("visual") or {}
@@ -244,19 +244,61 @@ def run_gate(job_id: str, frames_dir: str | None = None) -> dict[str, Any]:
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
-            "next": "Run the ADVERSARY: a fresh vision agent Reads every frame in frames_dir, told to "
-                    "REFUTE 'ship-ready' vs the spec (on-topic? text cut? coherent?). Verdict is final "
-                    "only after that + the receipt in .claude/acceptance/."}
+            "persona": persona or None,
+            "next": _adversary_brief(persona)}
+
+
+def _adversary_brief(persona: str | None) -> str:
+    """The instruction the ADVERSARY step is run under.
+
+    Default: the generic refute-ship-ready brief this gate has always emitted — byte-identical
+    when `--persona` is omitted.
+
+    With a persona: the routed HERO USER's own brief, loaded from `hero_users/personas/`. Rule 02
+    routes a story to Nadia, a social short to Sofia, any audio to Aarav — and until now there was
+    no way to say so. The gate emitted frames and a generic instruction, so the persona system and
+    the frame system could not meet: `story_judge.py` can run a persona but reads only the SCRIPT
+    (its prompt says voice, music and visuals are graded elsewhere), and this gate has the frames
+    but no persona. This is the one line that joins them.
+
+    Reuses `story_judge.load_persona` rather than re-rendering the YAML — one owner for what a
+    persona brief looks like. A typo RAISES there with the valid names, deliberately: a silent
+    fallback would produce a confident verdict from the wrong reviewer.
+    """
+    base = ("Run the ADVERSARY: a fresh vision agent Reads every frame in frames_dir, told to "
+            "REFUTE 'ship-ready' vs the spec (on-topic? text cut? coherent?). Verdict is final "
+            "only after that + the receipt in .claude/acceptance/.")
+    if not persona:
+        return base
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from story_judge import load_persona
+
+    return (
+        f"{load_persona(persona)}\n\n"
+        "YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in `frames_dir` — "
+        "they are sampled across the FULL duration at fps=1/3, so judge the whole piece and never "
+        "one hero frame. Defects first, verdict last. Refute 'ship-ready' by default; a review "
+        "that agrees to be agreeable is a failed review. Name the exact frame and the exact thing "
+        "that is wrong with it.\n\n"
+        f"{base}"
+    )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--job-id", required=True)
     ap.add_argument("--frames-dir", default=None)
+    ap.add_argument(
+        "--persona", default="",
+        help=("Review as a HERO USER from hero_users/personas/ (nadia-story-listener, "
+              "sofia-creator, aarav-audio, elena-ld, maya-student, marcus-technical, "
+              "priya-jobseeker). Rule 02 routes story->Nadia, social-short->Sofia, audio->Aarav. "
+              "Omitted = the generic adversary brief, byte-identical."),
+    )
     a = ap.parse_args()
     for k in ("GRPC_VERBOSITY", "GLOG_minloglevel"):
         os.environ.setdefault(k, "NONE" if "GRPC" in k else "3")
-    res = run_gate(a.job_id, a.frames_dir)
+    res = run_gate(a.job_id, a.frames_dir, a.persona or None)
     print(json.dumps(res, indent=2))
     return 0 if res["verdict"] in ("PASS_DETERMINISTIC", "REVIEW") else 1
 
