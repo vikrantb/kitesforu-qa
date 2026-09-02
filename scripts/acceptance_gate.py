@@ -82,6 +82,24 @@ def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
     return None
 
 
+def _sample_indices(n: int, want: int = 12) -> list[int]:
+    """The frame indices `_pixel_invariants` inspects — EXTRACTED so a test can exercise the real
+    arithmetic instead of restating it.
+
+    That distinction is the reason this function exists. The first test written for this fix
+    recomputed the stride itself, so reverting the source left it green: it tested a copy of the
+    rule, not the rule. Anything that re-derives the logic under test is not testing it.
+
+    `-(-n // want)` is ceiling division. Plain `n // want` FLOORS to 1 for any n in 13..23 and
+    `[::1][:12]` then takes the FIRST twelve frames, so a 22-frame video was scored on its first
+    36 seconds. Measured 2026-09-02: 18 frames -> 67%, 22 -> 55%, 23 -> 52%.
+    """
+    if n <= 0:
+        return []
+    step = max(1, -(-n // want))
+    return list(range(n))[::step][:want]
+
+
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
     """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
     measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
@@ -121,10 +139,28 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
         return issues
     if not frames:
         return issues
-    step = max(1, len(frames) // 12)
+    # SPAN THE WHOLE VIDEO. `len(frames) // 12` FLOORS to 1 for any count in 13..23, and
+    # `[::1][:12]` then takes the FIRST twelve frames — so a 22-frame video (about 66s at the
+    # fps=1/3 extraction above) was scored on its first 36 seconds and the rest was never looked
+    # at. Measured 2026-09-02::
+    #
+    #     frames  old step  old window   coverage
+    #        18       1       0..11         67%
+    #        22       1       0..11         55%
+    #        23       1       0..11         52%
+    #        24       2       0..22         96%   <- only once the floor reaches 2
+    #
+    # Found by correlating a real job: `0082f988` carries `maps_sequence` at beats 6-7, which
+    # occupy 57.9-66.6s = frames 19..22 — entirely outside the sampled window, so a MAJOR
+    # edge-clip verdict on that job said nothing whatever about its map frames.
+    #
+    # This is the gate `.claude/rules/02-done.md` relies on precisely because it "scores every
+    # frame across the full duration rather than one hero frame". For a whole band of realistic
+    # durations it scored the first half. `-(-n // 12)` is ceiling division, so the stride always
+    # spans the array.
     # Keep the ORIGINAL index alongside the path — it is the only thing that maps a frame back to
     # a timestamp, and therefore to the clip that authored it.
-    samp = list(enumerate(frames))[::step][:12]
+    samp = [(i, frames[i]) for i in _sample_indices(len(frames))]
     letterbox = edge_clip = 0
     edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
     edge_skipped_photo = 0
