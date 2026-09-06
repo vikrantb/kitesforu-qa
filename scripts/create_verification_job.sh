@@ -21,17 +21,21 @@ ACK_FILE="/Users/vikrantbhosale/gitprojects/kitesforu/.claude/FOUNDER_SPEND_ACK"
 TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
-# NO DEFAULT STYLE (2026-09-06). This defaulted to "Explainer" on EVERY job, and that word is not
-# inert: it flows into the discovery service as `content_domain`, aliases to EDUCATIONAL, and —
-# because an explicit domain wins by design — DISCARDS the classifier's own genre. Measured on job
-# `e9466de1` ("The lighthouse keeper who answered a knock at midnight", --tier high): the
-# classifier chose `mystery`, this default overwrote it to `educational`, the architect planned a
-# segment_plan, content_gating called the story non-fiction, and the Veo hero-video entitlement
-# planned ZERO beats — the harness silently defeated the very premium behaviour a T4 exists to
-# observe. The script header already warns "the defaults can quietly defeat the thing you meant to
-# test"; this was that, upstream of every assertion. Pass --style ONLY when the style IS the thing
-# under test. API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed).
-STYLE=""
+# STYLE IS CONTRACT-REQUIRED — the api's CreateJobRequest has no default (round-2 critic on
+# PR #173 proved an omitted key 422s: openapi.json required = ['topic','duration_min','style']),
+# so every client manufactures one and this script must too.
+#
+# ⚠️ BUT A STYLE IS NOT INERT. It flows into context discovery as `content_domain`. Before
+# schemas 2.81.0 an "Explainer" default silently DISCARDED the classifier's own genre — job
+# `e9466de1` (2026-09-06): a $1.56 --tier high T4 asked for a mystery story, this default flipped
+# it to educational, the architect planned a segment_plan, and the Veo entitlement planned ZERO
+# beats — the harness defeated the very premium behaviour the spend was buying. 2.81.0's
+# UMBRELLA_ALIAS_KEYS now makes mode words ("explainer"/"storytelling") YIELD to a specific
+# classifier genre, so the default below is defused for that failure — but representativeness is
+# still yours to choose: **pass --style matching the topic on any T4 whose routing you are
+# testing** ("Storytelling" for fiction, etc.). The defaults can quietly defeat the thing you
+# meant to test; this one did.
+STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
 LANGUAGE="en-US"    # --language <bcp47>: the SPOKEN language. Was hardcoded to en-US in the body,
                     # so this script — the tool everyone verifies with — could not create a
                     # non-English job AT ALL. Measured 2026-08-15 on the full podcast_jobs
@@ -132,9 +136,7 @@ topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, lang
 body = {
     "topic": topic,
     "duration_min": float(duration),
-    # style is OMITTED unless explicitly requested — an empty string is still a value to the API,
-    # and a manufactured style becomes a content_domain that overrides the classifier's genre.
-    **({"style": style} if style else {}),
+    "style": style,
     "quality_tier": tier,
     "economy_mode": tier == "low",
 
