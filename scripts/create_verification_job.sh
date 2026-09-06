@@ -119,10 +119,12 @@ fi
 case "$TIER" in
   low)    EST="~\$0.025" ;;
   medium) EST="~\$0.15"  ;;
-  high)   EST="~\$1.0-1.3" ;;
+  # high: two bands — story topics measured \$1.56-1.76 (n=2, 2026-09-06: e9466de1, df3de5bb).
+  # Derivation + provenance: COST_CHANGELOG.md 2026-09-06 entry. Genre hazard: STYLE block above.
+  high)   EST="~\$1.0-1.3 (non-story topic) / ~\$1.55-2.25 (story topic)" ;;
   *)      EST="unknown" ;;
 esac
-[[ "$VISUALS" == "true" ]] && EST="$EST + visuals (~\$0.10-0.50)"
+[[ "$VISUALS" == "true" ]] && EST="$EST + visuals (~\$0.10-0.50; a story band already counts veo — don't double-book)"
 
 # ---- Auth --------------------------------------------------------------------------
 if [[ -z "${TEST_API_KEY:-}" ]]; then
