@@ -21,7 +21,17 @@ ACK_FILE="/Users/vikrantbhosale/gitprojects/kitesforu/.claude/FOUNDER_SPEND_ACK"
 TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
-STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
+# NO DEFAULT STYLE (2026-09-06). This defaulted to "Explainer" on EVERY job, and that word is not
+# inert: it flows into the discovery service as `content_domain`, aliases to EDUCATIONAL, and —
+# because an explicit domain wins by design — DISCARDS the classifier's own genre. Measured on job
+# `e9466de1` ("The lighthouse keeper who answered a knock at midnight", --tier high): the
+# classifier chose `mystery`, this default overwrote it to `educational`, the architect planned a
+# segment_plan, content_gating called the story non-fiction, and the Veo hero-video entitlement
+# planned ZERO beats — the harness silently defeated the very premium behaviour a T4 exists to
+# observe. The script header already warns "the defaults can quietly defeat the thing you meant to
+# test"; this was that, upstream of every assertion. Pass --style ONLY when the style IS the thing
+# under test. API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed).
+STYLE=""
 LANGUAGE="en-US"    # --language <bcp47>: the SPOKEN language. Was hardcoded to en-US in the body,
                     # so this script — the tool everyone verifies with — could not create a
                     # non-English job AT ALL. Measured 2026-08-15 on the full podcast_jobs
@@ -122,7 +132,9 @@ topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, lang
 body = {
     "topic": topic,
     "duration_min": float(duration),
-    "style": style,
+    # style is OMITTED unless explicitly requested — an empty string is still a value to the API,
+    # and a manufactured style becomes a content_domain that overrides the classifier's genre.
+    **({"style": style} if style else {}),
     "quality_tier": tier,
     "economy_mode": tier == "low",
 
