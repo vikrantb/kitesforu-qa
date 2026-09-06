@@ -2,15 +2,34 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
-## 2026-09-06 — create_verification_job.sh: the style default is documented as a live hazard (#173)
+## 2026-09-06 — the T4 estimate print learns the story-topic price; #173's owed record lands ($0 per-unit; operator-facing EST only)
 
-**$0 per-unit delta.** The merged #173 is docs-only after its round: the payload is byte-identical
-(style stays contract-required; the omission draft 422'd and was reverted). What changed is the
-RECORD at the site of the default: how a manufactured `style=Explainer` voided a $1.56 T4
-(`e9466de1` bought a segment_plan of nothing), that schemas 2.81.0's `UMBRELLA_ALIAS_KEYS`
-defuses the genre discard, and the instruction to pass `--style` matching the topic on routing
-T4s. This entry exists because the #173 cost lens found it missing — the same way the 2026-09-01
-entry records the #172 lens finding ITS absence. The round is this repo's only cost gate.
+**Files:** `scripts/create_verification_job.sh` (EST case arm + comments), `COST_CHANGELOG.md`
+(this entry).
+
+**$0 per-unit delta** — nothing here changes what a job costs; it changes what the OPERATOR is
+told before spending, and the spend ledger consumes the printed string verbatim. Two things:
+
+1. **#173's owed record.** The merged #173 is docs-only after its round: the payload is
+   byte-identical (style stays contract-required; the omission draft 422'd and was reverted).
+   The record at the site of the default: a manufactured `style=Explainer` voided a $1.56 T4
+   (`e9466de1` bought a segment_plan of nothing); schemas 2.81.0's `UMBRELLA_ALIAS_KEYS` defuses
+   the genre discard; pass `--style` matching the topic on routing T4s. This entry exists because
+   the #173 cost lens found it missing — the round is this repo's only cost gate.
+2. **The high-tier EST reprice.** Old print `~$1.0-1.3` understated exactly the runs this script
+   exists to price. New print: `~$1.0-1.3 (non-story topic) / ~$1.55-2.25 (story topic)`.
+   Derivation: base $1.0-1.3 (cost-reference; unverified against a measured informational high
+   T4 — `e9466de1` presented informational and still logged $1.56, confounded by its story
+   routing) + fiction architect tournament +$0.10-0.35 (measured $0.17/candidate; the BoN=4
+   budget row is ultra-scoped, so the top of the range may not apply at high) + hero clips:
+   1 × ≤$0.20 on the entitlement budget, up to 1-3 × ~$0.20 on the upfront-charged
+   `motion_clips` path. **The floor is anchored to measurement, not arithmetic**: both
+   story-topic T4s of 2026-09-06 logged $1.56 base / $1.76 with a hero clip (`e9466de1`,
+   `df3de5bb`) — a $1.4 floor would under-book the ledger ~$0.16/job. Ceiling $2.25 is the
+   arithmetic top.
+
+**Pricing-page implication: none.** Operator-facing estimate in a QA script; user prices
+unchanged.
 
 ## 2026-09-01 — A story persona, a runnable hero critic, and a gate that reads the whole video (cost-NEUTRAL by default, +$0.0002 on an opt-in flag)
 
