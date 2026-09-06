@@ -21,6 +21,20 @@ ACK_FILE="/Users/vikrantbhosale/gitprojects/kitesforu/.claude/FOUNDER_SPEND_ACK"
 TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
 TIER="low"
+# STYLE IS CONTRACT-REQUIRED — the api's CreateJobRequest has no default (round-2 critic on
+# PR #173 proved an omitted key 422s: openapi.json required = ['topic','duration_min','style']),
+# so every client manufactures one and this script must too.
+#
+# ⚠️ BUT A STYLE IS NOT INERT. It flows into context discovery as `content_domain`. Before
+# schemas 2.81.0 an "Explainer" default silently DISCARDED the classifier's own genre — job
+# `e9466de1` (2026-09-06): a $1.56 --tier high T4 asked for a mystery story, this default flipped
+# it to educational, the architect planned a segment_plan, and the Veo entitlement planned ZERO
+# beats — the harness defeated the very premium behaviour the spend was buying. 2.81.0's
+# UMBRELLA_ALIAS_KEYS now makes mode words ("explainer"/"storytelling") YIELD to a specific
+# classifier genre, so the default below is defused for that failure — but representativeness is
+# still yours to choose: **pass --style matching the topic on any T4 whose routing you are
+# testing** ("Storytelling" for fiction, etc.). The defaults can quietly defeat the thing you
+# meant to test; this one did.
 STYLE="Explainer"   # API style enum: Explainer|Storytelling|Interview|... ("conversation" was removed)
 LANGUAGE="en-US"    # --language <bcp47>: the SPOKEN language. Was hardcoded to en-US in the body,
                     # so this script — the tool everyone verifies with — could not create a
