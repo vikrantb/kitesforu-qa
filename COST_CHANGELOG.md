@@ -2,6 +2,16 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-09-06 — create_verification_job.sh: the style default is documented as a live hazard (#173)
+
+**$0 per-unit delta.** The merged #173 is docs-only after its round: the payload is byte-identical
+(style stays contract-required; the omission draft 422'd and was reverted). What changed is the
+RECORD at the site of the default: how a manufactured `style=Explainer` voided a $1.56 T4
+(`e9466de1` bought a segment_plan of nothing), that schemas 2.81.0's `UMBRELLA_ALIAS_KEYS`
+defuses the genre discard, and the instruction to pass `--style` matching the topic on routing
+T4s. This entry exists because the #173 cost lens found it missing — the same way the 2026-09-01
+entry records the #172 lens finding ITS absence. The round is this repo's only cost gate.
+
 ## 2026-09-01 — A story persona, a runnable hero critic, and a gate that reads the whole video (cost-NEUTRAL by default, +$0.0002 on an opt-in flag)
 
 **Files:** `scripts/story_judge.py` (`load_persona`, `--persona`), `scripts/acceptance_gate.py`

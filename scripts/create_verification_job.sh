@@ -119,7 +119,11 @@ fi
 case "$TIER" in
   low)    EST="~\$0.025" ;;
   medium) EST="~\$0.15"  ;;
-  high)   EST="~\$1.0-1.3" ;;
+  # high on a STORY topic adds the fiction architect tournament (+$0.10-0.35, BoN=4) and, when
+  # the veo entitlement plans beats, 1-3 x ~$0.20 hero clips — the #173 cost lens measured the
+  # old line understating exactly the runs this script exists to price, and the spend ledger
+  # consumes this printed estimate (measured 2026-09-06).
+  high)   EST="~\$1.0-1.3 (informational) / ~\$1.4-2.25 (story topic: +tournament, +veo when entitled)" ;;
   *)      EST="unknown" ;;
 esac
 [[ "$VISUALS" == "true" ]] && EST="$EST + visuals (~\$0.10-0.50)"
