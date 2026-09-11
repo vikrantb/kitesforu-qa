@@ -9,6 +9,8 @@
 #   ./create_verification_job.sh --topic "b-trees" --wait # + poll until done
 #   ./create_verification_job.sh --tier medium --visuals  # T4 — needs FOUNDER_SPEND_ACK
 #   ./create_verification_job.sh --short --duration 1.0 --wait  # born-short (9:16), 60s
+#   ./create_verification_job.sh --tier high --duration 2.0 --motion-clips 3  # T4 paid video — needs ACK
+#   ./create_verification_job.sh ... --dry-run            # print the exact request; no auth, no POST, $0
 #     — verifies the short-form craft (wpm band, caption dwell); duration>0.5 ⇒ needs ACK
 #
 # Auth: TEST_API_KEY env var, or fetched from Secret Manager (kitesforu-dev).
@@ -53,6 +55,11 @@ ON_BEHALF_OF=""
 ON_BEHALF_OF_EMAIL=""   # --on-behalf-of-email: the ADDRESS (the api reads it from its own header)
 SHORT="false"       # born-short: short_video=true → 9:16, single-voice, intro/outro suppressed
 CONTENT_RATING=""   # optional maturity dial: g|pg|pg_13|r (exercises ENABLE_CONTENT_MATURITY end-to-end)
+MOTION_CLIPS="0"    # --motion-clips N (0-3): PURCHASED paid video clips, sent as visual_options.motion_clips.
+                    # The ONLY way to exercise the purchased-motion arm (`paid_opt_in` in veo_hero), where
+                    # the clip ranking, the figure rule and first_heroes all act. Before this flag no
+                    # verification job could reach it (2026-09-11, workers #3116).
+DRY_RUN="false"     # --dry-run: print the POST URL and body, then exit 0 before auth or any request.
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -82,6 +89,8 @@ while [[ $# -gt 0 ]]; do
                     # the blueprint simply did not exist at decision time.
                     # ⇒ pair it with --duration (>0.5 needs the FOUNDER_SPEND_ACK file).
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
+    --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
+    --dry-run)  DRY_RUN="true"; shift ;;
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
@@ -94,14 +103,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ---- Motion clips: validate, and never let the $0 default opt the job OUT of visuals --------
+[[ "$MOTION_CLIPS" =~ ^[0-3]$ ]] || { echo "--motion-clips must be 0-3 (the API's VisualOptions bound), got: $MOTION_CLIPS" >&2; exit 1; }
+if [[ "$MOTION_CLIPS" != "0" && "$VISUALS" == "false" ]]; then
+  # The default sends visuals_opt_out=true, which would cancel the clips the job just bought.
+  # Send neither key instead; the api turns motion_clips>0 into wants_visuals itself.
+  VISUALS="auto"
+  echo "  note: --motion-clips implies --visuals-auto (the default would opt the job out of visuals)" >&2
+fi
+
 # ---- Ladder gate: anything beyond T3 needs a fresh founder ack -------------------
 needs_ack="false"
 reason=""
 [[ "$TIER" != "low" ]] && { needs_ack="true"; reason+="tier=$TIER "; }
 [[ "$VISUALS" == "true" ]] && { needs_ack="true"; reason+="visuals=on "; }
 awk "BEGIN{exit !($DURATION > 0.5)}" && { needs_ack="true"; reason+="duration=${DURATION}min "; }
+[[ "$MOTION_CLIPS" != "0" ]] && { needs_ack="true"; reason+="motion_clips=$MOTION_CLIPS "; }
 
-if [[ "$needs_ack" == "true" ]]; then
+if [[ "$needs_ack" == "true" && "$DRY_RUN" == "true" ]]; then
+  echo "  dry-run: a real run would need the ACK ($reason)" >&2
+elif [[ "$needs_ack" == "true" ]]; then
   fresh="false"
   if [[ -f "$ACK_FILE" ]]; then
     age=$(( $(date +%s) - $(stat -f %m "$ACK_FILE" 2>/dev/null || stat -c %Y "$ACK_FILE") ))
@@ -125,16 +146,18 @@ case "$TIER" in
   *)      EST="unknown" ;;
 esac
 [[ "$VISUALS" == "true" ]] && EST="$EST + visuals (~\$0.10-0.50; a story band already counts veo — don't double-book)"
+# Purchased arm: per-clip cap \$0.65 (\$0.65/6s); the live rows price \$0.30-0.36 a clip (workers COST_CHANGELOG 2026-09-10).
+[[ "$MOTION_CLIPS" != "0" ]] && EST="$EST + $MOTION_CLIPS paid video clip(s) (~\$0.30-0.36 each, cap \$0.65)"
 
 # ---- Auth --------------------------------------------------------------------------
-if [[ -z "${TEST_API_KEY:-}" ]]; then
+if [[ "$DRY_RUN" != "true" && -z "${TEST_API_KEY:-}" ]]; then
   TEST_API_KEY=$(gcloud secrets versions access latest --secret=TEST_API_KEY --project=kitesforu-dev 2>/dev/null) \
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" "$MOTION_CLIPS" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language = sys.argv[1:10]
+topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language, motion_clips = sys.argv[1:11]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -157,6 +180,10 @@ if fmt:
     body["format"] = fmt
 if content_rating:
     body["content_rating"] = content_rating
+if int(motion_clips) > 0:
+    # Declared on the api's own CreateJobRequest (models.py `visual_options: Optional[VisualOptions]`),
+    # so the strict schemas model does not drop it. real_images stays at its $0 default.
+    body["visual_options"] = {"motion_clips": int(motion_clips)}
 if source_writeup:
     # Declared on CreateJobRequest (schemas 2.60.0) so the strict model keeps it; the
     # direct create path stamps it top-level onto the job doc (api #734).
@@ -175,6 +202,11 @@ POST_URL="$API_BASE/v1/podcasts"
 [[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
 
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST"
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "DRY RUN — nothing sent. POST $POST_URL"
+  echo "$PAYLOAD"
+  exit 0
+fi
 
 # WHOSE LIBRARY DOES THIS LAND IN? Without --on-behalf-of the job is owned by the API key's
 # own identity (test_user_e2e), which does NOT appear on the founder's signed-in home page.
