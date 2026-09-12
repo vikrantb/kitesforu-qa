@@ -59,7 +59,11 @@ MOTION_CLIPS="0"    # --motion-clips N (0-3): PURCHASED paid video clips, sent a
                     # The ONLY way to exercise the purchased-motion arm (`paid_opt_in` in veo_hero), where
                     # the clip ranking, the figure rule and first_heroes all act. Before this flag no
                     # verification job could reach it (2026-09-11, workers #3116).
-DRY_RUN="false"     # --dry-run: print the POST URL and body, then exit 0 before auth or any request.
+DRY_RUN="false"     # --dry-run: print the POST URL, headers and body, then exit 0 before any request.
+PAID_STILLS="on"    # --paid-stills off: send visual_options with stills OFF. ON by default WITH
+                    # --motion-clips, because a bare {"motion_clips": N} is normalised by the api to
+                    # max_images=0 and the job then renders ZERO paid stills — the wrong population
+                    # for any paid-video test (see the payload builder).
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,6 +94,7 @@ while [[ $# -gt 0 ]]; do
                     # ⇒ pair it with --duration (>0.5 needs the FOUNDER_SPEND_ACK file).
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
+    --paid-stills)  PAID_STILLS="$2"; shift 2 ;;   # on|off — only read when --motion-clips > 0
     --dry-run)  DRY_RUN="true"; shift ;;
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
@@ -98,7 +103,11 @@ while [[ $# -gt 0 ]]; do
                     # signed-in Playwright library (different account). A job that must be OBSERVED
                     # on the beta surface needs --on-behalf-of <the browser test account's user_… id>.
     --on-behalf-of-email) ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
-    -h|--help)  grep '^#' "$0" | head -12; exit 0 ;;
+    # Stop at the first NON-comment line instead of `head -12`. The count was a duplicated constant
+    # coupled to the header's length: this PR added two header lines and the window silently pushed
+    # `--dry-run`, the short-form caveat and the `Auth:` line out of the help — so the safety flag
+    # became undiscoverable through the documented route (qa #175 round-1 code critic and design).
+    -h|--help)  sed -n '/^#/!q;p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -110,6 +119,21 @@ if [[ "$MOTION_CLIPS" != "0" && "$VISUALS" == "false" ]]; then
   # Send neither key instead; the api turns motion_clips>0 into wants_visuals itself.
   VISUALS="auto"
   echo "  note: --motion-clips implies --visuals-auto (the default would opt the job out of visuals)" >&2
+fi
+
+# ---- Clips vs episode length ------------------------------------------------------
+# `--motion-clips 3` at the 0.167 min default buys up to 18 s of video for a TEN-SECOND episode —
+# roughly $0.90-1.08 of clips that cannot all be shown (qa #175 round-1 design). `--visuals-auto`
+# carries a ten-line warning about exactly this hazard and `--motion-clips` carried none.
+if [[ "$MOTION_CLIPS" != "0" ]]; then
+  # 6 s per clip is the purchased-arm length (_MOTION_CLIP_USD_CAP is $0.65/6s).
+  _clip_seconds=$(( MOTION_CLIPS * 6 ))
+  _episode_seconds=$(awk "BEGIN{printf \"%d\", $DURATION * 60}")
+  if (( _clip_seconds > _episode_seconds )); then
+    echo "  ⚠️  $MOTION_CLIPS clip(s) is ~${_clip_seconds}s of video for a ${_episode_seconds}s episode." >&2
+    echo "      You are buying more motion than the episode can show. Raise --duration or lower" >&2
+    echo "      --motion-clips; a paid-video T4 wants at least ~2.0 min." >&2
+  fi
 fi
 
 # ---- Ladder gate: anything beyond T3 needs a fresh founder ack -------------------
@@ -155,9 +179,9 @@ if [[ "$DRY_RUN" != "true" && -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" "$MOTION_CLIPS" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" "$MOTION_CLIPS" "$PAID_STILLS" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language, motion_clips = sys.argv[1:11]
+topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language, motion_clips, paid_stills = sys.argv[1:12]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -182,8 +206,25 @@ if content_rating:
     body["content_rating"] = content_rating
 if int(motion_clips) > 0:
     # Declared on the api's own CreateJobRequest (models.py `visual_options: Optional[VisualOptions]`),
-    # so the strict schemas model does not drop it. real_images stays at its $0 default.
-    body["visual_options"] = {"motion_clips": int(motion_clips)}
+    # so the strict schemas model does not drop it.
+    #
+    # `real_images` AND `max_images` ARE SENT EXPLICITLY, and that is not a default-tidying tweak.
+    # A bare `{"motion_clips": N}` is normalised by the api to
+    # `{real_images: False, max_images: 0, motion_clips: N}` (`option_pricing.normalize_visual_options`
+    # defaults a missing `real_images` to False and then FORCES `max_images` to 0), and the workers
+    # policy turns that into `user_paid_cap = 0` — every paid still demoted to a $0 card. Executed,
+    # both arms, 2026-09-12:
+    #     --motion-clips 3 alone   -> max_scenes 0  allow_veo True  purchased_clips 3
+    #     stills + clips           -> max_scenes 6  allow_veo True  purchased_clips 3
+    # A verification job for the PAID VIDEO path whose stills are all $0 cards is not the shape a
+    # paying user has, and #3116's whole mechanism turns on picture-vs-figure — a card IS a figure.
+    # The job would have run and measured the wrong population. This is the
+    # verification-job-defaults-defeat-the-test class, caught for $0 before spending.
+    body["visual_options"] = {
+        "real_images": paid_stills.lower() != "off",
+        "max_images": 6 if paid_stills.lower() != "off" else 0,
+        "motion_clips": int(motion_clips),
+    }
 if source_writeup:
     # Declared on CreateJobRequest (schemas 2.60.0) so the strict model keeps it; the
     # direct create path stamps it top-level onto the job doc (api #734).
@@ -201,12 +242,7 @@ PYEOF
 POST_URL="$API_BASE/v1/podcasts"
 [[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
 
-echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST"
-if [[ "$DRY_RUN" == "true" ]]; then
-  echo "DRY RUN — nothing sent. POST $POST_URL"
-  echo "$PAYLOAD"
-  exit 0
-fi
+echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST" >&2
 
 # WHOSE LIBRARY DOES THIS LAND IN? Without --on-behalf-of the job is owned by the API key's
 # own identity (test_user_e2e), which does NOT appear on the founder's signed-in home page.
@@ -214,12 +250,14 @@ fi
 # founder opened beta.kitesforu.com, saw none of them, and asked "where are ur test couple
 # videos u created". Verifying on a surface the reviewer cannot open is not verification —
 # and nothing said so, because the owner was never printed. Now it always is.
+# ...on STDERR, like every other banner here, so that `--dry-run 2>/dev/null` emits the request BODY
+# and nothing else and can be piped straight to jq (round-1 code critic NIT).
 if [[ -z "$ON_BEHALF_OF" ]]; then
-  echo "  ⚠️  OWNER: the API key's own identity (test_user_e2e)."
-  echo "      This job will NOT appear on the founder's signed-in home page."
-  echo "      For anything a human must SEE, pass:  --on-behalf-of <user_…>"
+  echo "  ⚠️  OWNER: the API key's own identity (test_user_e2e)." >&2
+  echo "      This job will NOT appear on the founder's signed-in home page." >&2
+  echo "      For anything a human must SEE, pass:  --on-behalf-of <user_…>" >&2
 else
-  echo "  OWNER: $ON_BEHALF_OF — visible in that account's library."
+  echo "  OWNER: $ON_BEHALF_OF — visible in that account's library." >&2
 fi
 OBO_ARGS=()
 if [[ -n "$ON_BEHALF_OF" ]]; then
@@ -243,6 +281,35 @@ if [[ -n "$ON_BEHALF_OF" ]]; then
   OBO_ARGS=(-H "X-On-Behalf-Of: $ON_BEHALF_OF")
   [[ -n "$ON_BEHALF_OF_EMAIL" ]] && OBO_ARGS+=(-H "X-On-Behalf-Of-Email: $ON_BEHALF_OF_EMAIL")
 fi
+
+# THE DRY RUN EXITS HERE, NOT EARLIER — after the OWNER print and after the --on-behalf-of
+# validation, because those are the two things it most needs to rehearse. It used to exit before
+# both: `--dry-run --on-behalf-of <an email> --motion-clips 2` exited 0 with a clean-looking
+# request, while the identical vector on the sending path is rejected with exit 2. A rehearsal that
+# green-lights a request the real path refuses is worse than no rehearsal, and the OWNER warning
+# (which decides whether a human can SEE the job at all) was skipped entirely — the comment above
+# saying "Now it always is" was falsified by the flag that shipped alongside it
+# (qa #175 round-1 code critic and design D1).
+#
+# The HEADERS are printed too, with the bearer redacted. For a T4 that lands in the wrong library
+# the header set is the deciding half, and "the exact request" without it is not the exact request.
+if [[ "$DRY_RUN" == "true" ]]; then
+  {
+    echo "DRY RUN — nothing sent."
+    echo "POST $POST_URL"
+    echo "  -H 'Authorization: Bearer <TEST_API_KEY redacted>'"
+    echo "  -H 'Content-Type: application/json'"
+    for _h in ${OBO_ARGS[@]+"${OBO_ARGS[@]}"}; do
+      [[ "$_h" == "-H" ]] || echo "  -H '$_h'"
+    done
+  } >&2
+  # The BODY alone goes to stdout, so `--dry-run 2>/dev/null | jq .` works. Every banner above is
+  # on stderr for the same reason (round-1 code critic NIT).
+  echo "$PAYLOAD"
+  exit 0
+fi
+
+
 # ${arr[@]+...} guard: macOS bash 3.2 treats an EMPTY array expansion as an
 # unbound variable under `set -u`.
 RESP=$(curl -sS -X POST "$POST_URL" \
@@ -271,11 +338,16 @@ if [[ "$WAIT" == "true" ]]; then
   # is fatal to the wait: if we cannot read status once, we almost certainly cannot read it on
   # attempt 60 either. Consecutive failures abort with a distinct message and a non-zero exit,
   # so the caller sees "I could not read this job" rather than a silent timeout.
+  # SIZED FOR WHAT WAS BOUGHT. 60 x 15 s = 900 s is fine for an audio-only job and far too short for
+  # one that bought paid video: the visuals stage is designed to run to 2100 s soft / 3300 s hard
+  # (kitesforu-workers `stages/visuals/pass_deadline.py`), so a --motion-clips run could not finish
+  # inside the old bound (qa #175 round-1 latency). 260 x 15 s = 3900 s covers the hard ceiling.
   MAX_POLLS=60
+  [[ "$MOTION_CLIPS" != "0" ]] && MAX_POLLS=260
   MAX_CONSECUTIVE_PROBE_FAILURES=3
   probe_failures=0
   STATUS=""
-  echo "Polling until terminal state (max $MAX_POLLS x 15s)..."
+  echo "Polling until terminal state (max $MAX_POLLS x 15s = $((MAX_POLLS * 15))s)..."
   for i in $(seq 1 "$MAX_POLLS"); do
     sleep 15
     RAW=$(curl -sS --max-time 20 "$API_BASE/v1/podcasts/$JOB_ID/status" \
@@ -301,5 +373,18 @@ if [[ "$WAIT" == "true" ]]; then
     echo "Final status: UNKNOWN (never read a status) — job $JOB_ID" >&2
     exit 3
   fi
+  # RUNNING OUT OF POLLS IS NOT SUCCESS. The loop used to fall through to the line below and exit 0
+  # with whatever non-terminal status it last read, so the caller could not tell a finished job from
+  # one still rendering — and was invited to grade it. On a --motion-clips run that is a $2+ episode
+  # graded half-built (qa #175 round-1 latency). A distinct exit and a distinct message.
+  case "$STATUS" in
+    completed|failed|failed_qa) ;;
+    *)
+      echo "TIMED OUT after $MAX_POLLS polls ($((MAX_POLLS * 15))s): job $JOB_ID is still '$STATUS'." >&2
+      echo "This is NOT a result — the job is still running and nothing here is gradeable yet." >&2
+      echo "Re-read it later: kqa / Artifact.load('$JOB_ID')" >&2
+      exit 4
+      ;;
+  esac
   echo "Final status: $STATUS — grade it with the \$0 battery: kqa / Artifact.load('$JOB_ID')"
 fi
