@@ -10,6 +10,8 @@
 #   ./create_verification_job.sh --tier medium --visuals  # T4 — needs FOUNDER_SPEND_ACK
 #   ./create_verification_job.sh --short --duration 1.0 --wait  # born-short (9:16), 60s
 #   ./create_verification_job.sh --tier high --duration 2.0 --motion-clips 3  # T4 paid video — needs ACK
+#     --paid-stills on|off  (default on WITH --motion-clips: ALSO buys 3 paid stills at --tier low,
+#                            4 at any other tier; `off` buys clips only; rejected without --motion-clips)
 #   ./create_verification_job.sh ... --dry-run            # print the exact request; no auth, no POST, $0
 #     — verifies the short-form craft (wpm band, caption dwell); duration>0.5 ⇒ needs ACK
 #
@@ -60,10 +62,11 @@ MOTION_CLIPS="0"    # --motion-clips N (0-3): PURCHASED paid video clips, sent a
                     # the clip ranking, the figure rule and first_heroes all act. Before this flag no
                     # verification job could reach it (2026-09-11, workers #3116).
 DRY_RUN="false"     # --dry-run: print the POST URL, headers and body, then exit 0 before any request.
-PAID_STILLS="on"    # --paid-stills off: send visual_options with stills OFF. ON by default WITH
+PAID_STILLS="on"    # --paid-stills on|off: send visual_options with stills ON/OFF. ON by default WITH
                     # --motion-clips, because a bare {"motion_clips": N} is normalised by the api to
                     # max_images=0 and the job then renders ZERO paid stills — the wrong population
                     # for any paid-video test (see the payload builder).
+PAID_STILLS_GIVEN="false"  # set when --paid-stills is passed explicitly (validated below)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -94,7 +97,7 @@ while [[ $# -gt 0 ]]; do
                     # ⇒ pair it with --duration (>0.5 needs the FOUNDER_SPEND_ACK file).
     --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
     --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
-    --paid-stills)  PAID_STILLS="$2"; shift 2 ;;   # on|off — only read when --motion-clips > 0
+    --paid-stills)  PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
     --dry-run)  DRY_RUN="true"; shift ;;
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
@@ -121,6 +124,42 @@ if [[ "$MOTION_CLIPS" != "0" && "$VISUALS" == "false" ]]; then
   echo "  note: --motion-clips implies --visuals-auto (the default would opt the job out of visuals)" >&2
 fi
 
+# ---- Paid stills: validate, and never let a typo fail toward SPEND -------------------------
+# This used to test `paid_stills.lower() != "off"`, so every value that was not literally off —
+# `false`, `0`, `no`, `none`, `of`, and the EMPTY string — sent real_images:true and bought stills
+# (qa #175 round-2 code critic). Same house style as --motion-clips above: validate, exit 1.
+_paid_stills_lc=$(printf '%s' "$PAID_STILLS" | tr '[:upper:]' '[:lower:]')
+case "$_paid_stills_lc" in
+  on|off) PAID_STILLS="$_paid_stills_lc" ;;
+  *) echo "--paid-stills must be 'on' or 'off', got: '$PAID_STILLS'" >&2; exit 1 ;;
+esac
+# REJECTED, not honoured, without clips. Honouring it would order paid stills on a job the ladder
+# gate below cannot see (it keys on tier/visuals/duration/motion_clips, none of which a stills-only
+# order sets) — a spend path with no ACK. And silently dropping it hid a flag that did nothing.
+if [[ "$PAID_STILLS_GIVEN" == "true" && "$MOTION_CLIPS" == "0" ]]; then
+  echo "--paid-stills only applies with --motion-clips 1-3 (it sizes the stills bought alongside the clips)." >&2
+  exit 1
+fi
+
+# HOW MANY paid stills, decided ONCE here — the payload, the estimate and the ACK reason all read it.
+# A still is charged 1 credit per max_images upfront (kitesforu-api option_pricing.py
+# CREDITS_PER_IMAGE), so max_images must be a number the job can actually RENDER or the harness
+# pays for stills that can never appear. What can render is workers `scene_budget.resolve_ceiling`,
+# executed 2026-09-12 against workers origin/main bdc3b0d2 (vo_present=True, real_images=True) over
+# quality low|medium|high x subscription free|enthusiast|creator|pro|studio x max_images 6|4|3:
+#     quality low    -> renderable 3 for EVERY subscription and every max_images (bound_by=cheapest_clamp;
+#                       `is_cheapest_mode` is quality_tier == "low" only, clamp = _SCENE_CAP["free"] = 3)
+#     quality medium/high, subscription >= enthusiast -> renderable = max_images (6->6, 4->4, 3->3)
+#     quality medium/high, subscription free          -> renderable 3 (bound_by=tier_entitlement)
+# The previous fixed 6 charged 6 credits for 3 renderable stills at --tier low, the tier
+# `--motion-clips N` alone runs at. So: 3 at low (all it can render), else 4 — the api's own
+# VisualOptions default and a paying user's untouched shape (kitesforu-api models.py
+# `max_images: Field(default=4)`, kitesforu-frontend lib/pricing/optionPricing.ts DEFAULT_VISUAL_OPTIONS).
+PAID_STILLS_COUNT=0
+if [[ "$MOTION_CLIPS" != "0" && "$PAID_STILLS" == "on" ]]; then
+  if [[ "$TIER" == "low" ]]; then PAID_STILLS_COUNT=3; else PAID_STILLS_COUNT=4; fi
+fi
+
 # ---- Clips vs episode length ------------------------------------------------------
 # `--motion-clips 3` at the 0.167 min default buys up to 18 s of video for a TEN-SECOND episode —
 # roughly $0.90-1.08 of clips that cannot all be shown (qa #175 round-1 design). `--visuals-auto`
@@ -143,24 +182,10 @@ reason=""
 [[ "$VISUALS" == "true" ]] && { needs_ack="true"; reason+="visuals=on "; }
 awk "BEGIN{exit !($DURATION > 0.5)}" && { needs_ack="true"; reason+="duration=${DURATION}min "; }
 [[ "$MOTION_CLIPS" != "0" ]] && { needs_ack="true"; reason+="motion_clips=$MOTION_CLIPS "; }
-
-if [[ "$needs_ack" == "true" && "$DRY_RUN" == "true" ]]; then
-  echo "  dry-run: a real run would need the ACK ($reason)" >&2
-elif [[ "$needs_ack" == "true" ]]; then
-  fresh="false"
-  if [[ -f "$ACK_FILE" ]]; then
-    age=$(( $(date +%s) - $(stat -f %m "$ACK_FILE" 2>/dev/null || stat -c %Y "$ACK_FILE") ))
-    [[ $age -lt 3600 ]] && fresh="true"
-  fi
-  if [[ "$fresh" != "true" ]]; then
-    echo "T4 ESCALATION BLOCKED ($reason)— this is a real-price run." >&2
-    echo "Ask the founder to run: touch $ACK_FILE   (valid 60 min)" >&2
-    echo "Ladder: .claude/rules/test-cost-ladder.md — name WHICH premium-only behavior you are testing." >&2
-    exit 3
-  fi
-fi
+[[ "$PAID_STILLS_COUNT" != "0" ]] && reason+="paid_stills=$PAID_STILLS_COUNT "
 
 # ---- Cost estimate (from COST_CHANGELOG tier math) --------------------------------
+# Computed BEFORE the ladder gate so the price is on the screen of whoever is asked for the ACK.
 case "$TIER" in
   low)    EST="~\$0.025" ;;
   medium) EST="~\$0.15"  ;;
@@ -172,6 +197,26 @@ esac
 [[ "$VISUALS" == "true" ]] && EST="$EST + visuals (~\$0.10-0.50; a story band already counts veo — don't double-book)"
 # Purchased arm: per-clip cap \$0.65 (\$0.65/6s); the live rows price \$0.30-0.36 a clip (workers COST_CHANGELOG 2026-09-10).
 [[ "$MOTION_CLIPS" != "0" ]] && EST="$EST + $MOTION_CLIPS paid video clip(s) (~\$0.30-0.36 each, cap \$0.65)"
+# Paid stills, keyed on what is ORDERED — not on VISUALS, which the motion-clips block sets to "auto",
+# so a VISUALS=="true" term could never fire on the one path that sends real_images:true.
+# Imagen ~\$0.02-0.04 a still, 1 credit each (kitesforu-api option_pricing.py CREDITS_PER_IMAGE).
+[[ "$PAID_STILLS_COUNT" != "0" ]] && EST="$EST + $PAID_STILLS_COUNT paid still(s) (~\$0.02-0.04 each)"
+
+if [[ "$needs_ack" == "true" && "$DRY_RUN" == "true" ]]; then
+  echo "  dry-run: a real run would need the ACK ($reason) est=$EST" >&2
+elif [[ "$needs_ack" == "true" ]]; then
+  fresh="false"
+  if [[ -f "$ACK_FILE" ]]; then
+    age=$(( $(date +%s) - $(stat -f %m "$ACK_FILE" 2>/dev/null || stat -c %Y "$ACK_FILE") ))
+    [[ $age -lt 3600 ]] && fresh="true"
+  fi
+  if [[ "$fresh" != "true" ]]; then
+    echo "T4 ESCALATION BLOCKED ($reason)— this is a real-price run. est=$EST" >&2
+    echo "Ask the founder to run: touch $ACK_FILE   (valid 60 min)" >&2
+    echo "Ladder: .claude/rules/test-cost-ladder.md — name WHICH premium-only behavior you are testing." >&2
+    exit 3
+  fi
+fi
 
 # ---- Auth --------------------------------------------------------------------------
 if [[ "$DRY_RUN" != "true" && -z "${TEST_API_KEY:-}" ]]; then
@@ -179,9 +224,9 @@ if [[ "$DRY_RUN" != "true" && -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" "$MOTION_CLIPS" "$PAID_STILLS" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" "$MOTION_CLIPS" "$PAID_STILLS_COUNT" <<'PYEOF'
 import json, sys
-topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language, motion_clips, paid_stills = sys.argv[1:12]
+topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language, motion_clips, paid_stills_count = sys.argv[1:12]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -212,17 +257,19 @@ if int(motion_clips) > 0:
     # A bare `{"motion_clips": N}` is normalised by the api to
     # `{real_images: False, max_images: 0, motion_clips: N}` (`option_pricing.normalize_visual_options`
     # defaults a missing `real_images` to False and then FORCES `max_images` to 0), and the workers
-    # policy turns that into `user_paid_cap = 0` — every paid still demoted to a $0 card. Executed,
-    # both arms, 2026-09-12:
-    #     --motion-clips 3 alone   -> max_scenes 0  allow_veo True  purchased_clips 3
-    #     stills + clips           -> max_scenes 6  allow_veo True  purchased_clips 3
+    # policy turns that into `user_paid_cap = 0` — every paid still demoted to a $0 card. With no
+    # still order, workers `scene_budget.resolve_ceiling(vo_present=True, vo_real_images=False)` is 0
+    # at every quality x subscription (see the PAID_STILLS_COUNT block, which holds the executed
+    # matrix for the stills-on arm: 3 at --tier low, max_images at medium/high on a paid plan).
     # A verification job for the PAID VIDEO path whose stills are all $0 cards is not the shape a
     # paying user has, and #3116's whole mechanism turns on picture-vs-figure — a card IS a figure.
     # The job would have run and measured the wrong population. This is the
     # verification-job-defaults-defeat-the-test class, caught for $0 before spending.
+    # The COUNT is decided in bash (PAID_STILLS_COUNT) so the estimate prints the same number sent here.
+    stills = int(paid_stills_count)
     body["visual_options"] = {
-        "real_images": paid_stills.lower() != "off",
-        "max_images": 6 if paid_stills.lower() != "off" else 0,
+        "real_images": stills > 0,
+        "max_images": stills,
         "motion_clips": int(motion_clips),
     }
 if source_writeup:
@@ -341,16 +388,36 @@ if [[ "$WAIT" == "true" ]]; then
   # SIZED FOR WHAT WAS BOUGHT. 60 x 15 s = 900 s is fine for an audio-only job and far too short for
   # one that bought paid video: the visuals stage is designed to run to 2100 s soft / 3300 s hard
   # (kitesforu-workers `stages/visuals/pass_deadline.py`), so a --motion-clips run could not finish
-  # inside the old bound (qa #175 round-1 latency). 260 x 15 s = 3900 s covers the hard ceiling.
+  # inside the old bound (qa #175 round-1 latency). 260 polls sleep at least 260 x 15 s = 3900 s,
+  # which covers the hard ceiling.
   MAX_POLLS=60
   [[ "$MOTION_CLIPS" != "0" ]] && MAX_POLLS=260
   MAX_CONSECUTIVE_PROBE_FAILURES=3
+  POLL_INTERVAL_S=15
+  PROBE_TIMEOUT_S=20
+  # THE TERMINAL STATES — ONE list, read by both the loop's break and the timeout guard after it.
+  # The two sites each enumerated `completed|failed|failed_qa` and both missed `needs_review` and
+  # `cancelled`, so a finished, shareable needs_review episode burned every poll and then exited 4
+  # saying it was "still running" (qa #175 round-2 code critic + latency). Sources:
+  #   kitesforu-schemas enums.py JobStatus — NEEDS_REVIEW / FAILED_QA "are TERMINAL like
+  #     completed/failed"; CANCELLED "User cancelled the job"
+  #   kitesforu-workers stages/quality/release_decision.py TerminalStatus = completed|failed_qa|needs_review
+  #   kitesforu-api routes/podcasts/sharing.py _SHAREABLE_STATUSES = completed|needs_review|failed_qa
+  # AWAITING_REVIEW is deliberately absent: enums.py calls it NON-terminal (the approve route resumes it).
+  TERMINAL_STATUSES="completed failed failed_qa needs_review cancelled"
+  is_terminal_status() {
+    [[ -n "$1" && " $TERMINAL_STATUSES " == *" $1 "* ]]
+  }
   probe_failures=0
   STATUS=""
-  echo "Polling until terminal state (max $MAX_POLLS x 15s = $((MAX_POLLS * 15))s)..."
+  # The last status actually READ. STATUS is blanked by a failed probe, so after a run of good reads
+  # ending in one bad probe it said "never read a status" — false, and it hid the real last state.
+  LAST_STATUS=""
+  # An honest bound: each poll is a sleep PLUS a probe that may itself take up to PROBE_TIMEOUT_S.
+  echo "Polling until terminal state (max $MAX_POLLS polls, ${POLL_INTERVAL_S}s apart: at least $((MAX_POLLS * POLL_INTERVAL_S))s, at most ~$((MAX_POLLS * (POLL_INTERVAL_S + PROBE_TIMEOUT_S)))s if probes are slow)..."
   for i in $(seq 1 "$MAX_POLLS"); do
-    sleep 15
-    RAW=$(curl -sS --max-time 20 "$API_BASE/v1/podcasts/$JOB_ID/status" \
+    sleep "$POLL_INTERVAL_S"
+    RAW=$(curl -sS --max-time "$PROBE_TIMEOUT_S" "$API_BASE/v1/podcasts/$JOB_ID/status" \
       -H "Authorization: Bearer $TEST_API_KEY" ${OBO_ARGS[@]+"${OBO_ARGS[@]}"} 2>/dev/null)
     STATUS=$(printf '%s' "$RAW" \
       | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
@@ -366,25 +433,24 @@ if [[ "$WAIT" == "true" ]]; then
       continue
     fi
     probe_failures=0
+    LAST_STATUS="$STATUS"
     echo "  [$i] $STATUS"
-    case "$STATUS" in completed|failed|failed_qa) break ;; esac
+    is_terminal_status "$STATUS" && break
   done
-  if [[ -z "$STATUS" ]]; then
+  if [[ -z "$LAST_STATUS" ]]; then
     echo "Final status: UNKNOWN (never read a status) — job $JOB_ID" >&2
     exit 3
   fi
+  STATUS="$LAST_STATUS"
   # RUNNING OUT OF POLLS IS NOT SUCCESS. The loop used to fall through to the line below and exit 0
   # with whatever non-terminal status it last read, so the caller could not tell a finished job from
   # one still rendering — and was invited to grade it. On a --motion-clips run that is a $2+ episode
   # graded half-built (qa #175 round-1 latency). A distinct exit and a distinct message.
-  case "$STATUS" in
-    completed|failed|failed_qa) ;;
-    *)
-      echo "TIMED OUT after $MAX_POLLS polls ($((MAX_POLLS * 15))s): job $JOB_ID is still '$STATUS'." >&2
-      echo "This is NOT a result — the job is still running and nothing here is gradeable yet." >&2
-      echo "Re-read it later: kqa / Artifact.load('$JOB_ID')" >&2
-      exit 4
-      ;;
-  esac
+  if ! is_terminal_status "$STATUS"; then
+    echo "TIMED OUT after $MAX_POLLS polls (at least $((MAX_POLLS * POLL_INTERVAL_S))s): job $JOB_ID last read as '$STATUS'." >&2
+    echo "This is NOT a result — the job is still running and nothing here is gradeable yet." >&2
+    echo "Re-read it later: kqa / Artifact.load('$JOB_ID')" >&2
+    exit 4
+  fi
   echo "Final status: $STATUS — grade it with the \$0 battery: kqa / Artifact.load('$JOB_ID')"
 fi
