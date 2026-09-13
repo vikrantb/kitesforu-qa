@@ -64,10 +64,21 @@ def main() -> int:
         print("      though the numbers below are the ledger's.")
     else:
         print("\n  paid_still_ledger:")
-        for k in ("requested", "granted", "delivered", "delivered_billing_counted",
+        # `bought` and `requested` are DIFFERENT RULES, not a rename — print whichever the doc
+        # carries and say which. `requested` was written by the pre-#3119 worker, which had no
+        # `real_images` check and returned `max_images` for ANY `visual_options` dict, so an
+        # unstated choice read as a purchase. `bought` is None when the user stated no stills
+        # choice, 0 for an explicit refusal, n for a purchase. A doc carrying `requested` is older
+        # than that fix; reading the two as one number is how a rule change becomes invisible.
+        for k in ("bought", "requested", "granted", "delivered", "delivered_billing_counted",
                   "billing_undercount", "shortfall"):
             if k in ledger:
-                print(f"      {k:26s} {ledger[k]}")
+                note = ""
+                if k == "requested":
+                    note = "   (pre-#3119 rule: any visual_options dict counted as a purchase)"
+                elif k == "bought":
+                    note = "   (None = no stills choice stated, 0 = explicit refusal)"
+                print(f"      {k:26s} {ledger[k]}{note}")
         extra = {k: x for k, x in ledger.items() if k.startswith("scene_")}
         if extra:
             print(f"      {'budget chain':26s} {extra}")
