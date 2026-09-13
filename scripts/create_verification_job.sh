@@ -48,6 +48,21 @@ SOURCE_WRITEUP=""   # --source-writeup <wrt_id>: simulate a writeup→podcast CO
                     # (C3-4). Needs a writeup that HAS figures — check
                     # formats_generated[fmt].figures, not "content" (no such key).
 VISUALS="false"
+# --- PAID VISUAL PURCHASES (api/models.py VisualOptions) ----------------------------
+# `visual_options.motion_clips > 0` is THE ONLY ROUTE TO VEO (api
+# tests/test_video_option_reaches_the_user.py), and this script could not send it — it posted
+# `wants_visuals`/`visuals_opt_out` and nothing else. So the tool everyone verifies video with
+# could not order video. The T4 paid-motion run has sat in .claude/spend-ledger/ planned as
+# `--motion-clips 1` since 2026-09-12, citing a flag that did not exist; and at --tier low with no
+# motion purchase the Veo gate is shut by the allow_premium fold (policy.py:293), so that run
+# would have spent its estimate and produced no video at all.
+MOTION_CLIPS="0"    # --motion-clips 0-3  : paid Veo hero clips. >0 REOPENS the Veo gate even at
+                    #                        --tier low (policy.py:335, "payment can only OPEN a
+                    #                        gate"), so premium video is reachable at cheap-tier
+                    #                        script cost — no need to buy --tier high to see a clip.
+REAL_IMAGES="false" # --real-images       : paid diffusion stills (Imagen) instead of $0 cards.
+MAX_IMAGES=""       # --max-images 0-8    : cap on paid stills; only meaningful with --real-images.
+DRY_RUN="false"     # --dry-run           : print the URL + body and exit WITHOUT posting. $0.
 WAIT="false"
 ON_BEHALF_OF=""
 ON_BEHALF_OF_EMAIL=""   # --on-behalf-of-email: the ADDRESS (the api reads it from its own header)
@@ -64,6 +79,10 @@ while [[ $# -gt 0 ]]; do
     --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --short)    SHORT="true"; shift ;;   # Social Short path (9:16, kinetic captions, assembly)
     --visuals)  VISUALS="true"; shift ;;
+    --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;
+    --real-images)  REAL_IMAGES="true"; shift ;;
+    --max-images)   MAX_IMAGES="$2"; shift 2 ;;
+    --dry-run)      DRY_RUN="true"; shift ;;
     --visuals-auto) VISUALS="auto"; shift ;;  # T3-SAFE: send NEITHER wants_visuals nor
                     # visuals_opt_out, so the worker's non-fiction $0 auto-default applies
                     # (deterministic diagrams/cards, NO paid images). Use this to exercise the
@@ -94,12 +113,41 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ---- Validate the purchase flags BEFORE anything else ----------------------------
+# The API caps these (motion_clips ge=0 le=3, max_images ge=0 le=8). Rejecting here means a typo
+# costs an error message instead of a 422 after the Secret Manager fetch.
+[[ "$MOTION_CLIPS" =~ ^[0-3]$ ]] || { echo "--motion-clips must be 0-3 (api VisualOptions), got '$MOTION_CLIPS'" >&2; exit 2; }
+if [[ -n "$MAX_IMAGES" ]]; then
+  [[ "$MAX_IMAGES" =~ ^[0-8]$ ]] || { echo "--max-images must be 0-8 (api VisualOptions), got '$MAX_IMAGES'" >&2; exit 2; }
+fi
+
+# A PURCHASE IS AN OPT-IN. `wants_visuals` decides whether the visuals stage runs at all;
+# `visual_options` decides what is BOUGHT once it does. Ordering clips while sending
+# `visuals_opt_out=true` is incoherent and renders nothing — so a purchase turns visuals on, and
+# SAYS that it did rather than doing it behind the caller's back.
+if { [[ "$MOTION_CLIPS" != "0" ]] || [[ "$REAL_IMAGES" == "true" ]]; } && [[ "$VISUALS" == "false" ]]; then
+  VISUALS="true"
+  echo "  note: a paid visual purchase implies visuals ON — setting wants_visuals=true." >&2
+fi
+
 # ---- Ladder gate: anything beyond T3 needs a fresh founder ack -------------------
 needs_ack="false"
 reason=""
 [[ "$TIER" != "low" ]] && { needs_ack="true"; reason+="tier=$TIER "; }
 [[ "$VISUALS" == "true" ]] && { needs_ack="true"; reason+="visuals=on "; }
+# Both purchases are REAL PRICE and must never ride in under the T3 rung on a low tier.
+[[ "$MOTION_CLIPS" != "0" ]] && { needs_ack="true"; reason+="motion_clips=$MOTION_CLIPS "; }
+[[ "$REAL_IMAGES" == "true" ]] && { needs_ack="true"; reason+="real_images=on "; }
 awk "BEGIN{exit !($DURATION > 0.5)}" && { needs_ack="true"; reason+="duration=${DURATION}min "; }
+
+# A DRY RUN SPENDS NOTHING, so it does not need a spend ack — and needing one would defeat the
+# purpose. The reason this flag exists is that a planned command sat in a ledger for a day citing
+# a flag that did not exist; checking that BEFORE asking the founder to ack is the whole point.
+# The exemption is safe because --dry-run exits before the POST, which is the only line that spends.
+if [[ "$needs_ack" == "true" && "$DRY_RUN" == "true" ]]; then
+  echo "  note: $reason would need a fresh ack — skipped, --dry-run posts nothing." >&2
+  needs_ack="false"
+fi
 
 if [[ "$needs_ack" == "true" ]]; then
   fresh="false"
@@ -125,6 +173,12 @@ case "$TIER" in
   *)      EST="unknown" ;;
 esac
 [[ "$VISUALS" == "true" ]] && EST="$EST + visuals (~\$0.10-0.50; a story band already counts veo — don't double-book)"
+# The purchased motion route is priced PER CLIP so 3 reads as ~$1.08 rather than "+video":
+# observed $0.30-0.36 for one 6 s clip against the $0.65 per-clip cap (_MOTION_CLIP_USD_CAP).
+# This is an EXPLICIT purchase, so it is additive even inside a story band — the "already counts
+# veo" caveat above is about the band's own incidental entitlement clip, not about clips you ordered.
+[[ "$MOTION_CLIPS" != "0" ]] && EST="$EST + ${MOTION_CLIPS}x motion clip (~\$0.30-0.36 each, cap \$0.65)"
+[[ "$REAL_IMAGES" == "true" ]] && EST="$EST + paid stills (Imagen, ~\$0.045 each)"
 
 # ---- Auth --------------------------------------------------------------------------
 if [[ -z "${TEST_API_KEY:-}" ]]; then
@@ -132,9 +186,10 @@ if [[ -z "${TEST_API_KEY:-}" ]]; then
     || { echo "TEST_API_KEY not in env and Secret Manager fetch failed" >&2; exit 1; }
 fi
 
-PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" <<'PYEOF'
+PAYLOAD=$(python3 - "$TOPIC" "$DURATION" "$TIER" "$STYLE" "$VISUALS" "$FORMAT" "$CONTENT_RATING" "$SOURCE_WRITEUP" "$LANGUAGE" "$MOTION_CLIPS" "$REAL_IMAGES" "$MAX_IMAGES" <<'PYEOF'
 import json, sys
 topic, duration, tier, style, visuals, fmt, content_rating, source_writeup, language = sys.argv[1:10]
+motion_clips, real_images, max_images = sys.argv[10:13]
 body = {
     "topic": topic,
     "duration_min": float(duration),
@@ -157,6 +212,18 @@ if fmt:
     body["format"] = fmt
 if content_rating:
     body["content_rating"] = content_rating
+# visual_options is a TOP-LEVEL field on the create request (api/models.py:150 ->
+# routes/podcasts/crud.py:178), not an intake value. Sent ONLY when something was actually bought,
+# so an ordinary T3 run's body stays byte-identical to before these flags existed.
+_vo = {}
+if motion_clips != "0":
+    _vo["motion_clips"] = int(motion_clips)
+if real_images == "true":
+    _vo["real_images"] = True
+if max_images:
+    _vo["max_images"] = int(max_images)
+if _vo:
+    body["visual_options"] = _vo
 if source_writeup:
     # Declared on CreateJobRequest (schemas 2.60.0) so the strict model keeps it; the
     # direct create path stamps it top-level onto the job doc (api #734).
@@ -175,6 +242,19 @@ POST_URL="$API_BASE/v1/podcasts"
 [[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
 
 echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST"
+[[ "$MOTION_CLIPS" != "0" || "$REAL_IMAGES" == "true" ]] && \
+  echo "  PURCHASE: motion_clips=$MOTION_CLIPS real_images=$REAL_IMAGES max_images=${MAX_IMAGES:-default}"
+
+# ---- --dry-run: everything above, nothing posted ---------------------------------
+# WHY THIS EXISTS. Until now the only way to learn what this script sends was to send it, so a flag
+# that did not exist could sit in a spend ledger as a planned command and nobody could tell at $0.
+# It exits AFTER the body is built and BEFORE the POST, so what it prints is the real body.
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "--- DRY RUN — nothing posted, \$0 ---"
+  echo "POST $POST_URL"
+  echo "$PAYLOAD" | python3 -m json.tool
+  exit 0
+fi
 
 # WHOSE LIBRARY DOES THIS LAND IN? Without --on-behalf-of the job is owned by the API key's
 # own identity (test_user_e2e), which does NOT appear on the founder's signed-in home page.
