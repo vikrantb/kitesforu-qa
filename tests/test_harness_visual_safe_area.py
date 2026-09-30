@@ -136,3 +136,33 @@ def test_no_video_skips_cleanly():
     assert by["visual.text_not_edge_cropped"]["skipped"]
     assert by["visual.text_in_safe_area"]["skipped"]
     assert sr.passed
+
+
+def test_a_cut_word_mid_beat_is_caught_though_the_beat_ends_clean(tmp_path):
+    """The canary's shape (job 29355571, "Air molecu"): an engine tour cuts a neighbour mid-dwell and
+    ends on its widest view, so the last ~500ms is clean. The edge-cut label shows only from 1 s to 3 s
+    of a 6 s beat; a centred label holds throughout. Sampled only at its tail the beat passed; sampled
+    across its window it fails."""
+    video = str(tmp_path / "tour.mp4")
+    _ffmpeg(
+        "-f", "lavfi", "-i", f"color=c=0x0b1020:s={_W}x{_H}:d=6",
+        "-vf", "drawtext=text='EDGE LABEL':x=-40:y=500:fontsize=54:fontcolor=white:enable='between(t,1,3)',"
+               "drawtext=text='CENTRE LABEL':x=800:y=700:fontsize=54:fontcolor=white",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", video,
+    )
+    doc = _diagram_doc()
+    doc["visual_clips"][0]["end_ms"] = 6000
+    art = Artifact.from_doc(doc, video_path=video)
+    sr, by = _by_check(art)
+    crit = by["visual.text_not_edge_cropped"]
+    assert not crit["skipped"], crit["evidence"]
+    assert not crit["passed"], f"a word cut mid-beat must fail: {crit['evidence']}"
+    assert not sr.passed
+
+
+def test_the_beat_is_sampled_across_its_window_and_at_its_tail():
+    from kitesforu_qa.harness.checks.visual import _beat_sample_times
+
+    assert _beat_sample_times(0.0, 6.0) == [0.5, 1.5, 2.5, 3.5, 5.5]   # 4 spread + the tail
+    assert _beat_sample_times(10.0, 10.4) == [10.0]                      # a sliver: its start
+    assert _beat_sample_times(0.0, 2.0) == [0.5, 1.5]                    # the tail is 1.5 itself

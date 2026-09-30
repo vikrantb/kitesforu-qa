@@ -69,14 +69,17 @@ _VIDEO_W = 1920
 _VIDEO_H = 1080
 
 # LONG-FORM CORRECTNESS Part D, Layer 2 — the OCR visual-fit check (founder's cut/overflow class:
-# title/labels/subtitle chopped at the frame edge, e.g. by the video_assembler push-zoom). $0 CPU
-# (ffmpeg seek + pytesseract), no LLM. Samples the LAST ~500ms of each structural-diagram beat — the
-# worst-case post-zoom moment — because a progressive push-zoom crops MORE as a hold continues.
-_OCR_CONF_MIN = 40              # pytesseract word confidence floor (0-100); below this is noise
+# title/labels/subtitle chopped at the frame edge). $0 CPU (ffmpeg seek + the tesseract CLI), no LLM.
+# Samples each structural-diagram beat ACROSS its on-screen window, not only its last ~500ms: an engine
+# tour's last frame is its pull-back, the widest view, and the canary's cut ("Air molecu", job
+# 29355571) sat mid-dwell (the 2026-09-30 zoom-crop audit).
+_OCR_CONF_MIN = 40              # tesseract word confidence floor (0-100); below this is noise
 _EDGE_CROP_PX = 3               # a word within this many px of the frame edge is LITERALLY clipped
 _TEXT_SAFE_MARGIN_FRAC = 0.08   # the softer SMPTE-style advisory margin (matches workers Layer 1's
                                  # DEFAULT_MARGIN_FRAC by deliberate convention, not coupling)
-_WORST_CASE_TAIL_S = 0.5        # "last ~500ms" of a beat's on-screen window
+_WORST_CASE_TAIL_S = 0.5        # "last ~500ms" of a beat's on-screen window: always one sample
+_SAMPLE_EVERY_S = 1.0           # one frame a second across the window (a tour dwell is >= 1.1 s)
+_MAX_FRAMES_PER_BEAT = 5        # bounded per beat, evenly spread over the window
 _MAX_DIAGRAM_BEATS_SAMPLED = 12  # bounded (orchestra-oe): evenly subsampled, never unbounded
 
 # Diagram-weave adjacency caps — MIRROR the workers' modality_selector.weave() invariant
@@ -1036,13 +1039,27 @@ def _extract_frame_at(video_path: str, at_s: float):
             pass
 
 
-def _diagram_worst_case_frames(art) -> list[tuple[int, Any]]:
-    """``[(beat_index, PIL.Image)]`` for up to :data:`_MAX_DIAGRAM_BEATS_SAMPLED` structural-diagram
-    beats, each sampled at its WORST-CASE moment — the last :data:`_WORST_CASE_TAIL_S` of its
-    on-screen window (a progressive push-zoom crops MORE the longer a still holds, so the tail is
-    where a cut/overflow is most likely to have become visible). Evenly subsampled across ALL beats
-    (not just the first N) so a long episode's check isn't biased toward its opening beats — bounded,
-    orchestra-oe. $0 CPU (ffmpeg + PIL), no LLM."""
+def _beat_sample_times(lo: float, hi: float) -> list[float]:
+    """Times to sample one beat's on-screen window ``[lo, hi)``: one a second from its start, and the
+    last :data:`_WORST_CASE_TAIL_S`, at most :data:`_MAX_FRAMES_PER_BEAT`, spread evenly when a long
+    window has more. The tail stays: a progressive push-zoom crops most at the end of a hold. The
+    rest is the canary's case: an engine tour cuts a neighbour mid-dwell and ends on its widest view."""
+    tail = max(lo, hi - _WORST_CASE_TAIL_S)
+    times, t = [], lo + _SAMPLE_EVERY_S / 2.0
+    while t < tail:
+        times.append(t)
+        t += _SAMPLE_EVERY_S
+    if len(times) > _MAX_FRAMES_PER_BEAT - 1:
+        step = len(times) / (_MAX_FRAMES_PER_BEAT - 1)
+        times = [times[int(i * step)] for i in range(_MAX_FRAMES_PER_BEAT - 1)]
+    return times + [tail]
+
+
+def _diagram_frames(art) -> list[tuple[int, Any]]:
+    """``[(beat_index, PIL.Image)]``: up to :data:`_MAX_DIAGRAM_BEATS_SAMPLED` structural-diagram beats,
+    each sampled across its on-screen window (:func:`_beat_sample_times`). Evenly subsampled across ALL
+    beats (not just the first N) so a long episode's check isn't biased toward its opening beats
+    — bounded, orchestra-oe. $0 CPU (ffmpeg + PIL), no LLM."""
     spans = _structural_clip_spans(art)
     if not spans:
         return []
@@ -1051,36 +1068,56 @@ def _diagram_worst_case_frames(art) -> list[tuple[int, Any]]:
         spans = [spans[int(i * step)] for i in range(_MAX_DIAGRAM_BEATS_SAMPLED)]
     out: list[tuple[int, Any]] = []
     for bi, lo, hi in spans:
-        at = max(lo, hi - _WORST_CASE_TAIL_S)
-        img = _extract_frame_at(art.video_path, at)
-        if img is not None:
-            out.append((bi, img))
+        for at in _beat_sample_times(lo, hi):
+            img = _extract_frame_at(art.video_path, at)
+            if img is not None:
+                out.append((bi, img))
     return out
 
 
 def _ocr_words(img) -> list[tuple[str, int, int, int, int]]:
-    """``[(text, x, y, w, h)]`` for OCR'd words with confidence >= :data:`_OCR_CONF_MIN`. Raises if
-    pytesseract / the tesseract-ocr binary is unavailable — callers catch that PER-FRAME and treat an
-    all-frames failure as ``skip()`` (fail-open: no OCR available must never FAIL the gate)."""
-    import pytesseract
+    """``[(text, x, y, w, h)]`` for OCR'd words with confidence >= :data:`_OCR_CONF_MIN`, from the
+    tesseract CLI's TSV. Raises if the ``tesseract`` binary is unavailable — callers catch that
+    PER-FRAME and treat an all-frames failure as ``skip()`` (fail-open: no OCR available must never
+    FAIL the gate).
 
-    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-    texts = data.get("text") or []
+    The CLI, not ``pytesseract``: that wrapper was never a declared dependency, so on every
+    environment checked (the QA venv and the workers venv, 2026-09-30) the import failed and this
+    CRITICAL check SKIPPED on every artifact. The binary was the real dependency all along."""
+    import os
+    import subprocess
+    import tempfile
+
+    fd, png = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        img.save(png)
+        r = subprocess.run(["tesseract", png, "stdout", "tsv"], capture_output=True, text=True, timeout=60)
+    finally:
+        try:
+            os.unlink(png)
+        except OSError:
+            pass
+    if r.returncode != 0:
+        raise RuntimeError(f"tesseract rc={r.returncode}: {r.stderr[-200:]}")
+    rows = r.stdout.splitlines()
+    head = rows[0].split("\t") if rows else []
+    col = {name: i for i, name in enumerate(head)}
     out: list[tuple[str, int, int, int, int]] = []
-    for i in range(len(texts)):
-        word = str(texts[i]).strip()
+    for line in rows[1:]:
+        f = line.split("\t")
+        if len(f) != len(head):
+            continue
+        word = f[col["text"]].strip()
         if not word:
             continue
         try:
-            conf = int(float(data["conf"][i]))
-        except (TypeError, ValueError, KeyError, IndexError):
+            conf = int(float(f[col["conf"]]))
+            x, y = int(f[col["left"]]), int(f[col["top"]])
+            ww, hh = int(f[col["width"]]), int(f[col["height"]])
+        except (ValueError, KeyError):
             continue
         if conf < _OCR_CONF_MIN:
-            continue
-        try:
-            x, y = int(data["left"][i]), int(data["top"][i])
-            ww, hh = int(data["width"][i]), int(data["height"][i])
-        except (TypeError, ValueError, KeyError, IndexError):
             continue
         out.append((word, x, y, ww, hh))
     return out
@@ -1089,13 +1126,14 @@ def _ocr_words(img) -> list[tuple[str, int, int, int, int]]:
 @check("visual.text_not_edge_cropped", dimension=_DIMENSION, severity="critical")
 def text_not_edge_cropped(art):
     """CRITICAL: OCR'd text on a rendered diagram/chart beat must not touch the frame edge — the
-    founder's cut/overflow class (title/labels/subtitle chopped, e.g. by a downstream push-zoom).
-    Samples the LAST ~500ms of each structural-diagram beat's on-screen window (worst-case post-zoom).
+    founder's cut/overflow class (title/labels/subtitle chopped, e.g. by a downstream push-zoom or an
+    engine's own tour camera). Samples each structural-diagram beat across its on-screen window
+    (:func:`_beat_sample_times`).
     """
     _require_visuals(art)
     if not getattr(art, "video_path", None):
         skip("no video to frame-extract")
-    frames = _diagram_worst_case_frames(art)
+    frames = _diagram_frames(art)
     if not frames:
         skip("no structural-diagram clip with a usable on-screen span")
     clipped: list[str] = []
@@ -1115,9 +1153,9 @@ def text_not_edge_cropped(art):
                     or (x + ww) >= (w - _EDGE_CROP_PX) or (y + hh) >= (h - _EDGE_CROP_PX)):
                 clipped.append(f"beat {bi}: {word!r} touches the frame edge")
     if assessed == 0:
-        skip("pytesseract/tesseract-ocr unavailable (or OCR failed on every sampled frame)")
+        skip("tesseract unavailable (or OCR failed on every sampled frame)")
     ok = not clipped
-    return ok, (f"{len(clipped)} edge-touching word(s) over {assessed} beat(s) sampled "
+    return ok, (f"{len(clipped)} edge-touching word(s) over {assessed} frame(s) sampled "
                 f"(±{_EDGE_CROP_PX}px floor): {clipped[:5]}")
 
 
@@ -1130,7 +1168,7 @@ def text_in_safe_area(art):
     _require_visuals(art)
     if not getattr(art, "video_path", None):
         skip("no video to frame-extract")
-    frames = _diagram_worst_case_frames(art)
+    frames = _diagram_frames(art)
     if not frames:
         skip("no structural-diagram clip with a usable on-screen span")
     outside: list[str] = []
@@ -1151,10 +1189,10 @@ def text_in_safe_area(art):
             if x < lo_x or y < lo_y or (x + ww) > hi_x or (y + hh) > hi_y:
                 outside.append(f"beat {bi}: {word!r}")
     if assessed == 0:
-        skip("pytesseract/tesseract-ocr unavailable (or OCR failed on every sampled frame)")
+        skip("tesseract unavailable (or OCR failed on every sampled frame)")
     ok = not outside
     return ok, (f"{len(outside)} word(s) outside the {_TEXT_SAFE_MARGIN_FRAC:.0%} safe area over "
-                f"{assessed} beat(s) sampled: {outside[:5]}")
+                f"{assessed} frame(s) sampled: {outside[:5]}")
 
 
 # ── PICTORIAL SHARE — does a "diagram" DEPICT, or is it type? (stroke-based) ──────
