@@ -61,7 +61,18 @@ def apply_to(path: Path, gt: dict, write: bool):
             for r in rows:
                 r.setdefault(col, "")
 
+    # A model can be read more than once. Only its NEWEST read applies; the older reads are the
+    # history of how the row got to its price, skipped rather than refused. Without this a chain
+    # (91.65 -> 50 read 2026-08-27, then 50 -> 40 read 2026-09-30) refuses its own earlier
+    # entry on the re-run after the second is applied. Each entry dates itself; the top-level
+    # read_date is the default for an entry that does not.
+    newest: dict = {}
     for c in gt["price_corrections"]:
+        when = c.get("read_date", read_date)
+        if c["model_id"] not in newest or when >= newest[c["model_id"]][0]:
+            newest[c["model_id"]] = (when, c)
+
+    for when, c in newest.values():
         mid = c["model_id"]
         row = by_id.get(mid)
         if row is None:
@@ -69,7 +80,7 @@ def apply_to(path: Path, gt: dict, write: bool):
             continue
         cur = row["cost_per_unit"]
         if _close(cur, c["new"]):
-            row["price_verified"] = read_date
+            row["price_verified"] = when
             row["price_source_url"] = c["source"]
             continue  # already applied -- idempotent
         if not _close(cur, c["old"]):
@@ -83,16 +94,24 @@ def apply_to(path: Path, gt: dict, write: bool):
             )
             continue
         row["cost_per_unit"] = f"{c['new']:.2f}"
-        row["price_verified"] = read_date
+        row["price_verified"] = when
         row["price_source_url"] = c["source"]
         changes.append(f"{mid}: {c['old']} -> {c['new']} ({c['unit']})")
 
+    # Each confirmation names the page it was read from: a hardcoded Google URL was stamped on
+    # every confirmed row whatever its provider.
     for c in gt.get("confirmed_correct_no_change", []):
         row = by_id.get(c["model_id"])
         if row is not None and _close(row["cost_per_unit"], c["value"]):
-            row["price_verified"] = read_date
-            row["price_source_url"] = "https://ai.google.dev/gemini-api/docs/pricing"
+            row["price_verified"] = c.get("read_date", read_date)
+            row["price_source_url"] = c["source"]
 
+    # A date moves only from the value the research EXPECTED (``old_eol``; absent = unset), the
+    # same staleness guard prices have. Without it the applier reverted two deliberate
+    # 2026-09-23 corrections made after the 2026-08-27 read: gemini-2.5-flash-image back to the
+    # Gemini API's "earliest possible" 2026-10-02 (it is served through Vertex, which retires
+    # it 2027-03-15), and gemini-3.1-flash-lite's cleared availability floor back to 2027-05-07.
+    # eol_date is an active switch -- a past date drops the row -- so a stale date is an outage.
     for L in gt["lifecycle"]:
         mid = L["model_id"]
         row = by_id.get(mid)
@@ -102,10 +121,14 @@ def apply_to(path: Path, gt: dict, write: bool):
         want = L["eol_date"]
         if cur == want:
             continue
-        if cur and cur != want:
-            changes.append(f"{mid}: eol {cur} -> {want} (announced date differs)")
-        else:
-            changes.append(f"{mid}: eol unset -> {want}")
+        expected = (L.get("old_eol") or "").strip()
+        if cur != expected:
+            refusals.append(
+                f"{mid}: eol expected {expected or 'unset'}, catalog holds {cur or 'unset'} "
+                f"-- research is stale for this row"
+            )
+            continue
+        changes.append(f"{mid}: eol {cur or 'unset'} -> {want}")
         row["eol_date"] = want
 
     if write and changes:
@@ -116,18 +139,27 @@ def apply_to(path: Path, gt: dict, write: bool):
     return changes, refusals
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--check", action="store_true")
-    a = ap.parse_args()
+    ap.add_argument(
+        "--catalog", action="append", type=Path,
+        help="the catalog to check/apply (repeatable); default: the workspace's workers catalog. "
+             "Name it when this script runs from a worktree, whose parent is not the workspace.",
+    )
+    a = ap.parse_args(argv)
     if not (a.apply or a.check):
         ap.error("pass --check or --apply")
     gt = json.loads(GROUND_TRUTH.read_text())
     rc = 0
-    for path in CATALOGS:
+    for path in a.catalog or CATALOGS:
         if not path.exists():
-            print(f"SKIP (absent): {path}")
+            # An absent catalog is a failure, not a skip: from a worktree the default path
+            # resolves outside the workspace, and "SKIP ... exit 0" read as a clean check of
+            # a catalog nobody looked at (2026-09-30).
+            print(f"ABSENT: {path} -- nothing was checked")
+            rc = 1
             continue
         ch, ref = apply_to(path, gt, write=a.apply)
         print(f"\n=== {path.parent.parent.name} ===")
