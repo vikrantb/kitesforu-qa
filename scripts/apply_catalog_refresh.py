@@ -19,7 +19,7 @@ non-zero exit, never a silent skip.
     python3 apply_catalog_refresh.py --apply
 """
 from __future__ import annotations
-import argparse, csv, json, sys
+import argparse, csv, io, json, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -49,9 +49,38 @@ def load_rows(path: Path):
         return list(r), list(r.fieldnames or [])
 
 
+def _write_changed_records(path: Path, text: str, cols: list[str], by_id: dict, touched: set) -> None:
+    """Rewrite ONLY the records whose values changed; every other byte stays as it was.
+
+    A DictWriter rewrite padded each ``#`` comment line with a run of trailing commas and
+    re-serialised all 149 rows, so one price change was a 34-line diff a reviewer had to read
+    line by line (2026-09-30). Spans come from the csv reader's own line count, so a quoted
+    field holding a newline is still one record.
+    """
+    lines = text.splitlines(keepends=True)
+    reader = csv.reader(lines)
+    out, prev = [], 0
+    for rec in reader:
+        span, prev = lines[prev:reader.line_num], reader.line_num
+        mid = rec[0] if rec else ""
+        if mid in touched:
+            buf = io.StringIO()
+            csv.writer(buf, lineterminator="").writerow([by_id[mid].get(c, "") for c in cols])
+            tail = span[-1]
+            out.append(buf.getvalue() + tail[len(tail.rstrip("\r\n")):])
+        else:
+            out.extend(span)
+    with path.open("w", newline="") as fh:
+        fh.write("".join(out))
+
+
 def apply_to(path: Path, gt: dict, write: bool):
+    with path.open(newline="") as fh:  # keep the file's own line endings (the catalog is CRLF)
+        text = fh.read()
     rows, cols = load_rows(path)
+    header_before = list(cols)
     by_id = {r["model_id"]: r for r in rows}
+    before = {mid: dict(r) for mid, r in by_id.items()}
     read_date = gt["read_date"]
     changes, refusals = [], []
 
@@ -96,6 +125,11 @@ def apply_to(path: Path, gt: dict, write: bool):
         row["cost_per_unit"] = f"{c['new']:.2f}"
         row["price_verified"] = when
         row["price_source_url"] = c["source"]
+        # The row's prose must not keep quoting the price it no longer holds.
+        row["notes"] = (
+            f"{row.get('notes') or ''} || {when} PRICE CORRECTED {c['old']} -> {c['new']} "
+            f"({c['unit']}): {c.get('why_we_were_wrong', '').strip()} Source: {c['source']}"
+        ).lstrip(" |")
         changes.append(f"{mid}: {c['old']} -> {c['new']} ({c['unit']})")
 
     # Each confirmation names the page it was read from: a hardcoded Google URL was stamped on
@@ -132,10 +166,15 @@ def apply_to(path: Path, gt: dict, write: bool):
         row["eol_date"] = want
 
     if write and changes:
-        with path.open("w", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(rows)
+        if cols != header_before:
+            # A new provenance column changes every row, so the whole table is rewritten.
+            with path.open("w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(rows)
+        else:
+            touched = {mid for mid, r in by_id.items() if r != before[mid]}
+            _write_changed_records(path, text, cols, by_id, touched)
     return changes, refusals
 
 

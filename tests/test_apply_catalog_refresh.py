@@ -136,3 +136,29 @@ def test_a_lifecycle_date_moves_only_from_the_value_the_research_expected(tmp_pa
     assert rows["gemini-2.5-flash-image"]["eol_date"] == "2027-03-15"
     assert refusals == ["gemini-2.5-flash-image: eol expected unset, catalog holds 2027-03-15 -- research is stale for this row"]
     assert rows["gpt-4.1-nano"]["eol_date"] == "2026-10-23" and rows["new-row"]["eol_date"] == "2027-01-01"
+
+
+def test_apply_rewrites_only_the_changed_record_and_keeps_every_other_byte(tmp_path):
+    """A DictWriter rewrite padded each `#` comment with trailing commas and re-serialised every
+    row: one price change was a 34-line diff (2026-09-30)."""
+    path = tmp_path / "kitesforu-workers" / "config" / "model_catalog.csv"
+    path.parent.mkdir(parents=True)
+    header = ",".join(_COLS + ["notes"])
+    before = (
+        f"{header}\n"
+        "eleven_v3,ELEVENLABS,100.00,per 1M characters,,2026-08-27,https://x,\"v3, expressive\"\n"
+        "# a comment, with a comma, kept as written\n"
+        "veo-3.1-lite-generate-001,GOOGLE,0.05,per second,,2026-09-07,https://y,\"0.05/sec, with audio\"\n"
+    )
+    before = before.replace("\n", "\r\n")  # the real catalog is CRLF: every line ending must survive
+    path.write_bytes(before.encode())
+    gt = _gt([{"model_id": "eleven_v3", "old": 100.0, "new": 80.0, "unit": "per 1M characters",
+               "source": _EL, "read_date": "2026-09-30", "why_we_were_wrong": "Provider price cut."}])
+    changes, refusals = applier.apply_to(path, gt, write=True)
+    assert refusals == [] and len(changes) == 1
+    after = path.read_bytes().decode().splitlines(keepends=True)
+    kept = before.splitlines(keepends=True)
+    assert [after[0], after[2], after[3]] == [kept[0], kept[2], kept[3]], "only the eleven_v3 record may change"
+    row = _rows(path)["eleven_v3"]
+    assert row["cost_per_unit"] == "80.00"
+    assert row["notes"].startswith("v3, expressive || 2026-09-30 PRICE CORRECTED 100.0 -> 80.0 (per 1M characters): Provider price cut.")
