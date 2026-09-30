@@ -174,6 +174,75 @@ def test_a_cut_word_mid_beat_is_caught_though_the_beat_ends_clean(tmp_path):
 def test_the_beat_is_sampled_across_its_window_and_at_its_tail():
     from kitesforu_qa.harness.checks.visual import _beat_sample_times
 
-    assert _beat_sample_times(0.0, 6.0) == [0.5, 1.5, 2.5, 3.5, 5.5]   # 4 spread + the tail
+    assert _beat_sample_times(0.0, 6.0) == [0.5, 1.5, 3.5, 4.5, 5.5]   # 4 spread, last interior kept, + tail
+    assert _beat_sample_times(0.0, 20.0) == [0.5, 6.5, 12.5, 18.5, 19.5]  # no 5 s hole before the tail
     assert _beat_sample_times(10.0, 10.4) == [10.0]                      # a sliver: its start
     assert _beat_sample_times(0.0, 2.0) == [0.5, 1.5]                    # the tail is 1.5 itself
+
+
+# ── The OCR reader itself: what counts as a word, and what a failure means (#179 round-1 critic) ──
+
+_TSV_HEAD = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"
+
+
+def _tsv(*rows):
+    return "\n".join([_TSV_HEAD] + ["\t".join(map(str, r)) for r in rows]) + "\n"
+
+
+class _Img:
+    size = (1920, 1080)
+
+    def save(self, path):
+        open(path, "wb").close()
+
+
+def _fake_tesseract(monkeypatch, *, stdout="", rc=0, missing=False):
+    import subprocess
+
+    real = subprocess.run
+
+    def run(args, *a, **kw):
+        if args and args[0] == "tesseract":
+            if missing:
+                raise FileNotFoundError("tesseract")
+            return subprocess.CompletedProcess(args, rc, stdout=stdout, stderr="boom" if rc else "")
+        return real(args, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_the_reader_keeps_words_and_drops_what_is_not_text(monkeypatch):
+    """Structure rows (conf -1), blanks, low confidence, a lone glyph (an AI badge's `·` read as `-`)
+    and a box taller than a quarter of the frame (texture read as a word) are not words."""
+    from kitesforu_qa.harness.checks.visual import _ocr_words
+
+    _fake_tesseract(monkeypatch, stdout=_tsv(
+        (1, 1, 0, 0, 0, 0, 0, 0, 1920, 1080, -1, ""),
+        (5, 1, 1, 1, 1, 1, 10, 500, 180, 50, 91, "molecu"),
+        (5, 1, 1, 1, 1, 2, 300, 500, 60, 50, 12, "noise"),
+        (5, 1, 1, 1, 1, 3, 400, 500, 20, 50, 95, "   "),
+        (5, 1, 1, 1, 1, 4, 1483, 2, 12, 45, 88, "-"),
+        (5, 1, 1, 1, 1, 5, 0, 0, 1488, 991, 60, "Whe"),
+        (5, 1, 1, 1, 1, 6, 700, 600, 120, 48, 90, "Café"),
+    ))
+    assert [w for w, *_ in _ocr_words(_Img())] == ["molecu", "Café"]
+
+
+def test_a_failing_tesseract_run_is_an_error_not_zero_words(monkeypatch):
+    """A non-zero exit with empty output must not read as "no words on this frame", which PASSES."""
+    from kitesforu_qa.harness.checks.visual import _ocr_words
+
+    _fake_tesseract(monkeypatch, rc=1)
+    with pytest.raises(RuntimeError):
+        _ocr_words(_Img())
+
+
+def test_a_missing_tesseract_skips_the_check_never_passes_it(tmp_path, monkeypatch):
+    """Fail-open means SKIP: no OCR available must never read as a clean frame. On the edge-clipped
+    fixture a PASS here would hide exactly the cut the check exists for."""
+    video = _diagram_video_with_text(str(tmp_path / "edge.mp4"), x=-40)
+    _fake_tesseract(monkeypatch, missing=True)
+    art = Artifact.from_doc(_diagram_doc(), video_path=video)
+    _sr, by = _by_check(art)
+    for cid in ("visual.text_not_edge_cropped", "visual.text_in_safe_area"):
+        assert by[cid]["skipped"], by[cid]

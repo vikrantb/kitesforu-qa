@@ -19,7 +19,7 @@ a packaging gap that must be fixed (add ``Pillow``) or the visual battery import
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Optional
 
 from ..check import check, skip
 
@@ -75,6 +75,13 @@ _VIDEO_H = 1080
 # 29355571) sat mid-dwell (the 2026-09-30 zoom-crop audit).
 _OCR_CONF_MIN = 40              # tesseract word confidence floor (0-100); below this is noise
 _EDGE_CROP_PX = 3               # a word within this many px of the frame edge is LITERALLY clipped
+#: A word the OCR checks read must look like text: at least this many letters or digits, in a box no
+#: taller than this fraction of the frame. Tesseract reads texture as words. On real masters (#179
+#: round-1 critic BLOCK) a textless wave image gave "words" in 566- and 991-px boxes, and an AI
+#: badge's `·` read as `-`, 2 of 3 FAIL verdicts on the sample; every canary hit ("molecu",
+#: "scatters", "light", "strongly") passes both floors.
+_OCR_MIN_ALNUM = 2
+_OCR_MAX_GLYPH_H_FRAC = 0.25
 _TEXT_SAFE_MARGIN_FRAC = 0.08   # the softer SMPTE-style advisory margin (matches workers Layer 1's
                                  # DEFAULT_MARGIN_FRAC by deliberate convention, not coupling)
 _WORST_CASE_TAIL_S = 0.5        # "last ~500ms" of a beat's on-screen window: always one sample
@@ -1049,29 +1056,49 @@ def _beat_sample_times(lo: float, hi: float) -> list[float]:
     while t < tail:
         times.append(t)
         t += _SAMPLE_EVERY_S
-    if len(times) > _MAX_FRAMES_PER_BEAT - 1:
-        step = len(times) / (_MAX_FRAMES_PER_BEAT - 1)
-        times = [times[int(i * step)] for i in range(_MAX_FRAMES_PER_BEAT - 1)]
+    keep = _MAX_FRAMES_PER_BEAT - 1
+    if len(times) > keep:
+        # Spread across the WHOLE window, first and last interior sample included: `int(i * step)` left
+        # a gap before the tail ((0, 20) kept 0.5, 4.5, 9.5, 14.5 then 19.5; #179 round-1 critic NIT).
+        times = [times[round(i * (len(times) - 1) / (keep - 1))] for i in range(keep)] if keep > 1 else times[:1]
     return times + [tail]
 
 
-def _diagram_frames(art) -> list[tuple[int, Any]]:
-    """``[(beat_index, PIL.Image)]``: up to :data:`_MAX_DIAGRAM_BEATS_SAMPLED` structural-diagram beats,
-    each sampled across its on-screen window (:func:`_beat_sample_times`). Evenly subsampled across ALL
-    beats (not just the first N) so a long episode's check isn't biased toward its opening beats
-    — bounded, orchestra-oe. $0 CPU (ffmpeg + PIL), no LLM."""
+def _diagram_frame_words(art) -> list[tuple[int, int, int, Optional[list[tuple[str, int, int, int, int]]]]]:
+    """``[(beat_index, width, height, words)]``, one row per sampled frame: up to
+    :data:`_MAX_DIAGRAM_BEATS_SAMPLED` structural-diagram beats, each sampled across its on-screen
+    window (:func:`_beat_sample_times`), evenly subsampled across ALL beats so a long episode's check
+    isn't biased toward its opening. ``words`` is :func:`_ocr_words` of the frame, or ``None`` when
+    OCR failed on it.
+
+    Computed ONCE per artifact and shared by both OCR checks: each extracted and OCR'd the same frames,
+    and held every frame in memory first (up to 60 full-resolution frames; #179 round-1 latency and
+    critic NITs). Each frame is now read and dropped. $0 CPU (ffmpeg + tesseract), no LLM."""
+    cached = getattr(art, "_diagram_frame_words_cache", None)
+    if cached is not None:
+        return cached
     spans = _structural_clip_spans(art)
-    if not spans:
-        return []
     if len(spans) > _MAX_DIAGRAM_BEATS_SAMPLED:
         step = len(spans) / _MAX_DIAGRAM_BEATS_SAMPLED
         spans = [spans[int(i * step)] for i in range(_MAX_DIAGRAM_BEATS_SAMPLED)]
-    out: list[tuple[int, Any]] = []
+    out: list[tuple[int, int, int, Optional[list[tuple[str, int, int, int, int]]]]] = []
     for bi, lo, hi in spans:
         for at in _beat_sample_times(lo, hi):
             img = _extract_frame_at(art.video_path, at)
-            if img is not None:
-                out.append((bi, img))
+            if img is None:
+                continue
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                continue
+            try:
+                words: Optional[list[tuple[str, int, int, int, int]]] = _ocr_words(img)
+            except Exception:  # noqa: BLE001 — no OCR on THIS frame; the others are still read
+                words = None
+            out.append((bi, w, h, words))
+    try:
+        setattr(art, "_diagram_frame_words_cache", out)
+    except Exception:  # noqa: BLE001 — an artifact that refuses attributes just recomputes
+        pass
     return out
 
 
@@ -1121,6 +1148,10 @@ def _ocr_words(img) -> list[tuple[str, int, int, int, int]]:
             continue
         if conf < _OCR_CONF_MIN:
             continue
+        if sum(ch.isalnum() for ch in word) < _OCR_MIN_ALNUM:
+            continue
+        if img.size[1] > 0 and hh > _OCR_MAX_GLYPH_H_FRAC * img.size[1]:
+            continue
         out.append((word, x, y, ww, hh))
     return out
 
@@ -1135,25 +1166,20 @@ def text_not_edge_cropped(art):
     _require_visuals(art)
     if not getattr(art, "video_path", None):
         skip("no video to frame-extract")
-    frames = _diagram_frames(art)
-    if not frames:
+    if not _structural_clip_spans(art):
         skip("no structural-diagram clip with a usable on-screen span")
-    clipped: list[str] = []
+    clipped: list[str] = []  # one entry per (beat, word): a word cut on 5 frames of a beat is one finding
     assessed = 0
-    for bi, img in frames:
-        w, h = img.size
-        if w <= 0 or h <= 0:
-            continue
-        try:
-            words = _ocr_words(img)
-        except Exception as exc:  # noqa: BLE001 — no OCR on THIS frame; other frames still assessed
-            _ = exc
+    for bi, w, h, words in _diagram_frame_words(art):
+        if words is None:
             continue
         assessed += 1
         for word, x, y, ww, hh in words:
             if (x <= _EDGE_CROP_PX or y <= _EDGE_CROP_PX
                     or (x + ww) >= (w - _EDGE_CROP_PX) or (y + hh) >= (h - _EDGE_CROP_PX)):
-                clipped.append(f"beat {bi}: {word!r} touches the frame edge")
+                found = f"beat {bi}: {word!r} touches the frame edge"
+                if found not in clipped:
+                    clipped.append(found)
     if assessed == 0:
         skip("tesseract unavailable (or OCR failed on every sampled frame)")
     ok = not clipped
@@ -1170,26 +1196,21 @@ def text_in_safe_area(art):
     _require_visuals(art)
     if not getattr(art, "video_path", None):
         skip("no video to frame-extract")
-    frames = _diagram_frames(art)
-    if not frames:
+    if not _structural_clip_spans(art):
         skip("no structural-diagram clip with a usable on-screen span")
     outside: list[str] = []
     assessed = 0
-    for bi, img in frames:
-        w, h = img.size
-        if w <= 0 or h <= 0:
-            continue
-        try:
-            words = _ocr_words(img)
-        except Exception as exc:  # noqa: BLE001 — no OCR on THIS frame; other frames still assessed
-            _ = exc
+    for bi, w, h, words in _diagram_frame_words(art):
+        if words is None:
             continue
         assessed += 1
         lo_x, hi_x = w * _TEXT_SAFE_MARGIN_FRAC, w * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
         lo_y, hi_y = h * _TEXT_SAFE_MARGIN_FRAC, h * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
         for word, x, y, ww, hh in words:
             if x < lo_x or y < lo_y or (x + ww) > hi_x or (y + hh) > hi_y:
-                outside.append(f"beat {bi}: {word!r}")
+                found = f"beat {bi}: {word!r}"
+                if found not in outside:
+                    outside.append(found)
     if assessed == 0:
         skip("tesseract unavailable (or OCR failed on every sampled frame)")
     ok = not outside
