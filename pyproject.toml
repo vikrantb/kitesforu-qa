@@ -44,11 +44,9 @@ dependencies = [
     # quality-harness visual battery (qh-check-batteries) reads art.image_paths with Pillow for
     # dimension/blank/text analysis; importable in dev but undeclared = clean-CI import failure.
     "Pillow>=10",
-    # LONG-FORM CORRECTNESS Part D, Layer 2 (visual.text_not_edge_cropped / visual.text_in_safe_area):
-    # OCR's the last ~500ms of each diagram/chart beat to catch cut/overflow text. The pip package
-    # installs fine standalone; it shells out to the tesseract-ocr SYSTEM binary at call time (see
-    # docker/Dockerfile) — when that binary is absent, both checks fail-open (skip()), never crash.
-    "pytesseract>=0.3.10",
+    # LONG-FORM CORRECTNESS Part D, Layer 2 (visual.text_not_edge_cropped / visual.text_in_safe_area)
+    # shell the tesseract-ocr SYSTEM binary directly (see docker/Dockerfile); no Python wrapper is
+    # needed. When the binary is absent, both checks fail-open (skip()), never crash.
 ]
 
 [project.optional-dependencies]

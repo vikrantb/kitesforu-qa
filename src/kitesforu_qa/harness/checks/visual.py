@@ -1081,9 +1081,11 @@ def _ocr_words(img) -> list[tuple[str, int, int, int, int]]:
     PER-FRAME and treat an all-frames failure as ``skip()`` (fail-open: no OCR available must never
     FAIL the gate).
 
-    The CLI, not ``pytesseract``: that wrapper was never a declared dependency, so on every
-    environment checked (the QA venv and the workers venv, 2026-09-30) the import failed and this
-    CRITICAL check SKIPPED on every artifact. The binary was the real dependency all along."""
+    The CLI, not ``pytesseract``: the wrapper was declared (``pyproject.toml`` since #58) but not
+    installed in any environment checked (the QA venv and the workers venv, 2026-09-30: a stale
+    install, not a missing declaration), so the import failed and this CRITICAL check SKIPPED on
+    every artifact. The binary was the real dependency all along, and a wrapper that must also be
+    installed is one more way for the gate to go silent, so the dependency is gone."""
     import os
     import subprocess
     import tempfile
