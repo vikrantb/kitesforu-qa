@@ -71,6 +71,21 @@ def _by_check(art) -> tuple:
     return sr, {c["check_id"]: c for c in sr.data["checks"]}
 
 
+#: What each check says when it failed ON A WORD, as opposed to any other failure.
+_FAILED_ON = {"visual.text_not_edge_cropped": "touches the frame edge",
+              "visual.text_in_safe_area": "safe area over"}
+
+
+def _failed_on_a_word(check: dict) -> None:
+    """The check read frames and failed on text. A check that RAISES is recorded as failed
+    (``check raised: …``, harness/check.py), so a bare ``not passed`` went green with no frame
+    read at all: in a venv without Pillow every "must fail" pin here passed (#179 round-1 claims
+    SF). The evidence must name the failure the pin is about."""
+    assert not check["skipped"], check["evidence"]
+    assert not check["passed"], check["evidence"]
+    assert _FAILED_ON[check["check_id"]] in str(check["evidence"]), check["evidence"]
+
+
 def test_edge_clipped_text_fails_both_checks_and_gates_the_dimension(tmp_path):
     # x=-40 draws the label PARTLY off-canvas — the VISIBLE remainder is truncated at x=0, the
     # literal pixel-level "chopped at the frame edge" bug (not merely "close to the edge").
@@ -79,12 +94,10 @@ def test_edge_clipped_text_fails_both_checks_and_gates_the_dimension(tmp_path):
     sr, by = _by_check(art)
 
     crit = by["visual.text_not_edge_cropped"]
-    assert not crit["skipped"], crit["evidence"]
-    assert not crit["passed"], f"expected edge-clipped text to FAIL: {crit['evidence']}"
+    _failed_on_a_word(crit)  # edge-clipped text must FAIL on the word
 
     adv = by["visual.text_in_safe_area"]
-    assert not adv["skipped"], adv["evidence"]
-    assert not adv["passed"], f"edge-clipped text is also outside the safe area: {adv['evidence']}"
+    _failed_on_a_word(adv)  # edge-clipped text is also outside the safe area
 
     # a CRITICAL check failing must gate the whole dimension (battery.py's _GATING contract)
     assert not sr.passed, "critical text_not_edge_cropped failure must fail the dimension gate"
@@ -101,8 +114,7 @@ def test_crowded_but_not_clipped_text_fails_only_the_advisory_check(tmp_path):
     assert crit["passed"], f"x=50 is >3px from the edge — must NOT be flagged as clipped: {crit['evidence']}"
 
     adv = by["visual.text_in_safe_area"]
-    assert not adv["skipped"], adv["evidence"]
-    assert not adv["passed"], f"x=50 < {_MARGIN_PX}px margin — must be flagged advisory: {adv['evidence']}"
+    _failed_on_a_word(adv)  # x=50 < the safe-area margin: flagged advisory
 
     # advisory (low severity) never gates the dimension on its own.
     assert sr.passed, "an advisory-only failure must not fail the gate"
@@ -155,8 +167,7 @@ def test_a_cut_word_mid_beat_is_caught_though_the_beat_ends_clean(tmp_path):
     art = Artifact.from_doc(doc, video_path=video)
     sr, by = _by_check(art)
     crit = by["visual.text_not_edge_cropped"]
-    assert not crit["skipped"], crit["evidence"]
-    assert not crit["passed"], f"a word cut mid-beat must fail: {crit['evidence']}"
+    _failed_on_a_word(crit)  # a word cut mid-beat must fail
     assert not sr.passed
 
 
