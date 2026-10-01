@@ -19,7 +19,7 @@ a packaging gap that must be fixed (add ``Pillow``) or the visual battery import
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from ..check import check, skip
 
@@ -88,6 +88,12 @@ _WORST_CASE_TAIL_S = 0.5        # "last ~500ms" of a beat's on-screen window: al
 _SAMPLE_EVERY_S = 1.0           # one frame a second across the window (a tour dwell is >= 1.1 s)
 _MAX_FRAMES_PER_BEAT = 5        # bounded per beat, evenly spread over the window
 _MAX_DIAGRAM_BEATS_SAMPLED = 12  # bounded (orchestra-oe): evenly subsampled, never unbounded
+#: A word at the edge counts as CUT only if it is still at that edge this much later. The founder's
+#: crop is HELD: the canary's "molecu" sits cut at 5.3 s and again at 7.3 s. A scene transition only
+#: crosses the edge: the born-short slide lasts 0.15 s (workers `video_assembler._SHORT_SLIDE_S`), and
+#: on bffb7d14 (2026-09-30) a sample 0.5 s into the doc's beat-4 window landed mid-slide, read
+#: "etic"/"ield"/"urrent" at the left edge, and was whole 1 s later. 0.3 s clears a whole slide.
+_HELD_CONFIRM_S = 0.3
 
 # Diagram-weave adjacency caps — MIRROR the workers' modality_selector.weave() invariant
 # (stages/visuals/modality_selector.py: _MAX_ADJACENT=1 fiction, _MAX_ADJACENT_NONFICTION=2). The
@@ -1064,8 +1070,21 @@ def _beat_sample_times(lo: float, hi: float) -> list[float]:
     return times + [tail]
 
 
-def _diagram_frame_words(art) -> list[tuple[int, int, int, Optional[list[tuple[str, int, int, int, int]]]]]:
-    """``[(beat_index, width, height, words)]``, one row per sampled frame: up to
+class _SampledFrame(NamedTuple):
+    """One OCR'd frame of a structural-diagram beat: where it was sampled (``at``, inside the beat's
+    on-screen window ``[lo, hi)``), its size, and ``words`` (``None`` when OCR failed on it)."""
+
+    beat: int
+    width: int
+    height: int
+    words: list[tuple[str, int, int, int, int]] | None
+    at: float
+    lo: float
+    hi: float
+
+
+def _diagram_frame_words(art) -> list[_SampledFrame]:
+    """One :class:`_SampledFrame` per sampled frame: up to
     :data:`_MAX_DIAGRAM_BEATS_SAMPLED` structural-diagram beats, each sampled across its on-screen
     window (:func:`_beat_sample_times`), evenly subsampled across ALL beats so a long episode's check
     isn't biased toward its opening. ``words`` is :func:`_ocr_words` of the frame, or ``None`` when
@@ -1081,7 +1100,7 @@ def _diagram_frame_words(art) -> list[tuple[int, int, int, Optional[list[tuple[s
     if len(spans) > _MAX_DIAGRAM_BEATS_SAMPLED:
         step = len(spans) / _MAX_DIAGRAM_BEATS_SAMPLED
         spans = [spans[int(i * step)] for i in range(_MAX_DIAGRAM_BEATS_SAMPLED)]
-    out: list[tuple[int, int, int, Optional[list[tuple[str, int, int, int, int]]]]] = []
+    out: list[_SampledFrame] = []
     for bi, lo, hi in spans:
         for at in _beat_sample_times(lo, hi):
             img = _extract_frame_at(art.video_path, at)
@@ -1094,7 +1113,7 @@ def _diagram_frame_words(art) -> list[tuple[int, int, int, Optional[list[tuple[s
                 words: Optional[list[tuple[str, int, int, int, int]]] = _ocr_words(img)
             except Exception:  # noqa: BLE001 — no OCR on THIS frame; the others are still read
                 words = None
-            out.append((bi, w, h, words))
+            out.append(_SampledFrame(bi, w, h, words, at, lo, hi))
     try:
         setattr(art, "_diagram_frame_words_cache", out)
     except Exception:  # noqa: BLE001 — an artifact that refuses attributes just recomputes
@@ -1169,22 +1188,91 @@ def text_not_edge_cropped(art):
     if not _structural_clip_spans(art):
         skip("no structural-diagram clip with a usable on-screen span")
     clipped: list[str] = []  # one entry per (beat, word): a word cut on 5 frames of a beat is one finding
+    passing = 0  # edge words the confirm frame showed moving on (a transition or camera travel)
     assessed = 0
-    for bi, w, h, words in _diagram_frame_words(art):
-        if words is None:
+    for f in _diagram_frame_words(art):
+        if f.words is None:
             continue
         assessed += 1
-        for word, x, y, ww, hh in words:
-            if (x <= _EDGE_CROP_PX or y <= _EDGE_CROP_PX
-                    or (x + ww) >= (w - _EDGE_CROP_PX) or (y + hh) >= (h - _EDGE_CROP_PX)):
-                found = f"beat {bi}: {word!r} touches the frame edge"
-                if found not in clipped:
-                    clipped.append(found)
+        at_edge = [wd for wd in f.words if _edge_sides(wd, f.width, f.height)]
+        if not at_edge:
+            continue
+        held = _held_at_edge(art.video_path, f, at_edge)
+        passing += len(at_edge) - len(held)
+        for word in held:
+            found = f"beat {f.beat}: {word!r} touches the frame edge"
+            if found not in clipped:
+                clipped.append(found)
     if assessed == 0:
         skip("tesseract unavailable (or OCR failed on every sampled frame)")
     ok = not clipped
     return ok, (f"{len(clipped)} edge-touching word(s) over {assessed} frame(s) sampled "
-                f"(±{_EDGE_CROP_PX}px floor): {clipped[:5]}")
+                f"(±{_EDGE_CROP_PX}px floor): {clipped[:5]}; {passing} crossing an edge only in "
+                f"passing (gone {_HELD_CONFIRM_S:g} s later) not counted")
+
+
+def _edge_sides(word: tuple[str, int, int, int, int], w: int, h: int) -> set[str]:
+    """Which frame edges an OCR'd word box touches, within :data:`_EDGE_CROP_PX`."""
+    x, y, ww, hh = word[1:]
+    sides = set()
+    if x <= _EDGE_CROP_PX:
+        sides.add("left")
+    if (x + ww) >= (w - _EDGE_CROP_PX):
+        sides.add("right")
+    if y <= _EDGE_CROP_PX:
+        sides.add("top")
+    if (y + hh) >= (h - _EDGE_CROP_PX):
+        sides.add("bottom")
+    return sides
+
+
+def _confirm_time(at: float, lo: float, hi: float) -> float | None:
+    """When to look again for a word found at the edge at ``at``: :data:`_HELD_CONFIRM_S` later, or
+    that much earlier when later falls outside the beat's window; ``None`` when neither fits."""
+    if at + _HELD_CONFIRM_S < hi:
+        return at + _HELD_CONFIRM_S
+    if at - _HELD_CONFIRM_S >= lo:
+        return at - _HELD_CONFIRM_S
+    return None
+
+
+def _held_at_edge(video_path: str, f: _SampledFrame,
+                  at_edge: list[tuple[str, int, int, int, int]]) -> list[str]:
+    """The words of ``at_edge`` still at the SAME edge on a second frame :data:`_HELD_CONFIRM_S`
+    away, inside the same beat: the same text, or a word box at the same place along that edge.
+    Anything that stops a confirmation (no room in the window, no frame, no OCR) keeps the finding,
+    so this can only remove words that were seen to move on."""
+    every = [wd[0] for wd in at_edge]
+    when = _confirm_time(f.at, f.lo, f.hi)
+    if when is None:
+        return every
+    img = _extract_frame_at(video_path, when)
+    if img is None:
+        return every
+    try:
+        again = _ocr_words(img)
+    except Exception:  # noqa: BLE001 — no second look is not evidence of motion
+        return every
+    w2, h2 = img.size
+    held = []
+    for word in at_edge:
+        text, x, y, ww, hh = word
+        sides = _edge_sides(word, f.width, f.height)
+        for other in again:
+            o_text, ox, oy, oww, ohh = other
+            shared = sides & _edge_sides(other, w2, h2)
+            if not shared:
+                continue
+            if o_text == text:
+                held.append(text)
+                break
+            if shared & {"left", "right"} and abs((oy + ohh / 2) - (y + hh / 2)) <= max(hh, ohh):
+                held.append(text)
+                break
+            if shared & {"top", "bottom"} and abs((ox + oww / 2) - (x + ww / 2)) <= max(ww, oww):
+                held.append(text)
+                break
+    return held
 
 
 @check("visual.text_in_safe_area", dimension=_DIMENSION, severity="low")
@@ -1200,15 +1288,15 @@ def text_in_safe_area(art):
         skip("no structural-diagram clip with a usable on-screen span")
     outside: list[str] = []
     assessed = 0
-    for bi, w, h, words in _diagram_frame_words(art):
-        if words is None:
+    for f in _diagram_frame_words(art):
+        if f.words is None:
             continue
         assessed += 1
-        lo_x, hi_x = w * _TEXT_SAFE_MARGIN_FRAC, w * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
-        lo_y, hi_y = h * _TEXT_SAFE_MARGIN_FRAC, h * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
-        for word, x, y, ww, hh in words:
+        lo_x, hi_x = f.width * _TEXT_SAFE_MARGIN_FRAC, f.width * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
+        lo_y, hi_y = f.height * _TEXT_SAFE_MARGIN_FRAC, f.height * (1.0 - _TEXT_SAFE_MARGIN_FRAC)
+        for word, x, y, ww, hh in f.words:
             if x < lo_x or y < lo_y or (x + ww) > hi_x or (y + hh) > hi_y:
-                found = f"beat {bi}: {word!r}"
+                found = f"beat {f.beat}: {word!r}"
                 if found not in outside:
                     outside.append(found)
     if assessed == 0:

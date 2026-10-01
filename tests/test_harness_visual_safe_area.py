@@ -246,3 +246,57 @@ def test_a_missing_tesseract_skips_the_check_never_passes_it(tmp_path, monkeypat
     _sr, by = _by_check(art)
     for cid in ("visual.text_not_edge_cropped", "visual.text_in_safe_area"):
         assert by[cid]["skipped"], by[cid]
+
+
+# ── a word that crosses the edge in a transition is not a crop (bffb7d14, 2026-09-30) ─────────────
+# The founder's crop is HELD (the canary's "molecu" is cut at 5.3 s and again at 7.3 s). A born-short
+# slide transition lasts 0.15 s and moves every word across the edge on its way; on bffb7d14 one
+# sample landed mid-slide and failed a master whose beat was whole a second later.
+
+def _sliding_video(path: str, *, seconds: float = 3.0, text: str = "EDGE LABEL") -> str:
+    """The label sits 60 px off the left edge at t=0.5 s (the first sample) and is inside the frame
+    from t=0.65 s on: a slide caught in flight, then a whole word for the rest of the beat."""
+    _ffmpeg(
+        "-f", "lavfi", "-i", f"color=c=0x0b1020:s={_W}x{_H}:d={seconds}",
+        "-vf", (f"drawtext=text='{text}':x='if(lt(t\\,0.65)\\,-660+t*1200\\,900)':y=500:"
+                "fontsize=54:fontcolor=white"),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", path,
+    )
+    return path
+
+
+def test_a_word_crossing_the_edge_in_a_transition_is_not_a_crop(tmp_path):
+    video = _sliding_video(str(tmp_path / "slide.mp4"))
+    art = Artifact.from_doc(_diagram_doc(), video_path=video)
+    _sr, by = _by_check(art)
+    crit = by["visual.text_not_edge_cropped"]
+    assert not crit["skipped"], crit["evidence"]
+    assert crit["passed"], f"a word only crossing the edge must not fail the gate: {crit['evidence']}"
+    # It was SEEN at the edge and set aside, not missed: the evidence counts it.
+    import re
+
+    passing = re.search(r"(\d+) crossing an edge only in passing", crit["evidence"])
+    assert passing and int(passing.group(1)) >= 1, crit["evidence"]
+
+
+def test_the_confirm_frame_stays_inside_the_beat():
+    from kitesforu_qa.harness.checks import visual as vis
+
+    assert vis._confirm_time(0.5, 0.0, 3.0) == pytest.approx(0.5 + vis._HELD_CONFIRM_S)
+    # Near the end of the window, look back instead of past the beat into the next one.
+    assert vis._confirm_time(2.9, 0.0, 3.0) == pytest.approx(2.9 - vis._HELD_CONFIRM_S)
+    # No room either way: there is nothing to confirm with, so the finding stands (see below).
+    assert vis._confirm_time(0.1, 0.0, 0.25) is None
+
+
+def test_a_confirmation_that_cannot_run_keeps_the_finding(monkeypatch):
+    """Only a second frame that SHOWS the word moved may remove it; a missing frame, a failed OCR or
+    no room in the window is not evidence of motion."""
+    from kitesforu_qa.harness.checks import visual as vis
+
+    cut = [("molecu", 1654, 500, 266, 64)]
+    frame = vis._SampledFrame(beat=2, width=1920, height=1080, words=cut, at=5.302, lo=3.802, hi=9.007)
+    monkeypatch.setattr(vis, "_extract_frame_at", lambda _path, _at: None)
+    assert vis._held_at_edge("unused.mp4", frame, cut) == ["molecu"]
+    short = frame._replace(at=0.1, lo=0.0, hi=0.25)
+    assert vis._held_at_edge("unused.mp4", short, cut) == ["molecu"]
