@@ -151,10 +151,15 @@ def stamp_vs_clips(block, clips: list) -> str:
     * ``meta.assets`` present (workers #3239+): the stamp books every paid dispatch across every
       pass, so it is a SUPERSET of what the final clips show. ``under`` = a paid asset the clips
       show (workers' own ``image_cost_ledger.paid_assets``, called here, not mirrored) is missing
-      from ``meta.assets`` and not listed free in ``meta.free``, or the clips show more unnamed
-      paid stills than ``meta.unnamed`` booked; ``exact`` otherwise. Booked assets the clips do not
-      show are renders the job paid for and discarded, or a pass the plan dropped — by design,
-      never ``over``.
+      from ``meta.assets`` and not listed free in ``meta.free``, or, for some MODEL, the clips show
+      more unnamed paid stills than ``meta.unnamed`` booked for that model; ``exact`` otherwise.
+      Booked assets the clips do not show are renders the job paid for and discarded, or a pass the
+      plan dropped — by design, never ``over``.
+      ``contradiction`` = an id sits in BOTH ``meta.assets`` and ``meta.free``. The producer never
+      writes that since workers #3239 round 3 (an id booked as paid leaves ``meta.free``), but a
+      stamp rolled up before it can carry both readings of one asset. Such a stamp does not follow
+      its own definition, so it is named rather than read as ``under`` or ``exact`` (#181 round-3
+      design SF1: it read as ``exact``).
     * legacy (``meta.scenes`` only): written once per CLIP, so compare to the per-clip count.
 
     Returns ``"none"`` when there is nothing to compare."""
@@ -167,13 +172,22 @@ def stamp_vs_clips(block, clips: list) -> str:
         # need the ledger module to classify a job.
         from workers.stages.visuals.image_cost_ledger import paid_assets
 
-        assets, unnamed, _usd = paid_assets(clips)
         free = set(meta.get("free") or [])
+        if free & set(booked):
+            return "contradiction"
+        assets, unnamed, _usd = paid_assets(clips)
         booked_unnamed = meta.get("unnamed") if isinstance(meta.get("unnamed"), dict) else {}
-        unnamed_booked = sum(int((d or {}).get("n") or 0) for d in booked_unnamed.values()
-                             if isinstance(d, dict))
+
+        def _booked_n(model: str) -> int:
+            d = booked_unnamed.get(model)
+            return int(d.get("n") or 0) if isinstance(d, dict) else 0
+
+        # PER MODEL, as the producer keeps it: one high-water mark per model. A sum across models
+        # lets one model's surplus hide another's shortfall (#181 round-3 design NIT1, critic N2:
+        # 2 unnamed flux-schnell shown against {flux-schnell: 1, imagen: 1} booked read `exact`).
+        short = [m for m, n in unnamed.items() if n > _booked_n(m)]
         missing = set(assets) - set(booked) - free
-        return "under" if (missing or sum(unnamed.values()) > unnamed_booked) else "exact"
+        return "under" if (missing or short) else "exact"
     sc = meta.get("scenes")
     if sc is None:
         return "none"
@@ -214,6 +228,7 @@ def main() -> int:
     fiction_beat_jobs = 0
     tree_mermaid_jobs = 0
     cost_exact = cost_under = cost_over = 0
+    cost_contradiction = []  # a stamp booking an id it also lists free: named, never counted exact
     kinds: collections.Counter = collections.Counter()
 
     for d in db.collection(COLLECTION).stream():
@@ -270,6 +285,8 @@ def main() -> int:
             cost_over += 1
         elif verdict == "exact":
             cost_exact += 1
+        elif verdict == "contradiction":
+            cost_contradiction.append(d.id[:8])
 
     print(f"POST-DEPLOY FICTION CENSUS — jobs created since {since}")
     print(f"  (deploy of e4741405 on worker-visuals: {DEPLOY_UTC})\n")
@@ -308,6 +325,8 @@ def main() -> int:
           f"({100*with_bible/settled:.0f}%)   BEFORE: 55%")
     print(f"  4) image-cost stamp vs settled       : exact {cost_exact} · UNDER {cost_under} "
           f"· over {cost_over}")
+    print(f"       contradiction (an id booked AND listed free): "
+          f"{len(cost_contradiction)}{_ids(cost_contradiction)}")
     print("       BEFORE (all history): exact 109 · UNDER 104 · over 28")
     print("       (a stamp with meta.assets is read as a superset of the clips: never 'over')")
     print()

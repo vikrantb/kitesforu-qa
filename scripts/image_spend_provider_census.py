@@ -40,9 +40,16 @@ appears in the provider arm only. The post-deploy comparison therefore reads ``b
 ``returned`` PLUS the job's accepted Imagen requests (``returned_or_imagen``); a job with Imagen
 requests is the one place that comparison leans on the provider arm's upper bound.
 
-ATTRIBUTION IS PARTIAL, and the script says how partial: a request logged without
-``jsonPayload.job_id`` is counted under "unattributed" and in no job's row, so a per-job count can
-be LOW. The two biases point opposite ways; the returned arm carries only the low one.
+ATTRIBUTION IS PARTIAL ONLY BEFORE REVISION 01200, and the script says how partial: a request
+logged without ``jsonPayload.job_id`` is counted under "unattributed" and in no job's row, so a
+per-job count can be LOW. That happens only on old revisions. Every unattributed accepted request
+in the logs is on ``kitesforu-worker-visuals`` revision 01198 or earlier, at or before
+2026-09-08T10:58:13Z. Every attributed one is on revision 01200 or later, at or after
+2026-09-08T14:02:51Z. Re-derived 2026-10-01 over ``--since 2026-09-01T00:00:00Z``: 2,711 lines,
+865 attributed and 417 unattributed accepted requests, with 0 on the wrong side of the boundary
+in either direction (#181 round-3 claims N1). So a window that starts after 2026-09-08T14:02:51Z
+has no low bias, and that includes every post-deploy window this census exists for. Before the
+boundary, the two biases point opposite ways, and the returned arm carries only the low one.
 
 TRUNCATION IS AN ERROR. ``gcloud logging read --limit N`` returning exactly N rows means the window
 held more; every per-job count would silently become a lower bound, so the script stops instead.
@@ -124,13 +131,18 @@ _LOG_FILTER = (
 
 def catalog_model(family: str, raw: str) -> str:
     """The catalog row a request or success line names. fal names an endpoint path
-    (``fal-ai/flux/schnell``); the catalog names the model (``flux-schnell``)."""
+    (``fal-ai/flux/schnell``); the catalog names the model (``flux-schnell``). The path → model
+    map is workers' own ``fal_flux_client._MODEL_PATHS``, inverted, not a hand copy (#181 round-3
+    design NIT2), so a model workers adds there is priced as that model. A path the map does not
+    name stays a raw path, prices at $0 and shows up under its own key. The log filter still reads
+    only ``fal-ai/flux*`` request paths."""
     raw = raw.strip().strip('"').rstrip("/")
     if family == "fal_flux":
-        if "schnell" in raw:
-            return "flux-schnell"
-        if raw.endswith("/dev") or "flux-dev" in raw or "flux/dev" in raw:
-            return "flux-dev"
+        from workers.stages.visuals.fal_flux_client import _MODEL_PATHS
+
+        for model, path in _MODEL_PATHS.items():
+            if raw in (path, model):
+                return model
     return raw
 
 
@@ -207,9 +219,22 @@ def priced(counts: Any, price: Callable[[str], float]) -> float:
     return sum(n * price(k.split(":", 1)[1]) for k, n in (counts or {}).items())
 
 
+#: The only ``podcast_jobs`` fields :func:`job_row` and the owner lookup read. The #181 round-3
+#: latency lens measured a whole job doc at p50 299 KB / 425 ms and the masked read at 8.4 KB /
+#: 120 ms (7 jobs x 3 reads, from a laptop).
+JOB_FIELDS = ("visual.clips", "costs.visuals_images", "user_id")
+
+
+def read_job(db: Any, jid: str) -> dict:
+    """The ``podcast_jobs`` doc of ``jid``, masked to :data:`JOB_FIELDS` (``{}`` when missing)."""
+    snap = db.collection("podcast_jobs").document(jid).get(field_paths=list(JOB_FIELDS))
+    return (snap.to_dict() or {}) if snap.exists else {}
+
+
 def job_row(jid: str, doc: dict, fams: Any, done_fams: Any, owner: str,
             price: Callable[[str], float]) -> dict:
-    """One job's arms. ``doc`` is the ``podcast_jobs`` dict (``{}`` when the doc is missing)."""
+    """One job's arms. ``doc`` is the ``podcast_jobs`` dict as :func:`read_job` returns it
+    (``{}`` when the doc is missing)."""
     from workers.stages.visuals.image_cost_ledger import paid_assets
 
     fams = fams or collections.Counter()
@@ -289,8 +314,7 @@ def main() -> int:
     owners: dict[str, str] = {}
     table = []
     for jid in sorted(set(per_job) | set(done)):
-        snap = db.collection("podcast_jobs").document(jid).get()
-        d = (snap.to_dict() or {}) if snap.exists else {}
+        d = read_job(db, jid)
         table.append(job_row(jid, d, per_job.get(jid), done.get(jid),
                              owner_class(db, str(d.get("user_id") or ""), owners), price_of))
 
