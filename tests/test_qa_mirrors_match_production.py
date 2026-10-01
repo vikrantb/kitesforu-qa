@@ -1,58 +1,62 @@
-"""A QA mirror of a production predicate must still agree with it.
+"""The QA image-ledger scripts must read what the producer WRITES, and the fiction mirror must agree.
 
-WHY THIS EXISTS. Two census scripts deliberately re-implement a production rule so they can be
-run standalone, and each says so in its docstring:
+WHY THIS EXISTS. Census scripts that measure a production rule are only safe while they agree with
+it, and a drifted one does not fail: it reports a WRONG NUMBER with total confidence.
 
-    post_deploy_fiction_census.is_fiction      "Mirrors `_is_fiction_job`'s ordering"
-    post_deploy_fiction_census.countable_paid  "Mirrors `_sum_visuals_image_cost`'s inclusion rules"
+* ``post_deploy_fiction_census.is_fiction`` deliberately mirrors ``_is_fiction_job`` so the census
+  can classify a job; it is pinned case by case below. Measured 2026-08-28 against live Firestore:
+  ``is_fiction`` vs ``_is_fiction_job`` agreed on 4160/4160 jobs.
+* The image ledger is NOT mirrored any more (#181 round 2, design SF1). The three scripts call
+  workers' ``image_cost_ledger`` (``paid_assets``, ``asset_id``, ``clip_price``) for the current
+  rule and ``image_census_rules`` for the one frozen legacy rule. What can still drift is the
+  FIELD CONTRACT: the keys of ``costs.visuals_images.meta`` that #3239 writes and these scripts
+  read. So the ledger tests below build the block with the producer's real
+  ``image_cost_ledger.roll_up_images`` against an in-memory doc and run each script's reader on it
+  (round-2 critic S1: every reader test used a hand-written literal, and renaming the three keys in
+  the producer left this file green while the census read every new stamp as legacy).
 
-A copy is only safe while it agrees. Nothing checked that, and a silently-drifted mirror does not
-fail — it reports a WRONG NUMBER with total confidence, which is the most expensive failure a
-measurement tool has. `countable_paid`'s own docstring already names the cost: "Using a different
-definition than the producer inflates disagreement in BOTH directions."
+SKIP ONLY WHEN THE PRODUCER IS ABSENT, FAIL WHEN IT IS WRONG (round-2 design SF3, claims S1). The
+old module-level ``skipif`` turned ANY import error into a green skip of all 30 cases: a renamed
+symbol, a missing module, the 11 unrelated ``is_fiction`` cases with them. Now each mirror imports
+what it needs on its own. A test SKIPS only when the ``workers`` package cannot be found at all and
+``WORKERS_SRC`` was not set; it FAILS when ``workers`` imports but a named symbol is missing, and
+when ``WORKERS_SRC`` was set and points at no ``workers`` package.
 
-Measured 2026-08-28 before writing this, against live Firestore:
-    is_fiction     vs _is_fiction_job          4160/4160 agree, 0 disagree
-    countable_paid vs _sum_visuals_image_cost   817/817  agree, 0 disagree
-So this pins agreement that HOLDS today; it is a drift alarm, not a bug report.
-
-The fixtures below are offline and $0 — a unit test must not need Firestore. They cover each
-branch the mirrors actually implement, so a change to either side that alters a branch fails here.
-
-CROSS-REPO: the production side lives in kitesforu-workers. If that tree is not importable the
-test SKIPS LOUDLY rather than passing vacuously — a silent skip would be the same class of defect
-this file exists to catch.
+Offline and $0: no Firestore, no Cloud Logging, no provider.
 """
 from __future__ import annotations
 
+import collections
+import importlib
+import importlib.util
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 import pytest
 
 _QA_ROOT = Path(__file__).resolve().parents[1]
-_WORKERS_SRC = os.environ.get("WORKERS_SRC") or str(_QA_ROOT.parent / "kitesforu-workers" / "src")
+_EXPLICIT_SRC = os.environ.get("WORKERS_SRC")
+_WORKERS_SRC = _EXPLICIT_SRC or str(_QA_ROOT.parent / "kitesforu-workers" / "src")
 for _p in (str(_QA_ROOT / "scripts"), _WORKERS_SRC):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-_IMPORT_ERR = ""
-try:
-    from workers.common.architect_wiring import _is_fiction_job as prod_is_fiction
-    from workers.stages.visuals.worker import _sum_visuals_image_cost as prod_paid_cost
-    from post_deploy_fiction_census import countable_paid as qa_countable_paid
-    from post_deploy_fiction_census import is_fiction as qa_is_fiction
-except Exception as exc:  # noqa: BLE001
-    _IMPORT_ERR = f"{type(exc).__name__}: {exc}"
 
-pytestmark = pytest.mark.skipif(
-    bool(_IMPORT_ERR),
-    reason=(
-        f"production side not importable ({_IMPORT_ERR}); set WORKERS_SRC to kitesforu-workers/src. "
-        "SKIPPED, not passed — this test cannot vouch for the mirrors when it cannot load them."
-    ),
-)
+def need(module: str, name: str) -> Any:
+    """``module.name``, or SKIP when the producer is absent, or FAIL when it is present but wrong."""
+    if importlib.util.find_spec("workers") is None:
+        if _EXPLICIT_SRC:
+            pytest.fail(f"WORKERS_SRC={_EXPLICIT_SRC} holds no `workers` package: the mirror cannot "
+                        "be checked against a tree that is not there.")
+        pytest.skip("kitesforu-workers is not importable here (set WORKERS_SRC). SKIPPED, not "
+                    "passed: this test cannot vouch for a producer it cannot load.")
+    try:
+        return getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError) as exc:
+        pytest.fail(f"`workers` imports but {module}.{name} does not ({type(exc).__name__}: {exc}). "
+                    "The producer moved or renamed something these scripts depend on.")
 
 
 # ── is_fiction ────────────────────────────────────────────────────────────────
@@ -78,6 +82,8 @@ FICTION_CASES = [
 
 @pytest.mark.parametrize("label,job", FICTION_CASES, ids=[c[0] for c in FICTION_CASES])
 def test_is_fiction_mirror_matches_production(label, job):
+    prod_is_fiction = need("workers.common.architect_wiring", "_is_fiction_job")
+    qa_is_fiction = need("post_deploy_fiction_census", "is_fiction")
     produced = bool(prod_is_fiction(
         audio_config=job.get("audio_config"), preferences=job.get("preferences")
     ))
@@ -89,33 +95,367 @@ def test_is_fiction_mirror_matches_production(label, job):
     )
 
 
-# ── countable_paid ────────────────────────────────────────────────────────────
-PAID_CASES = [
-    ("model_id clip counts",        [{"model_id": "gemini-3-pro-image"}]),
-    ("reused re-cut skipped",       [{"model_id": "x", "imagination_event": {"reused": True}}]),
-    ("re-cut not reused counts",    [{"model_id": "x", "imagination_event": {"reused": False}}]),
-    ("ai_generated relimage",       [{"ai_generated": True, "diagram_debug": {"kind": "relimage"}}]),
-    ("ai_generated non-relimage",   [{"ai_generated": True, "diagram_debug": {"kind": "chart"}}]),
-    ("plain $0 card",               [{"modality": "diagram"}]),
-    ("scene_image without model_id", [{"modality": "scene_image"}]),
-    ("mixed array",                 [{"model_id": "a"},
-                                     {"model_id": "b", "imagination_event": {"reused": True}},
-                                     {"ai_generated": True, "diagram_debug": {"kind": "relimage"}},
-                                     {"modality": "diagram"}]),
-    ("empty array",                 []),
+# ── the block the producer WRITES ─────────────────────────────────────────────
+FLUX = "flux-schnell"
+
+
+class _Snap:
+    def __init__(self, data: Dict[str, Any]) -> None:
+        self._data, self.exists = data, bool(data)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"costs": dict(self._data.get("costs") or {})}
+
+
+class _Doc:
+    """A job doc that applies dotted updates and ``Increment`` the way Firestore does. ``get`` takes
+    the producer's keyword arguments (``field_paths``, ``retry``, ``timeout``) and ignores them."""
+
+    def __init__(self) -> None:
+        self.data: Dict[str, Any] = {}
+
+    def get(self, *_a: Any, **_k: Any) -> _Snap:
+        return _Snap(self.data)
+
+    def update(self, payload: Dict[str, Any], *_a: Any, **_k: Any) -> None:
+        from google.cloud import firestore
+
+        for path, value in payload.items():
+            parts = path.split(".")
+            node = self.data
+            for p in parts[:-1]:
+                node = node.setdefault(p, {})
+            if isinstance(value, firestore.Increment):
+                node[parts[-1]] = float(node.get(parts[-1]) or 0.0) + float(value.value)
+            else:
+                node[parts[-1]] = value
+
+
+class _Db:
+    def __init__(self, doc: _Doc) -> None:
+        self._doc = doc
+
+    def collection(self, _n: str) -> "_Db":
+        return self
+
+    def document(self, _d: str) -> _Doc:
+        return self._doc
+
+
+def witness_clips() -> List[Dict[str, Any]]:
+    """e032d06d's shape: one kept still shown three times, plus one picture another job paid for
+    (a cross-job cache hit, shown with its model like any photoreal clip)."""
+    return ([{"model_id": FLUX, "content_hash": "c2", "start_ms": t} for t in (5767, 10547, 15327)]
+            + [{"model_id": "flux-dev", "content_hash": "cached-elsewhere", "start_ms": 20000}])
+
+
+def produced_clips() -> List[Dict[str, Any]]:
+    """The witness plus one priced still that names no asset (no ``content_hash``, ``asset_uri`` or
+    ``gcs_uri``), which the producer books under ``meta.unnamed``. Without it that key was the one
+    field-contract key only a hand-written literal pinned: renaming it in the producer left this
+    file green (#181 round-3 critic N1)."""
+    return witness_clips() + [{"model_id": FLUX, "start_ms": 25000}]
+
+
+def produced_job() -> Dict[str, Any]:
+    """The job doc the REAL ``roll_up_images`` writes for :func:`produced_clips`: the kept still,
+    four renders the beat paid for and threw away (3 initial + 2 REGEN, one of them shipped), the
+    free hit, and the unnamed still."""
+    receipt = need("workers.stages.visuals.image_cost_ledger", "PaidRenderReceipt")()
+    roll_up_images = need("workers.stages.visuals.image_cost_ledger", "roll_up_images")
+    receipt.record("c2", FLUX, kept=True)
+    for h in ("c0", "c0", "c1", "c1"):
+        receipt.record(h, FLUX, kept=False)
+    receipt.record_free("cached-elsewhere")
+    doc = _Doc()
+    out = roll_up_images(_Db(doc), "witness", produced_clips(), receipt)
+    assert out is not None and out.wrote, "the producer wrote nothing, so this proves nothing"
+    return {**doc.data, "visual": {"clips": produced_clips()}}
+
+
+def _block(job: Dict[str, Any]) -> Dict[str, Any]:
+    return job["costs"]["visuals_images"]
+
+
+def test_the_census_reads_a_block_the_producer_wrote_as_exact():
+    stamp_vs_clips = need("post_deploy_fiction_census", "stamp_vs_clips")
+    assert stamp_vs_clips(_block(produced_job()), produced_clips()) == "exact"
+
+
+class _Stream:
+    """``firestore.Client`` for :func:`post_deploy_fiction_census.main`: one collection, streamed."""
+
+    def __init__(self, rows: Dict[str, Dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def collection(self, _n: str) -> "_Stream":
+        return self
+
+    def stream(self):
+        for jid, data in self._rows.items():
+            yield type("Row", (), {"id": jid, "to_dict": lambda self, d=data: d})()
+
+
+def test_a_stamp_booking_an_id_it_also_lists_free_is_named_not_read_as_exact(monkeypatch, capsys):
+    """#181 round-3 design SF1. Workers #3239 round 3 stops new rollups writing an id into both
+    ``meta.assets`` and ``meta.free``; a stamp written before it can carry both, and the census read
+    that as ``exact``. It is now its own verdict, and the census prints the job."""
+    import copy
+
+    census = importlib.import_module("post_deploy_fiction_census")
+    stamp_vs_clips = need("post_deploy_fiction_census", "stamp_vs_clips")
+    clean = _block(produced_job())
+    contradicted = copy.deepcopy(clean)
+    contradicted["meta"]["free"] = sorted(set(contradicted["meta"].get("free") or []) | {"c2"})
+    assert "c2" in contradicted["meta"]["assets"]
+    assert stamp_vs_clips(clean, produced_clips()) == "exact"  # control
+    assert stamp_vs_clips(contradicted, produced_clips()) == "contradiction"
+
+    def job(block: Dict[str, Any]) -> Dict[str, Any]:
+        return {"created_at": "2026-10-01T00:00:00Z", "preferences": {"content_category": "horror"},
+                "visual": {"clips": produced_clips(), "clips_settled_at": "2026-10-01T00:10:00Z"},
+                "costs": {"visuals_images": block}}
+
+    rows = {"deadbeef-0000": job(contradicted), "c1ea0000-0000": job(clean)}
+    monkeypatch.setattr(census.firestore, "Client", lambda project=None: _Stream(rows))
+    monkeypatch.setattr(sys, "argv", ["census", "--since", "2026-09-30T00:00:00Z"])
+    assert census.main() == 0
+    out = capsys.readouterr().out
+    assert "image-cost stamp vs settled       : exact 1 · UNDER 0 · over 0" in out, out
+    assert "contradiction (an id booked AND listed free): 1   [deadbeef]" in out, out
+
+
+def test_the_ledger_checker_reads_a_block_the_producer_wrote_by_its_parts():
+    sys.modules.pop("check_paid_still_ledger", None)
+    describe_rollup = need("check_paid_still_ledger", "describe_rollup")
+    text = "\n".join(describe_rollup(_block(produced_job())))
+    assert "legacy stamp" not in text, text
+    assert "kept assets 1; discarded renders 4" in text, text
+    assert "unnamed 1;" in text, text
+    assert "free (shown, not paid) 1" in text, text
+
+
+def test_the_provider_census_reads_a_block_the_producer_wrote_as_booked():
+    """#181 round-2 claims S2: the post-deploy instrument had never been seen to find a stamp. The
+    witness's 5 accepted fal renders and 5 success lines, plus the unnamed still's 1, against the 6
+    the producer booked."""
+    census = importlib.import_module("image_spend_provider_census")
+    price_of = need("workers.stages.visuals.image_cost_ledger", "price_of")
+    renders = 5 + 1
+    rows = ([{"jsonPayload": {"job_id": "witness", "message":
+              'HTTP Request: POST https://queue.fal.run/fal-ai/flux/schnell "HTTP/1.1 200 OK"'}}]
+            * renders
+            + [{"jsonPayload": {"job_id": "witness", "message":
+                "fal FLUX completed model=fal-ai/flux/schnell polls=3 elapsed=2.1s"}}] * renders)
+    per_job, unattributed, done, undone = census.tally(rows, limit=1000)
+    assert per_job["witness"] == {"fal_flux:flux-schnell": renders}
+    assert not unattributed and not undone
+    row = census.job_row("witness", produced_job(), per_job["witness"], done["witness"], "test@",
+                         price_of)
+    assert row["booked"] == renders and row["returned"] == renders
+    assert row["booked_usd"] == pytest.approx(row["returned_usd"]) == pytest.approx(
+        renders * price_of(FLUX))
+    lines = census.summary_lines([row])
+    assert "  jobs carrying meta.assets (rolled up by #3239+): 1" in lines, lines
+    assert "    booked == returned (+Imagen requests) on 1 of 1" in lines, lines
+    assert "    booked $ == returned $ (+Imagen requests) on 1 of 1" in lines, lines
+    # Control: a legacy stamp is not a ledger stamp.
+    legacy = {"costs": {"visuals_images": {"total_cost_usd": 0.009, "meta": {"scenes": 3}}},
+              "visual": {"clips": witness_clips()}}
+    lrow = census.job_row("legacy", legacy, per_job["witness"], done["witness"], "test@", price_of)
+    assert lrow["booked"] is None
+    assert "  jobs carrying meta.assets (rolled up by #3239+): 0" in census.summary_lines([lrow])
+
+
+def test_the_provider_arm_keys_by_model_so_a_wrong_model_shows_in_dollars():
+    """#181 round-2 cost SF1: ``fal_flux`` folded flux/dev ($0.025) and flux/schnell ($0.003) into one
+    count, so a dispatch booked at the wrong model kept the COUNT right and the $ off by 8x."""
+    census = importlib.import_module("image_spend_provider_census")
+    price_of = need("workers.stages.visuals.image_cost_ledger", "price_of")
+    dev = 'HTTP Request: POST https://queue.fal.run/fal-ai/flux/dev "HTTP/1.1 200 OK"'
+    schnell = 'HTTP Request: POST https://queue.fal.run/fal-ai/flux/schnell "HTTP/1.1 200 OK"'
+    assert census.classify(dev) == "fal_flux:flux-dev"
+    assert census.classify(schnell) == "fal_flux:flux-schnell"
+    assert price_of("flux-dev") > 5 * price_of("flux-schnell") > 0
+    # One flux-dev render, booked as one schnell-priced still: the counts agree, the dollars do not.
+    job = {"costs": {"visuals_images": {"total_cost_usd": price_of(FLUX), "meta": {
+        "scenes": 1, "models": {FLUX: 1}, "assets": {"x": {"m": FLUX, "usd": price_of(FLUX)}}}}},
+        "visual": {"clips": []}}
+    done = collections.Counter({"fal_flux:flux-dev": 1})
+    row = census.job_row("j", job, collections.Counter({"fal_flux:flux-dev": 1}), done, "test@",
+                         price_of)
+    lines = census.summary_lines([row])
+    assert "    booked == returned (+Imagen requests) on 1 of 1" in lines
+    assert "    booked $ == returned $ (+Imagen requests) on 0 of 1" in lines, lines
+
+
+def test_the_fal_path_map_is_workers_own_so_a_new_model_is_priced_as_itself(monkeypatch):
+    """#181 round-3 design NIT2: ``catalog_model`` hand-inverted ``fal_flux_client._MODEL_PATHS``,
+    so a fal model workers added there would key by its raw path and price at $0."""
+    census = importlib.import_module("image_spend_provider_census")
+    paths = need("workers.stages.visuals.fal_flux_client", "_MODEL_PATHS")
+    for model, path in paths.items():
+        assert census.classify(
+            f'HTTP Request: POST https://queue.fal.run/{path} "HTTP/1.1 200 OK"') == f"fal_flux:{model}"
+        assert census.done_family(
+            f"fal FLUX completed model={path} polls=1 elapsed=1.0s") == f"fal_flux:{model}"
+    monkeypatch.setitem(paths, "flux-pro", "fal-ai/flux-pro/v1.1")
+    assert census.classify('HTTP Request: POST https://queue.fal.run/fal-ai/flux-pro/v1.1 '
+                           '"HTTP/1.1 200 OK"') == "fal_flux:flux-pro"
+    assert census.done_family("fal FLUX completed model=fal-ai/flux-pro/v1.1 polls=1 "
+                              "elapsed=1.0s") == "fal_flux:flux-pro"
+    # Control: a path workers does not name keeps its raw key, visibly.
+    assert census.classify('HTTP Request: POST https://queue.fal.run/fal-ai/flux-lora '
+                           '"HTTP/1.1 200 OK"') == "fal_flux:fal-ai/flux-lora"
+
+
+class _MaskedSnap:
+    def __init__(self, data: Dict[str, Any], exists: bool) -> None:
+        self._data, self.exists = data, exists
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self._data
+
+
+class _MaskingDoc:
+    """A document ``get`` that projects ``field_paths`` the way Firestore does (only the fields that
+    exist, no empty parents), and records them. ``{}`` is a missing document."""
+
+    def __init__(self, data: Dict[str, Any]) -> None:
+        self.data, self.calls = data, []
+
+    def get(self, field_paths=None, **_k: Any) -> _MaskedSnap:
+        self.calls.append(field_paths)
+        if field_paths is None:
+            return _MaskedSnap(self.data, bool(self.data))
+        out: Dict[str, Any] = {}
+        for path in field_paths:
+            *parents, leaf = path.split(".")
+            src: Any = self.data
+            for p in parents:
+                src = src.get(p) if isinstance(src, dict) else None
+            if not (isinstance(src, dict) and leaf in src):
+                continue
+            dst = out
+            for p in parents:
+                dst = dst.setdefault(p, {})
+            dst[leaf] = src[leaf]
+        return _MaskedSnap(out, bool(self.data))
+
+
+def test_the_job_read_is_masked_to_the_fields_job_row_reads():
+    """#181 round-3 latency NIT: each attributed job's WHOLE doc was read, one at a time, for three
+    fields. The mask must also cover every field ``job_row`` and the owner lookup read: the row from
+    the masked read equals the row from the whole doc."""
+    census = importlib.import_module("image_spend_provider_census")
+    price_of = need("workers.stages.visuals.image_cost_ledger", "price_of")
+    full = {**produced_job(), "user_id": "u-1", "script": {"text": "x" * 4096},
+            "audio_config": {"content_type": "storytelling"}}
+    full["visual"] = {**full["visual"], "world_bible": {"characters": ["a"]}}
+    doc = _MaskingDoc(full)
+    masked = census.read_job(_Db(doc), "witness")
+    assert doc.calls == [list(census.JOB_FIELDS)], doc.calls
+    assert "script" not in masked and "world_bible" not in masked["visual"], masked.keys()
+    assert masked["user_id"] == "u-1"
+    fams = collections.Counter({"fal_flux:flux-schnell": 6})
+    assert (census.job_row("witness", masked, fams, fams, "test@", price_of)
+            == census.job_row("witness", full, fams, fams, "test@", price_of))
+    assert census.read_job(_Db(_MaskingDoc({})), "gone") == {}
+
+
+def test_an_imagen_render_counts_on_the_provider_side_because_it_logs_no_success_line():
+    """#181 round-2 cost NIT1: Imagen logs no success line, so it can never reach ``returned``."""
+    census = importlib.import_module("image_spend_provider_census")
+    price_of = need("workers.stages.visuals.image_cost_ledger", "price_of")
+    line = ('HTTP Request: POST https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/'
+            'us-central1/publishers/google/models/imagen-4.0-fast-generate-001:predict "HTTP/1.1 200 OK"')
+    veo = line.replace("imagen-4.0-fast-generate-001:predict", "veo-3.1:predictLongRunning")
+    assert census.classify(line) == "vertex_imagen:imagen-4.0-fast-generate-001"
+    assert census.classify(veo) is None, "Veo settles in its own stage"
+    row = census.job_row("j", {}, collections.Counter({census.classify(line): 1}),
+                         collections.Counter(), "test@", price_of)
+    assert row["returned"] == 0 and row["returned_or_imagen"] == 1
+    assert row["returned_or_imagen_usd"] == pytest.approx(price_of("imagen-4.0-fast-generate-001"))
+
+
+def test_a_log_read_that_hits_its_limit_is_an_error_not_a_lower_bound():
+    """#181 round-2 cost NIT2."""
+    census = importlib.import_module("image_spend_provider_census")
+    rows = [{"jsonPayload": {"message": "x"}}] * 3
+    with pytest.raises(census.TruncatedLogRead):
+        census.tally(rows, limit=3)
+    census.tally(rows, limit=4)  # control: under the limit reads normally
+
+
+# ── the readers on hand-written shapes the producer writes ────────────────────
+def test_a_shown_asset_missing_from_the_ledger_is_under():
+    stamp_vs_clips = need("post_deploy_fiction_census", "stamp_vs_clips")
+    block = {"meta": {"scenes": 1, "assets": {"other": {"m": FLUX, "usd": 0.003}}}}
+    assert stamp_vs_clips(block, witness_clips()[:3]) == "under"
+
+
+def test_an_unnamed_still_beyond_the_booked_high_water_mark_is_under():
+    stamp_vs_clips = need("post_deploy_fiction_census", "stamp_vs_clips")
+    unnamed = [{"model_id": FLUX}, {"model_id": FLUX}]
+    block = {"meta": {"scenes": 1, "assets": {}, "unnamed": {FLUX: {"n": 1, "usd": 0.003}}}}
+    assert stamp_vs_clips(block, unnamed) == "under"
+    block["meta"]["unnamed"][FLUX]["n"] = 2
+    assert stamp_vs_clips(block, unnamed) == "exact"
+
+
+def test_unnamed_stills_are_compared_per_model_not_as_a_sum():
+    """#181 round-3 design NIT1 + critic N2: the producer keeps one high-water mark PER MODEL, so a
+    sum across models let one model's surplus cover another's shortfall and read ``exact``."""
+    stamp_vs_clips = need("post_deploy_fiction_census", "stamp_vs_clips")
+    imagen = "imagen-4.0-fast-generate-001"
+    two_schnell = [{"model_id": FLUX}, {"model_id": FLUX}]
+    # The critic's probe: 2 shown flux-schnell against {flux-schnell: 1, imagen: 1}.
+    block = {"meta": {"scenes": 2, "assets": {}, "unnamed": {
+        FLUX: {"n": 1, "usd": 0.003}, imagen: {"n": 1, "usd": 0.02}}}}
+    assert stamp_vs_clips(block, two_schnell) == "under"
+    # The design lens's probe: 2 shown flux-dev against 3 booked flux-schnell.
+    block = {"meta": {"scenes": 3, "assets": {}, "unnamed": {FLUX: {"n": 3, "usd": 0.009}}}}
+    assert stamp_vs_clips(block, [{"model_id": "flux-dev"}, {"model_id": "flux-dev"}]) == "under"
+    # Control: each model at or under its own mark is exact.
+    block = {"meta": {"scenes": 3, "assets": {}, "unnamed": {
+        FLUX: {"n": 2, "usd": 0.006}, imagen: {"n": 1, "usd": 0.02}}}}
+    assert stamp_vs_clips(block, two_schnell + [{"model_id": imagen}]) == "exact"
+
+
+def test_a_legacy_stamp_is_read_per_clip():
+    """A pre-#3239 stamp was written once per CLIP; read it that way, or every revisit job
+    reads UNDER (the #2749 signature) under the new definition."""
+    stamp_vs_clips = need("post_deploy_fiction_census", "stamp_vs_clips")
+    clips = witness_clips()[:3]
+    assert stamp_vs_clips({"meta": {"scenes": 3}}, clips) == "exact"
+    assert stamp_vs_clips({"meta": {"scenes": 2}}, clips) == "under"
+    assert stamp_vs_clips({"meta": {"scenes": 4}}, clips) == "over"
+    assert stamp_vs_clips(None, clips) == "none"
+
+
+# ── the frozen legacy rule ─────────────────────────────────────────────────────
+LEGACY_CASES = [
+    ("model_id clip",               {"model_id": "gemini-3-pro-image"},                          True),
+    ("rendered_model_id alone",     {"rendered_model_id": "gemini-2.5-flash-image"},              True),
+    ("reused re-cut",               {"model_id": "x", "imagination_event": {"reused": True}},     False),
+    ("re-cut not reused",           {"model_id": "x", "imagination_event": {"reused": False}},    True),
+    ("ai_generated relimage",       {"ai_generated": True, "diagram_debug": {"kind": "relimage"}}, True),
+    ("ai_generated non-relimage",   {"ai_generated": True, "diagram_debug": {"kind": "chart"}},    False),
+    ("non-dict diagram_debug",      {"ai_generated": True, "diagram_debug": "relimage"},           False),
+    ("scene_image without model",   {"modality": "scene_image"},                                  False),
+    ("not a clip",                  "junk",                                                       False),
 ]
 
 
-@pytest.mark.parametrize("label,clips", PAID_CASES, ids=[c[0] for c in PAID_CASES])
-def test_countable_paid_mirror_matches_production(label, clips):
-    _usd, counts = prod_paid_cost(clips)
-    produced = sum(counts.values())
-    mirrored = qa_countable_paid(clips)
-    assert mirrored == produced, (
-        f"{label}: the QA mirror counts {mirrored} paid clips and production counts {produced}. "
-        "countable_paid has drifted from _sum_visuals_image_cost — the census's image-cost "
-        "stamp-vs-settled comparison is measuring two different definitions."
-    )
+@pytest.mark.parametrize("label,clip,paid", LEGACY_CASES, ids=[c[0] for c in LEGACY_CASES])
+def test_the_frozen_legacy_rule(label, clip, paid):
+    """The rule of the deleted ``worker._sum_visuals_image_cost``, which every pre-#3239 stamp was
+    written with. On 2026-10-01 the claims lens ran the rollup census's per-clip arm against main's
+    REAL function on 300 jobs (``image_rollup_dedupe_census.py --until 2026-10-01T03:43:00Z --limit
+    300``, workers main ``6335bb7a``): $37.5848 in both arms, 0 jobs differing."""
+    from image_census_rules import legacy_clip_model
+
+    assert bool(legacy_clip_model(clip)) is paid, label
 
 
 def test_scene_image_without_model_id_is_not_paid():
@@ -125,6 +465,22 @@ def test_scene_image_without_model_id_is_not_paid():
     the producer's rule (model_id / relimage) reported 5.6%. A $0 licensed photograph is a
     scene_image too. Pinned so the cheap-looking definition cannot come back.
     """
+    from image_census_rules import legacy_per_clip_count
+
+    paid_assets = need("workers.stages.visuals.image_cost_ledger", "paid_assets")
     clips = [{"modality": "scene_image"}, {"modality": "scene_image"}]
-    assert qa_countable_paid(clips) == 0
-    assert sum(prod_paid_cost(clips)[1].values()) == 0
+    assert legacy_per_clip_count(clips) == 0
+    assert paid_assets(clips)[0] == {}
+
+
+def test_the_census_scripts_import_no_private_ledger_name():
+    """#181 round-2 design NIT: qa depends on the names workers exports, not on its privates."""
+    import ast
+
+    for script in ("image_rollup_dedupe_census.py", "image_spend_provider_census.py",
+                   "post_deploy_fiction_census.py", "check_paid_still_ledger.py"):
+        tree = ast.parse((_QA_ROOT / "scripts" / script).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "workers.stages.visuals.image_cost_ledger":
+                private = [a.name for a in node.names if a.name.startswith("_")]
+                assert not private, f"{script} imports {private} from image_cost_ledger"
