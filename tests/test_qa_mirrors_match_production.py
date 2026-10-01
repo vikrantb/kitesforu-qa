@@ -4,7 +4,7 @@ WHY THIS EXISTS. Two census scripts deliberately re-implement a production rule 
 run standalone, and each says so in its docstring:
 
     post_deploy_fiction_census.is_fiction      "Mirrors `_is_fiction_job`'s ordering"
-    post_deploy_fiction_census.countable_paid  "Mirrors `_sum_visuals_image_cost`'s inclusion rules"
+    post_deploy_fiction_census.paid_asset_ids  "Mirrors the CLIP rule of `image_cost_ledger.paid_assets`"
 
 A copy is only safe while it agrees. Nothing checked that, and a silently-drifted mirror does not
 fail — it reports a WRONG NUMBER with total confidence, which is the most expensive failure a
@@ -15,6 +15,13 @@ Measured 2026-08-28 before writing this, against live Firestore:
     is_fiction     vs _is_fiction_job          4160/4160 agree, 0 disagree
     countable_paid vs _sum_visuals_image_cost   817/817  agree, 0 disagree
 So this pins agreement that HOLDS today; it is a drift alarm, not a bug report.
+
+workers #3239 DELETED `_sum_visuals_image_cost` (the per-clip rule) and moved the pricer to
+`image_cost_ledger`, which counts each paid ASSET once however many clips show it. The import of
+the deleted name skipped this whole module — all 21 cases, the 11 unrelated `is_fiction` ones
+included — so the mirror now pins `paid_asset_ids` against `paid_assets`, with fixtures that
+carry `content_hash` (the round-D finding: the old fixtures carried none, so a deduping mirror
+and a per-clip one agreed on every one of them).
 
 The fixtures below are offline and $0 — a unit test must not need Firestore. They cover each
 branch the mirrors actually implement, so a change to either side that alters a branch fails here.
@@ -40,8 +47,10 @@ for _p in (str(_QA_ROOT / "scripts"), _WORKERS_SRC):
 _IMPORT_ERR = ""
 try:
     from workers.common.architect_wiring import _is_fiction_job as prod_is_fiction
-    from workers.stages.visuals.worker import _sum_visuals_image_cost as prod_paid_cost
+    from workers.stages.visuals.image_cost_ledger import paid_assets as prod_paid_assets
     from post_deploy_fiction_census import countable_paid as qa_countable_paid
+    from post_deploy_fiction_census import paid_asset_ids as qa_paid_asset_ids
+    from post_deploy_fiction_census import stamp_vs_clips
     from post_deploy_fiction_census import is_fiction as qa_is_fiction
 except Exception as exc:  # noqa: BLE001
     _IMPORT_ERR = f"{type(exc).__name__}: {exc}"
@@ -89,33 +98,53 @@ def test_is_fiction_mirror_matches_production(label, job):
     )
 
 
-# ── countable_paid ────────────────────────────────────────────────────────────
+# ── paid assets ───────────────────────────────────────────────────────────────
+_STILL = "gs://b/visuals/j/3c840ca113.png"
 PAID_CASES = [
-    ("model_id clip counts",        [{"model_id": "gemini-3-pro-image"}]),
-    ("reused re-cut skipped",       [{"model_id": "x", "imagination_event": {"reused": True}}]),
-    ("re-cut not reused counts",    [{"model_id": "x", "imagination_event": {"reused": False}}]),
-    ("ai_generated relimage",       [{"ai_generated": True, "diagram_debug": {"kind": "relimage"}}]),
+    ("model_id clip counts",        [{"model_id": "gemini-3-pro-image", "content_hash": "a"}]),
+    ("reused re-cut skipped",       [{"model_id": "x", "content_hash": "own",
+                                      "imagination_event": {"reused": True}}]),
+    ("re-cut not reused counts",    [{"model_id": "x", "content_hash": "a",
+                                      "imagination_event": {"reused": False}}]),
+    ("ai_generated relimage",       [{"ai_generated": True, "diagram_debug": {"kind": "relimage"},
+                                      "content_hash": "r"}]),
     ("ai_generated non-relimage",   [{"ai_generated": True, "diagram_debug": {"kind": "chart"}}]),
-    ("plain $0 card",               [{"modality": "diagram"}]),
-    ("scene_image without model_id", [{"modality": "scene_image"}]),
-    ("mixed array",                 [{"model_id": "a"},
-                                     {"model_id": "b", "imagination_event": {"reused": True}},
-                                     {"ai_generated": True, "diagram_debug": {"kind": "relimage"}},
+    ("plain $0 card",               [{"modality": "diagram", "content_hash": "card"}]),
+    ("scene_image without model_id", [{"modality": "scene_image", "content_hash": "lib"}]),
+    ("rendered_model_id alone",     [{"rendered_model_id": "gemini-2.5-flash-image",
+                                      "content_hash": "g"}]),
+    # e032d06d: one paid still, three showings (span-recut revisits).
+    ("revisit: one still, 3 clips", [{"model_id": "flux-schnell", "content_hash": "3c840ca113",
+                                      "start_ms": t} for t in (5767, 10547, 15327)]),
+    # A verify REGEN ships under a NEW hash; the clip rule sees only the shipped one (the
+    # discarded first render is booked by the receipt, which no clip carries).
+    ("regen: the shipped hash only", [{"model_id": "flux-schnell", "content_hash": "regen-hash"},
+                                      {"modality": "scene_image", "content_hash": "crop-0"}]),
+    ("uri names the asset",         [{"model_id": "flux-schnell", "asset_uri": _STILL},
+                                     {"model_id": "flux-schnell", "asset_uri": _STILL}]),
+    ("no identity at all",          [{"model_id": "flux-schnell"}, {"model_id": "flux-schnell"}]),
+    ("mixed array",                 [{"model_id": "a", "content_hash": "h1"},
+                                     {"model_id": "b", "content_hash": "h2",
+                                      "imagination_event": {"reused": True}},
+                                     {"ai_generated": True, "diagram_debug": {"kind": "relimage"},
+                                      "content_hash": "h3"},
+                                     {"model_id": "a", "content_hash": "h1", "start_ms": 9},
                                      {"modality": "diagram"}]),
     ("empty array",                 []),
 ]
 
 
 @pytest.mark.parametrize("label,clips", PAID_CASES, ids=[c[0] for c in PAID_CASES])
-def test_countable_paid_mirror_matches_production(label, clips):
-    _usd, counts = prod_paid_cost(clips)
-    produced = sum(counts.values())
-    mirrored = qa_countable_paid(clips)
+def test_paid_asset_mirror_matches_production(label, clips):
+    assets, unnamed, _usd = prod_paid_assets(clips)
+    produced = (set(assets), sum(unnamed.values()))
+    mirrored = qa_paid_asset_ids(clips)
     assert mirrored == produced, (
-        f"{label}: the QA mirror counts {mirrored} paid clips and production counts {produced}. "
-        "countable_paid has drifted from _sum_visuals_image_cost — the census's image-cost "
+        f"{label}: the QA mirror sees {mirrored} and production sees {produced}. "
+        "paid_asset_ids has drifted from image_cost_ledger.paid_assets — the census's image-cost "
         "stamp-vs-settled comparison is measuring two different definitions."
     )
+    assert qa_countable_paid(clips) == len(produced[0]) + produced[1]
 
 
 def test_scene_image_without_model_id_is_not_paid():
@@ -127,4 +156,36 @@ def test_scene_image_without_model_id_is_not_paid():
     """
     clips = [{"modality": "scene_image"}, {"modality": "scene_image"}]
     assert qa_countable_paid(clips) == 0
-    assert sum(prod_paid_cost(clips)[1].values()) == 0
+    assert prod_paid_assets(clips)[0] == {}
+
+
+# ── the census reads each stamp by its own definition ─────────────────────────
+def _witness_clips():
+    return [{"model_id": "flux-schnell", "content_hash": "c2", "start_ms": t} for t in (1, 2, 3)]
+
+
+def test_a_ledger_stamp_is_a_superset_of_the_clips_never_over():
+    """e032d06d after #3239: 5 renders booked, the clips show 1 still three times."""
+    block = {"meta": {"scenes": 5, "assets": {"c2": {}, "c0@a1": {}, "c0@a2": {},
+                                              "c1@a3": {}, "c1@a4": {}}}}
+    assert stamp_vs_clips(block, _witness_clips()) == "exact"
+
+
+def test_a_shown_asset_missing_from_the_ledger_is_under():
+    block = {"meta": {"scenes": 1, "assets": {"other": {}}}}
+    assert stamp_vs_clips(block, _witness_clips()) == "under"
+
+
+def test_a_free_asset_is_not_missing():
+    """A cross-job cache hit or a CC0 photo is shown, not paid: `meta.free` lists it."""
+    block = {"meta": {"scenes": 0, "assets": {}, "free": ["c2"]}}
+    assert stamp_vs_clips(block, _witness_clips()) == "exact"
+
+
+def test_a_legacy_stamp_is_read_per_clip():
+    """A pre-#3239 stamp was written once per CLIP; read it that way, or every revisit job
+    reads UNDER (the #2749 signature) under the new definition."""
+    assert stamp_vs_clips({"meta": {"scenes": 3}}, _witness_clips()) == "exact"
+    assert stamp_vs_clips({"meta": {"scenes": 2}}, _witness_clips()) == "under"
+    assert stamp_vs_clips({"meta": {"scenes": 4}}, _witness_clips()) == "over"
+    assert stamp_vs_clips(None, _witness_clips()) == "none"

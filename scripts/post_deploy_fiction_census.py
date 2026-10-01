@@ -135,22 +135,81 @@ def real_flowcharts(clips: list) -> int:
     return n
 
 
-def countable_paid(clips: list) -> int:
-    """Mirrors `_sum_visuals_image_cost`'s inclusion rules — skip reused re-cuts, count
-    model_id clips PLUS ai_generated relimage clips (which carry no model_id). Using a
-    different definition than the producer inflates disagreement in BOTH directions."""
-    n = 0
+def _paid_clip(c: dict) -> bool:
+    ev = c.get("imagination_event")
+    if isinstance(ev, dict) and ev.get("reused") is True:
+        return False
+    if c.get("rendered_model_id") or c.get("model_id"):
+        return True
+    dbg = c.get("diagram_debug") or {}
+    return bool(c.get("ai_generated") and isinstance(dbg, dict) and dbg.get("kind") == "relimage")
+
+
+def countable_paid_per_clip(clips: list) -> int:
+    """The rule every ``costs.visuals_images`` stamp was written with BEFORE workers #3239 (the
+    deleted ``_sum_visuals_image_cost``): one per CLIP. Only for reading those legacy stamps —
+    a stamp that carries ``meta.assets`` is read by :func:`stamp_vs_clips` instead."""
+    return sum(1 for c in clips if isinstance(c, dict) and _paid_clip(c))
+
+
+def paid_asset_ids(clips: list) -> tuple:
+    """Mirrors the CLIP rule of ``image_cost_ledger.paid_assets`` (workers #3239): the paid
+    assets these clips show, each ONCE however many clips show it → ``(ids, unnamed)``. A clip is
+    named by its ``content_hash``, else by its ``asset_uri``/``gcs_uri``; one with neither is
+    counted in ``unnamed``. Pinned against production by ``tests/test_qa_mirrors_match_production``.
+    """
+    import hashlib
+
+    ids: set = set()
+    unnamed = 0
     for c in clips:
-        ev = c.get("imagination_event")
-        if isinstance(ev, dict) and ev.get("reused") is True:
+        if not isinstance(c, dict) or not _paid_clip(c):
             continue
-        if c.get("model_id"):
-            n += 1
-            continue
-        dbg = c.get("diagram_debug") or {}
-        if c.get("ai_generated") and isinstance(dbg, dict) and dbg.get("kind") == "relimage":
-            n += 1
-    return n
+        chash = c.get("content_hash")
+        uri = c.get("asset_uri") or c.get("gcs_uri")
+        if isinstance(chash, str) and chash:
+            ids.add(chash)
+        elif isinstance(uri, str) and uri:
+            ids.add("u" + hashlib.sha1(uri.encode("utf-8")).hexdigest()[:23])
+        else:
+            unnamed += 1
+    return ids, unnamed
+
+
+def countable_paid(clips: list) -> int:
+    """Distinct paid stills these clips show (a revisit counts once)."""
+    ids, unnamed = paid_asset_ids(clips)
+    return len(ids) + unnamed
+
+
+def stamp_vs_clips(block, clips: list) -> str:
+    """Compare a job's ``costs.visuals_images`` with the clips it shows, BY THE STAMP'S OWN
+    DEFINITION. Using a different definition than the producer inflates disagreement in BOTH
+    directions, so the two kinds of stamp are read two ways:
+
+    * ``meta.assets`` present (workers #3239+): the stamp books every paid dispatch across every
+      pass, so it is a SUPERSET of what the final clips show. ``under`` = a paid asset the clips
+      show is missing from ``meta.assets`` (and not listed free in ``meta.free``); ``exact``
+      otherwise. Booked assets the clips do not show are renders the job paid for and
+      discarded, or a pass the plan dropped — by design, never ``over``.
+    * legacy (``meta.scenes`` only): written once per CLIP, so compare to the per-clip count.
+
+    Returns ``"none"`` when there is nothing to compare."""
+    if not isinstance(block, dict):
+        return "none"
+    meta = block.get("meta") if isinstance(block.get("meta"), dict) else {}
+    booked = meta.get("assets")
+    if isinstance(booked, dict):
+        ids, _unnamed = paid_asset_ids(clips)
+        free = set(meta.get("free") or [])
+        return "under" if (ids - set(booked) - free) else "exact"
+    sc = meta.get("scenes")
+    if sc is None:
+        return "none"
+    exp = countable_paid_per_clip(clips)
+    if not exp:
+        return "none"
+    return "under" if int(sc) < exp else "over" if int(sc) > exp else "exact"
 
 
 def main() -> int:
@@ -233,17 +292,13 @@ def main() -> int:
         if any("imagination_tree:depict" in r and "mermaid" in r for r in reasons):
             tree_mermaid_jobs += 1
 
-        st = (j.get("costs") or {}).get("visuals_images")
-        sc = (st.get("meta") or {}).get("scenes") if isinstance(st, dict) else None
-        if sc is not None:
-            exp = countable_paid(clips)
-            if exp:
-                if int(sc) < exp:
-                    cost_under += 1
-                elif int(sc) > exp:
-                    cost_over += 1
-                else:
-                    cost_exact += 1
+        verdict = stamp_vs_clips((j.get("costs") or {}).get("visuals_images"), clips)
+        if verdict == "under":
+            cost_under += 1
+        elif verdict == "over":
+            cost_over += 1
+        elif verdict == "exact":
+            cost_exact += 1
 
     print(f"POST-DEPLOY FICTION CENSUS — jobs created since {since}")
     print(f"  (deploy of e4741405 on worker-visuals: {DEPLOY_UTC})\n")
@@ -283,6 +338,7 @@ def main() -> int:
     print(f"  4) image-cost stamp vs settled       : exact {cost_exact} · UNDER {cost_under} "
           f"· over {cost_over}")
     print(f"       BEFORE (all history): exact 109 · UNDER 104 · over 28")
+    print(f"       (a stamp with meta.assets is read as a superset of the clips: never 'over')")
     print()
     print("  READ HONESTLY: small n is not a trend. Report the DENOMINATOR with every number,")
     print("  and remember overcounts (stamp > settled) are RE-RENDERS, a separate filed item —")

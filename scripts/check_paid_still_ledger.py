@@ -93,9 +93,23 @@ def main() -> int:
 
     rollup = (j.get("costs") or {}).get("visuals_images")
     if rollup:
-        print(f"\n  cost rollup: ${rollup.get('total_cost_usd')}  meta={rollup.get('meta')}")
-        print("      (models here that are ABSENT from the clips = paid generations that")
-        print("       never reached the artifact — job 681b64ce lost 4 that way)")
+        meta = rollup.get("meta") if isinstance(rollup.get("meta"), dict) else {}
+        assets = meta.get("assets") if isinstance(meta.get("assets"), dict) else None
+        print(f"\n  cost rollup: ${rollup.get('total_cost_usd')}  scenes={meta.get('scenes')}  "
+              f"models={meta.get('models')}")
+        if assets is None:
+            print("      legacy stamp (pre-#3239): priced once per CLIP the plan showed")
+        else:
+            # The asset map holds a hash per kept render; print its shape, not its contents.
+            thrown = meta.get("discarded") if isinstance(meta.get("discarded"), dict) else {}
+            n_thrown = sum(int((d or {}).get("n") or 0) for d in thrown.values()
+                           if isinstance(d, dict))
+            print(f"      kept assets {len(assets)}; discarded renders {n_thrown} "
+                  f"{ {m: (d or {}).get('n') for m, d in thrown.items()} }; "
+                  f"free (shown, not paid) {len(meta.get('free') or [])}")
+            print("      (a DISCARDED render is one the job paid for and threw away — a verify")
+            print("       REJECT/REGEN or an aptness degrade; a kept asset the clips do not show")
+            print("       is a pass the plan dropped)")
 
     print(f"\n  run_visuals ENTRY count: {_entry_count(job_id)}   (12 on 6691727f; expect 1)")
     return 0
