@@ -76,6 +76,7 @@ sys.path.insert(0, "../kitesforu-workers/src")
 from google.cloud import firestore  # noqa: E402
 
 from capture_starved_measurements import COLLECTION, PROJECT  # noqa: E402
+from image_census_rules import legacy_per_clip_count  # noqa: E402
 from workers.common.architect_wiring import (  # noqa: E402
     _FICTION_CONTENT_CATEGORIES as FIC,
 )
@@ -135,51 +136,11 @@ def real_flowcharts(clips: list) -> int:
     return n
 
 
-def _paid_clip(c: dict) -> bool:
-    ev = c.get("imagination_event")
-    if isinstance(ev, dict) and ev.get("reused") is True:
-        return False
-    if c.get("rendered_model_id") or c.get("model_id"):
-        return True
-    dbg = c.get("diagram_debug") or {}
-    return bool(c.get("ai_generated") and isinstance(dbg, dict) and dbg.get("kind") == "relimage")
-
-
 def countable_paid_per_clip(clips: list) -> int:
-    """The rule every ``costs.visuals_images`` stamp was written with BEFORE workers #3239 (the
-    deleted ``_sum_visuals_image_cost``): one per CLIP. Only for reading those legacy stamps —
-    a stamp that carries ``meta.assets`` is read by :func:`stamp_vs_clips` instead."""
-    return sum(1 for c in clips if isinstance(c, dict) and _paid_clip(c))
-
-
-def paid_asset_ids(clips: list) -> tuple:
-    """Mirrors the CLIP rule of ``image_cost_ledger.paid_assets`` (workers #3239): the paid
-    assets these clips show, each ONCE however many clips show it → ``(ids, unnamed)``. A clip is
-    named by its ``content_hash``, else by its ``asset_uri``/``gcs_uri``; one with neither is
-    counted in ``unnamed``. Pinned against production by ``tests/test_qa_mirrors_match_production``.
-    """
-    import hashlib
-
-    ids: set = set()
-    unnamed = 0
-    for c in clips:
-        if not isinstance(c, dict) or not _paid_clip(c):
-            continue
-        chash = c.get("content_hash")
-        uri = c.get("asset_uri") or c.get("gcs_uri")
-        if isinstance(chash, str) and chash:
-            ids.add(chash)
-        elif isinstance(uri, str) and uri:
-            ids.add("u" + hashlib.sha1(uri.encode("utf-8")).hexdigest()[:23])
-        else:
-            unnamed += 1
-    return ids, unnamed
-
-
-def countable_paid(clips: list) -> int:
-    """Distinct paid stills these clips show (a revisit counts once)."""
-    ids, unnamed = paid_asset_ids(clips)
-    return len(ids) + unnamed
+    """The rule every ``costs.visuals_images`` stamp was written with BEFORE workers #3239: one
+    per CLIP (``image_census_rules``, the frozen copy). Only for reading those legacy stamps — a
+    stamp that carries ``meta.assets`` is read by :func:`stamp_vs_clips` instead."""
+    return legacy_per_clip_count(clips)
 
 
 def stamp_vs_clips(block, clips: list) -> str:
@@ -189,9 +150,11 @@ def stamp_vs_clips(block, clips: list) -> str:
 
     * ``meta.assets`` present (workers #3239+): the stamp books every paid dispatch across every
       pass, so it is a SUPERSET of what the final clips show. ``under`` = a paid asset the clips
-      show is missing from ``meta.assets`` (and not listed free in ``meta.free``); ``exact``
-      otherwise. Booked assets the clips do not show are renders the job paid for and
-      discarded, or a pass the plan dropped — by design, never ``over``.
+      show (workers' own ``image_cost_ledger.paid_assets``, called here, not mirrored) is missing
+      from ``meta.assets`` and not listed free in ``meta.free``, or the clips show more unnamed
+      paid stills than ``meta.unnamed`` booked; ``exact`` otherwise. Booked assets the clips do not
+      show are renders the job paid for and discarded, or a pass the plan dropped — by design,
+      never ``over``.
     * legacy (``meta.scenes`` only): written once per CLIP, so compare to the per-clip count.
 
     Returns ``"none"`` when there is nothing to compare."""
@@ -200,9 +163,17 @@ def stamp_vs_clips(block, clips: list) -> str:
     meta = block.get("meta") if isinstance(block.get("meta"), dict) else {}
     booked = meta.get("assets")
     if isinstance(booked, dict):
-        ids, _unnamed = paid_asset_ids(clips)
+        # Imported here, not at module load, so the fiction census (and its mirror test) does not
+        # need the ledger module to classify a job.
+        from workers.stages.visuals.image_cost_ledger import paid_assets
+
+        assets, unnamed, _usd = paid_assets(clips)
         free = set(meta.get("free") or [])
-        return "under" if (ids - set(booked) - free) else "exact"
+        booked_unnamed = meta.get("unnamed") if isinstance(meta.get("unnamed"), dict) else {}
+        unnamed_booked = sum(int((d or {}).get("n") or 0) for d in booked_unnamed.values()
+                             if isinstance(d, dict))
+        missing = set(assets) - set(booked) - free
+        return "under" if (missing or sum(unnamed.values()) > unnamed_booked) else "exact"
     sc = meta.get("scenes")
     if sc is None:
         return "none"
@@ -330,15 +301,15 @@ def main() -> int:
     print()
     print(f"  1) REAL mermaid flowcharts (edges>0) : {fig_total} figures across {fig_jobs} job(s)")
     print(f"       kinds: {dict(kinds) or '{}'}")
-    print(f"       BEFORE (all history): 65 figures across 12 jobs")
+    print("       BEFORE (all history): 65 figures across 12 jobs")
     print(f"  2) jobs with imagination_tree->mermaid: {tree_mermaid_jobs}   [expect 0]")
     print(f"     jobs where 'fiction_beat' fired    : {fiction_beat_jobs}   [positive evidence]")
     print(f"  3) character bible present           : {with_bible}/{settled} "
           f"({100*with_bible/settled:.0f}%)   BEFORE: 55%")
     print(f"  4) image-cost stamp vs settled       : exact {cost_exact} · UNDER {cost_under} "
           f"· over {cost_over}")
-    print(f"       BEFORE (all history): exact 109 · UNDER 104 · over 28")
-    print(f"       (a stamp with meta.assets is read as a superset of the clips: never 'over')")
+    print("       BEFORE (all history): exact 109 · UNDER 104 · over 28")
+    print("       (a stamp with meta.assets is read as a superset of the clips: never 'over')")
     print()
     print("  READ HONESTLY: small n is not a trend. Report the DENOMINATOR with every number,")
     print("  and remember overcounts (stamp > settled) are RE-RENDERS, a separate filed item —")

@@ -3,7 +3,7 @@
 
 This is the census workers #3239 cited in round D, committed so the PR can cite a command rather
 than an output file. It answers ONE question: how much does pricing a still once per SHOWING
-(``worker._sum_visuals_image_cost``, the per-clip rule every stamp before #3239 was written with)
+(the per-clip rule every stamp before #3239 was written with, frozen in ``image_census_rules``)
 differ from pricing it once per ASSET (``image_cost_ledger.paid_assets`` over the clips, no
 receipt)?
 
@@ -15,8 +15,7 @@ unknown distance, and neither is "what was paid".
 
 POPULATION: the ``--limit`` newest ``podcast_jobs`` by ``created_at`` at or before ``--until``.
 Prices are the catalog's at the ``WORKERS_SRC`` tree (``compute_asset_cost``), so both arms use
-the same prices. Owners are labelled by class only (test@ / e2e / founder / other / unknown);
-``KFU_FOUNDER_EMAILS`` names the founder's personal accounts and is never committed.
+the same prices. Owners are labelled by class only (``image_census_rules.owner_class``).
 
 USAGE::
 
@@ -34,57 +33,12 @@ import datetime
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 PROJECT = "kitesforu-dev"
 _QA_ROOT = Path(__file__).resolve().parents[1]
 _WORKERS_SRC = os.environ.get("WORKERS_SRC") or str(_QA_ROOT.parent / "kitesforu-workers" / "src")
-_FOUNDER_EMAILS = frozenset(
-    e.strip().lower() for e in os.environ.get("KFU_FOUNDER_EMAILS", "").split(",") if e.strip()
-)
-
-
-def per_clip_usd(clips: list[Any], price: Any) -> float:
-    """``_sum_visuals_image_cost`` (deleted by workers #3239), byte-for-byte in its rules: skip a
-    reused re-cut, price ``rendered_model_id`` over ``model_id`` once per clip, price an
-    ai_generated relimage at the engine estimate."""
-    usd = 0.0
-    for c in clips:
-        if not isinstance(c, dict):
-            continue
-        ev = c.get("imagination_event")
-        if isinstance(ev, dict) and ev.get("reused") is True:
-            continue
-        mid = c.get("rendered_model_id") or c.get("model_id")
-        if mid:
-            usd += price(mid)
-            continue
-        dd = c.get("diagram_debug") or {}
-        if c.get("ai_generated") and str(dd.get("kind") or "") == "relimage":
-            usd += price("relimage")
-    return usd
-
-
-def _owner(db: Any, uid: str, cache: dict[str, str]) -> str:
-    if uid not in cache:
-        label = "unknown"
-        try:
-            u = db.collection("users").document(uid).get()
-            email = str(((u.to_dict() or {}) if u.exists else {}).get("email") or "").lower()
-            # The E2E harness signs in as the same test@ address under its own user id
-            # (``…_e2e``), so the id decides before the address does.
-            if "e2e" in uid.lower() or "e2e" in email:
-                label = "e2e"
-            elif email.startswith("test@"):
-                label = "test@"
-            elif email and email in _FOUNDER_EMAILS:
-                label = "founder"
-            elif email:
-                label = "other"
-        except Exception:  # noqa: BLE001
-            pass
-        cache[uid] = label
-    return cache[uid]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from image_census_rules import legacy_per_clip_usd, owner_class  # noqa: E402
 
 
 def main() -> int:
@@ -97,8 +51,8 @@ def main() -> int:
     sys.path.insert(0, _WORKERS_SRC)
     from google.cloud import firestore  # noqa: E402
     from workers.stages.visuals.image_cost_ledger import (  # noqa: E402
-        _asset_id,
-        _clip_price,
+        asset_id,
+        clip_price,
         paid_assets,
         price_of,
     )
@@ -122,22 +76,22 @@ def main() -> int:
         oldest = ca
         clips = ((d.get("visual") or {}).get("clips")) or []
         clips = clips if isinstance(clips, list) else []
-        a = per_clip_usd(clips, price_of)
+        a = legacy_per_clip_usd(clips, price_of)
         assets, _unnamed, unnamed_usd = paid_assets(clips)
         b = sum(float(x["usd"]) for x in assets.values()) + unnamed_usd
         if a <= 0 and b <= 0:
             continue
         priced += 1
         per_job_assets.append(len(assets) + sum(_unnamed.values()))
-        owner_counts[_owner(db, str(d.get("user_id") or ""), owners)] += 1
+        owner_counts[owner_class(db, str(d.get("user_id") or ""), owners)] += 1
         arm_a += a
         arm_b += b
         if round(a, 6) != round(b, 6):
             differ += 1
         for c in clips:
-            if _clip_price(c) is not None:
+            if clip_price(c) is not None:
                 priced_clips += 1
-                if _asset_id(c) is None:
+                if asset_id(c) is None:
                     no_identity += 1
         block = (d.get("costs") or {}).get("visuals_images")
         if isinstance(block, dict):
