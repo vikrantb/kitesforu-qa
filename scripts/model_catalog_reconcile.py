@@ -54,6 +54,11 @@ def _secret(name: str) -> str | None:
         return None
 
 
+def _curl_quote(value: str) -> str:
+    """A value inside a double-quoted curl config parameter."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _get(url: str, headers: dict) -> dict | list | None:
     """GET via curl, deliberately — NOT urllib.
 
@@ -61,13 +66,14 @@ def _get(url: str, headers: dict) -> dict | list | None:
     function's fail-open `except` turned that into an empty result: every provider probe returned
     zero and the whole reconciler abstained. curl uses the system trust store and works. The
     control below is what surfaced it rather than letting 66 rows read as retired.
+
+    The headers — every probe's credential — go to curl on STDIN (`--config -`), never in its argv:
+    a process's arguments are readable by any local user (`ps`) for as long as it runs.
     """
-    cmd = ["curl", "-sS", "--max-time", str(TIMEOUT)]
-    for k, v in headers.items():
-        cmd += ["-H", f"{k}: {v}"]
-    cmd.append(url)
+    cmd = ["curl", "-sS", "--max-time", str(TIMEOUT), "--config", "-", url]
+    config = "".join(f'header = "{_curl_quote(f"{k}: {v}")}"\n' for k, v in headers.items())
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT + 10)
+        out = subprocess.run(cmd, input=config, capture_output=True, text=True, timeout=TIMEOUT + 10)
         if out.returncode != 0 or not out.stdout.strip():
             return None
         return json.loads(out.stdout)
@@ -98,15 +104,30 @@ def probe_openai():
     return ids, bool(ids), f"{len(ids)} listed"
 
 
+_GENAI_MODELS = "https://generativelanguage.googleapis.com/v1beta/models"
+_MAX_PAGES = 10
+
+
 def probe_google_genai():
     k = _secret("google-ai-api-key")
     if not k:
         return set(), False, "no key"
-    # The key rides in the `x-goog-api-key` header, never `?key=`: a URL is what a proxy, a curl
-    # error and a log line carry (the same key reached 578 Cloud Run log lines that way, 2026-10-01).
-    d = _get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {"x-goog-api-key": k})
-    ids = {m["name"].replace("models/", "") for m in (d or {}).get("models", [])}
-    return ids, bool(ids), f"{len(ids)} listed"
+    # The key rides in the `x-goog-api-key` header, never `?key=`. This site's exposure was latent:
+    # `_get` captures curl's stderr and prints nothing, so it contributed none of the key's log
+    # lines. The same key in the workers/api/course-workers clients' `?key=` URLs reached 578
+    # Cloud Run log lines in the 7 days to 2026-10-01 (workers #3243, api #886, course-workers #213).
+    # Every page is read: a model past the first page is not a phantom.
+    ids: set = set()
+    token, pages = "", 0
+    while pages < _MAX_PAGES:
+        url = f"{_GENAI_MODELS}?pageSize=200" + (f"&pageToken={token}" if token else "")
+        d = _get(url, {"x-goog-api-key": k}) or {}
+        ids |= {m["name"].replace("models/", "") for m in d.get("models", [])}
+        pages += 1
+        token = d.get("nextPageToken") or ""
+        if not token:
+            break
+    return ids, bool(ids), f"{len(ids)} listed over {pages} page(s)"
 
 
 def probe_google_tts():
