@@ -102,7 +102,9 @@ def probe_google_genai():
     k = _secret("google-ai-api-key")
     if not k:
         return set(), False, "no key"
-    d = _get(f"https://generativelanguage.googleapis.com/v1beta/models?key={k}&pageSize=200", {})
+    # The key rides in the `x-goog-api-key` header, never `?key=`: a URL is what a proxy, a curl
+    # error and a log line carry (the same key reached 578 Cloud Run log lines that way, 2026-10-01).
+    d = _get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {"x-goog-api-key": k})
     ids = {m["name"].replace("models/", "") for m in (d or {}).get("models", [])}
     return ids, bool(ids), f"{len(ids)} listed"
 
