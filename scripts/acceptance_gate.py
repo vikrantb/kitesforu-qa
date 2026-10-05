@@ -108,10 +108,10 @@ _FULL_BLEED_MODALITIES = frozenset({"scene_image", "video_hero"})
 
 #: How far a cut in the master can land from the ``start_ms`` it claims. MEASURED with a
 #: frame-difference cut finder (largest |diff| between consecutive full-rate frames near each
-#: claimed start): the 7 visible cuts of the witness f7df77bf (85 s) landed 145-199 ms EARLY, and
-#: 10 cuts spread over 820a8a23 (13.6 min) landed 133-367 ms EARLY; none landed late. The J-cut
-#: leads every internal cut by 120 ms (`video_assembler._JCUT_LEAD_MS`) and segment rounding adds
-#: the rest. A frame within this band of a cut may show either side of it.
+#: claimed start, +-1 frame): the 7 cuts between distinct assets on the witness f7df77bf (85 s)
+#: landed 133-200 ms EARLY, and 10 spread over 820a8a23 (13.6 min) landed 133-367 ms EARLY; none
+#: landed late. The J-cut leads every internal cut by 120 ms (`video_assembler._JCUT_LEAD_MS`)
+#: and segment rounding adds the rest. A frame within this band of a cut may show either side.
 _CUT_EARLY_MS = 500
 _CUT_LATE_MS = 100
 
@@ -147,10 +147,10 @@ def _clips_on_screen(clips: list[dict] | None, ts_ms: int) -> list[dict]:
     The renderer's rule, not the clip's own ``duration_ms``: clip i holds the screen from its
     ``start_ms`` until the NEXT clip's ``start_ms`` (``resolve_bounds``), and the LAST clip holds it
     to the end of the master — its window runs to the master span and the tail is held on its final
-    frame (``_hold_tail_to_span``). So a frame past the authored timeline shows the last clip; on the
-    witness the cut finder sees no cut at the timeline's end (69.24 s) and the tail frames re-show
-    the last scene. It is the common case: of the 130 delivered masters with a recorded runtime
-    among the 600 newest job docs, 99 run more than 1.5 s past the end of their last clip.
+    frame (``_hold_tail_to_span``). So a frame past the authored timeline shows the last clip; on
+    the witness the cut finder sees no cut at the timeline's end (69.24 s) and the tail frames
+    re-show the last scene. It is the common case: of the 130 delivered masters with a recorded
+    runtime among the 600 newest job docs, 99 run more than 1.5 s past the end of their last clip.
 
     Widened where the master can differ from the claim, so the answer errs toward MORE candidates:
       * within ``_CUT_EARLY_MS`` before / ``_CUT_LATE_MS`` after a cut, both sides are candidates;

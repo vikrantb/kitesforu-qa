@@ -1,4 +1,4 @@
-"""The acceptance gate must score each sampled frame as the clip ACTUALLY on screen when it was taken.
+"""The acceptance gate must score each sampled frame as the clip ACTUALLY on screen when taken.
 
 THE DEFECT (witness job f7df77bf, 2026-10-05). The gate extracts one frame per 3 s with ffmpeg's
 ``fps`` filter and assumed frame k shows the master at ``3k`` seconds. It does not: the filter
@@ -308,7 +308,7 @@ def test_the_intro_lead_before_the_first_clip_is_unknown(frames):
 
 
 def test_a_frame_just_before_a_cut_is_judged_by_both_sides(frames):
-    """Cuts land EARLY: 145-199 ms on the witness, 133-367 ms on the 13.6-min 820a8a23. A frame
+    """Cuts land EARLY: 133-200 ms on the witness, 133-367 ms on the 13.6-min 820a8a23. A frame
     401 ms before a photo -> card cut may already show the card, so it is checked."""
     gate = _load_gate()
     photo, card = _clip(0, "video_hero"), _clip(7900, "diagram")
@@ -367,7 +367,9 @@ def test_a_clip_the_renderer_never_painted_holds_no_screen_time():
     the screen until the next painted clip, so that is what a frame in the gap shows."""
     gate = _load_gate()
     photo, after = _clip(0, "scene_image"), _clip(9000, "scene_image")
-    for unpainted in (_clip(3000, "diagram", status="failed"), _clip(3000, "diagram", asset_uri="")):
+    unpainted_clips = (_clip(3000, "diagram", status="failed"),
+                       _clip(3000, "diagram", asset_uri=""))
+    for unpainted in unpainted_clips:
         assert gate._clips_on_screen([photo, unpainted, after], gate._frame_time_ms(1)) == [photo]
     # A hand-built record without the key at all is kept (only persisted clips always carry it).
     bare = {"start_ms": 3000, "modality": "diagram"}
