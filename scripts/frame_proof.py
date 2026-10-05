@@ -33,11 +33,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
 import tempfile
 from typing import Any, Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline  # noqa: E402
 
 _W, _H = 96, 171
 _N = _W * _H
@@ -86,19 +90,6 @@ def _score(diffs: list[float]) -> dict[str, Any]:
     }
 
 
-def _windows(clips: list[dict], span: float) -> list[tuple[float, float, str, str]]:
-    """(start, length, render_mode, kind) from CONSECUTIVE start_ms — never duration_ms."""
-    rows = [c for c in clips if isinstance(c, dict) and c.get("start_ms") is not None]
-    rows.sort(key=lambda c: float(c["start_ms"]))
-    out: list[tuple[float, float, str, str]] = []
-    for i, c in enumerate(rows):
-        s = float(c["start_ms"]) / 1000.0
-        e = float(rows[i + 1]["start_ms"]) / 1000.0 if i + 1 < len(rows) else span
-        out.append((s, max(0.0, e - s), str(c.get("render_mode") or "?"),
-                    str((c.get("diagram_debug") or {}).get("kind") or "-")))
-    return out
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("job_id", nargs="?")
@@ -108,6 +99,7 @@ def main() -> int:
 
     path = args.file
     clips: list[dict] = []
+    job: dict = {}
     if not path:
         if not args.job_id:
             print("need a job_id or --file", file=sys.stderr)
@@ -154,7 +146,14 @@ def main() -> int:
 
     by_mode: dict[str, list[float]] = {}
     print(f"\n  {'start':>6} {'win':>6} {'mode':14} {'kind':20} {'median':>8}  verdict")
-    for s, d, mode, kind in _windows(clips, span):
+    # The painted windows come from the delivered-timeline model every reader shares: the
+    # assembler's stamp when present, else the persisted claims (consecutive starts, never
+    # `duration_ms`; the last window runs to the master span, as `resolve_bounds` does).
+    timeline = DeliveredTimeline.from_job(job, master_ms=span * 1000)
+    for w in timeline.painted_windows():
+        s, d = w.start_ms / 1000.0, (w.end_ms - w.start_ms) / 1000.0
+        mode = str(w.fields.get("render_mode") or "?")
+        kind = str((w.fields.get("diagram_debug") or {}).get("kind") or "-")
         if d <= 0.4:
             continue
         sc = _score(_diffs(path, s, d))

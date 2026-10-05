@@ -4,6 +4,7 @@
 # in pipeline order, printing PASS/FAIL/INFO per step. $0 (reads + local ffmpeg). Usage: <job_id>
 set -u
 J="${1:?usage: full_artifact_checker.sh <job_id>}"
+QA_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 cd "$(dirname "$0")/../.." || exit 2
 W=/tmp/checker_$J; mkdir -p $W
 echo "═══ STEP-BY-STEP CHECKER — job $J ═══"
@@ -79,19 +80,6 @@ for p in ps:
     g = np.asarray(Image.open(p).convert("L"), dtype=np.float32)
     if g.mean() < 15 and float((g > 40).mean())*100 < 2 and float((g > 150).mean())*100 < 0.08:
         void.append(p.split("/")[-1])
-# 9b. EDGE-TEXT arm (acceptance_gate probe C, per-frame): bright text pixels hugging the
-# outermost columns = a label/callout clipped off-frame (witness 7171699f f_004:
-# "Summer heat pushes lattice outward" rendered "mmer heat..."). Computable — no eyes needed.
-edge = []
-for p in ps:
-    g = np.asarray(Image.open(p).convert("L"), dtype=np.float32)
-    # >=12 bright pixels in the outer 3 columns/rows = real content touching the
-    # frame edge (LEFT/RIGHT witness 7171699f f_004 = 28px; TOP/BOTTOM witness
-    # 4d41320d f_001 = 517/908px — the clipped hook composite the eye pass caught
-    # while the left/right-only arm passed it; every clean frame measures 0).
-    if (int((g[:, :3] >= 200).sum()) >= 12 or int((g[:, -3:] >= 200).sum()) >= 12
-            or int((g[:3, :] >= 200).sum()) >= 12 or int((g[-3:, :] >= 200).sum()) >= 12):
-        edge.append(p.split("/")[-1])
 # 9c. HALF-FRAME DEAD ZONE (witness 4d41320d f_007/f_008: content crammed in the
 # top 40-50%, bottom half of the 9:16 canvas empty for ~10s — the whole-frame void
 # census passes it; measured: bottom-half mean 9 on the witnesses, 31-105 clean).
@@ -103,8 +91,33 @@ for p in ps:
         halfdead.append(p.split("/")[-1])
 print(f"[9 frames]    n={n} three-arm-void={len(void)} :: {'PASS' if not void else 'EYES-REQUIRED'}")
 print(f"              bottom-half-dead={len(halfdead)} {halfdead[:4]} :: {'PASS' if len(halfdead) <= max(1, n//5) else 'WARN'}")
-print(f"              edge-text-clip={len(edge)} {edge[:4]} :: {'PASS' if not edge else 'FAIL'}")
 if void: print(f"              flagged (may be legible dark type — LOOK before concluding): {void[:6]}")
+PY
+
+# 9b. EDGE-CLIP — the acceptance gate's own probe C (scripts/acceptance_gate.py `probe_master`),
+# never a copy of it. The copy that lived here counted bright pixels in the outer 3 columns with
+# no notion of which beat was on screen, and FAILed witness f7df77bf on 4 full-bleed photographs
+# (f_004/f_005/f_009/f_010). The gate attributes every frame against the delivered timeline and
+# exempts only full-bleed beats, and the step-count rule it uses still catches the clipped labels
+# this arm was written for (7171699f f_004, 4d41320d f_001).
+python3 - "$J" "$W" "$QA_SCRIPTS" <<'PY'
+import sys
+J, W, S = sys.argv[1:4]
+sys.path.insert(0, S)
+import acceptance_gate as ag
+from google.cloud import firestore
+doc = firestore.Client(project="kitesforu-dev").collection("podcast_jobs").document(J).get().to_dict() or {}
+_, _, dur = ag._probe_dims(f"{W}/v.mp4")
+_, issues, cov = ag.probe_master(doc, f"{W}/v.mp4", f"{W}/gate_frames", dur * 1000 if dur else None)
+edge = [i["msg"] for i in issues if "EDGE-CLIP" in i["msg"]]
+print(f"[9b edge]     gate probe C: checked={cov['checked']}/{cov['sampled']} "
+      f"exempt_full_bleed={cov['exempt_full_bleed']} flagged={cov['flagged']} "
+      f"timeline={cov['timeline']} :: {'FAIL' if edge else 'PASS'}")
+for m in edge:
+    print(f"              {m}")
+note = ag._edge_clip_note(cov)
+if note:
+    print(f"              NOTE: {note}")
 PY
 
 # 10. GUARD LOGS — did the instruments fire (with positive control)

@@ -84,6 +84,8 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Any
 
+from .delivered_timeline import DeliveredTimeline
+
 # ── thresholds (single place to tune; justified against the fleet baseline above) ──────────────
 
 #: A picture should track the sentence it illustrates. Two sentences is the fleet median today;
@@ -210,6 +212,11 @@ class ShownWordsResult:
 def delivered_spans(clips: Sequence[dict[str, Any]]) -> dict[int, tuple[int, int]]:
     """The window each clip is actually ON SCREEN for, keyed by its index in ``clips``.
 
+    DEFINED IN ONE PLACE: :meth:`delivered_timeline.DeliveredTimeline.spans_by_clip`, the same
+    timeline model the acceptance gate and ``frame_proof`` read. This is its claims view, built
+    from bare clips with no stamp and no master span. It is unchanged from the version that lived
+    here; ``tests/test_narration_alignment.py`` still passes against it unmodified.
+
     THE DELIVERED WINDOW IS THE GAP TO THE NEXT DISTINCT START, not ``duration_ms``. That is the
     assembler's own rule (``video_assembler.resolve_bounds`` uses ``end = sf[i+1]``;
     ``pacing/destrobe`` computes ``win = si[i+1] - si[i]``).
@@ -223,24 +230,7 @@ def delivered_spans(clips: Sequence[dict[str, Any]]) -> dict[int, tuple[int, int
 
     Clips stacked at one timestamp do not bound each other (the unanchored-beat cluster — witness
     4d41320d stacks six at 24403), or every one of them would collapse to a zero-width window."""
-    rows = []
-    for i, clip in enumerate(clips or []):
-        if not isinstance(clip, dict):
-            continue
-        try:
-            rows.append((int(clip.get("start_ms")), i, clip))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            continue
-    rows.sort(key=lambda r: r[0])
-    out: dict[int, tuple[int, int]] = {}
-    for n, (start, idx, clip) in enumerate(rows):
-        end = next((s for s, _, _ in rows[n + 1 :] if s > start), None)
-        if end is None:
-            span = _span(clip)
-            end = span[1] if span else None
-        if end is not None and end > start:
-            out[idx] = (start, int(end))
-    return out
+    return DeliveredTimeline.from_clips(clips).spans_by_clip()
 
 
 def _span(clip: dict[str, Any]) -> tuple[int, int] | None:
