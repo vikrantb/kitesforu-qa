@@ -243,8 +243,33 @@ def test_the_coverage_says_the_witness_pass_is_a_pass_by_exemption(frames):
     gate = _load_gate()
     _, cov = gate._pixel_invariants([frames["photo"]] * 28, timeline=_witness_timeline())
     assert cov == {"sampled": 12, "checked": 0, "exempt_full_bleed": 12, "unknown": 0,
-                   "flagged": 0, "timeline": "trusted", "source": "fallback"}
+                   "flagged": 0, "timeline": "trusted", "source": "estimated", "sidecar_bytes": 0}
     assert "checked 0 of 12" in gate._edge_clip_note(cov)
+    assert "timeline trusted, estimated)" in gate._edge_clip_note(cov)
+
+
+def test_probe_master_reads_the_producers_sidecar_and_says_so(frames, tmp_path, monkeypatch):
+    """The gate's own path (`probe_master`, which `full_artifact_checker.sh` 9b also calls) takes
+    the timeline from the sidecar the doc names, and its coverage says the attribution is the
+    producer's and what the read cost. The read is stubbed with the producer's witness stamp."""
+    from kitesforu_qa.harness import delivered_timeline as dt
+    from kitesforu_qa.harness.painted_timeline_sidecar import read_sidecar
+
+    body = (pathlib.Path(__file__).parent / "fixtures" / "painted_timeline_v1_witness.json").read_bytes()
+    uri = "gs://kitesforu-dev-podcasts/visuals/f7df77bf/painted_timeline.json"
+    monkeypatch.setattr(dt, "read_sidecar", lambda doc: read_sidecar(
+        doc, fetch=lambda url: body, parse=lambda obj: obj))
+    gate = _load_gate()
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out: [frames["photo"]] * 28)
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": _witness_clips(), "painted_timeline_uri": uri}}
+    _, issues, cov = gate.probe_master(doc, "unused.mp4", str(tmp_path), 85033)
+    assert (cov["source"], cov["timeline"], cov["sidecar_bytes"]) == ("stamp", "stamp", len(body)), cov
+    assert cov["exempt_full_bleed"] == 12 and not _edge_issues(issues), cov
+    # The same job with the video 3 s longer than the stamp's windows: a different render, so the
+    # stamp is refused, the coverage says why, and the estimate decides.
+    _, _, cov = gate.probe_master(doc, "unused.mp4", str(tmp_path), 88033)
+    assert cov["source"] == "estimated" and "windows end 85033" in cov["stamp_rejected"], cov
 
 
 # ── THE EXEMPTION, and exactly the exemption ─────────────────────────────────────────────────

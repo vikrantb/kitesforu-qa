@@ -112,7 +112,7 @@ _, issues, cov = ag.probe_master(doc, f"{W}/v.mp4", f"{W}/gate_frames", dur * 10
 edge = [i["msg"] for i in issues if "EDGE-CLIP" in i["msg"]]
 print(f"[9b edge]     gate probe C: checked={cov['checked']}/{cov['sampled']} "
       f"exempt_full_bleed={cov['exempt_full_bleed']} flagged={cov['flagged']} "
-      f"timeline={cov['timeline']} :: {'FAIL' if edge else 'PASS'}")
+      f"timeline={cov['timeline']} source={cov['source']} :: {'FAIL' if edge else 'PASS'}")
 for m in edge:
     print(f"              {m}")
 note = ag._edge_clip_note(cov)

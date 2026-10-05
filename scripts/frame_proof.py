@@ -50,14 +50,18 @@ _BAR = 0.5
 
 
 def _probe_duration(path: str) -> float:
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    try:
-        return float(out)
-    except ValueError:
-        return 0.0
+    """The VIDEO stream's duration, else the container's. The painted windows describe the video,
+    and a video can end short of its master (the producer's ``video_short_of_master``)."""
+    for select, entry in ((["-select_streams", "v:0"], "stream=duration"), ([], "format=duration")):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", *select, "-show_entries", entry, "-of", "csv=p=0", path],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        try:
+            return float(out.split(",")[0])
+        except ValueError:
+            continue
+    return 0.0
 
 
 def _diffs(path: str, start: float = 0.0, length: Optional[float] = None) -> list[float]:
@@ -145,11 +149,14 @@ def main() -> int:
         return 0
 
     by_mode: dict[str, list[float]] = {}
-    print(f"\n  {'start':>6} {'win':>6} {'mode':14} {'kind':20} {'median':>8}  verdict")
     # The painted windows come from the delivered-timeline model every reader shares: the
-    # assembler's stamp when present, else the persisted claims (consecutive starts, never
-    # `duration_ms`; the last window runs to the master span, as `resolve_bounds` does).
+    # producer's sidecar when it reads, else the estimate from the persisted claims (consecutive
+    # starts, never `duration_ms`; the last window runs to the master span, as `resolve_bounds`
+    # does). The line below says which.
     timeline = DeliveredTimeline.from_job(job, master_ms=span * 1000)
+    why = f"; {timeline.stamp_rejected}" if timeline.stamp_rejected else ""
+    print(f"\n  timeline: {timeline.source} ({timeline.diagnosis}{why})")
+    print(f"\n  {'start':>6} {'win':>6} {'mode':14} {'kind':20} {'median':>8}  verdict")
     for w in timeline.painted_windows():
         s, d = w.start_ms / 1000.0, (w.end_ms - w.start_ms) / 1000.0
         mode = str(w.fields.get("render_mode") or "?")

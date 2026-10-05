@@ -21,8 +21,10 @@ from pathlib import Path
 import pytest
 
 from kitesforu_qa.harness import delivered_timeline as dt
+from kitesforu_qa.harness import painted_timeline_sidecar as sidecar_mod
 from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, bleeds_by_design
 from kitesforu_qa.harness.narration_alignment import delivered_spans
+from kitesforu_qa.harness.painted_timeline_sidecar import SidecarRead, read_sidecar
 
 VEO = {"render_mode": "video", "motion_render": "veo"}
 
@@ -81,17 +83,33 @@ def test_a_stamped_video_hero_needs_video_evidence_in_the_stamp():
 
 @pytest.mark.parametrize("bad, reason", [
     (stamp([window(0, 0, 20000, "scene_image")], version=2), "version=2"),
-    (stamp([window(0, 0, 20000, "scene_image")], master_ms=30000), "master_ms"),
+    (stamp([window(0, 0, 30000, "scene_image")], master_ms=30000), "windows end 30000 != probed video 20000"),
+    (stamp([window(0, 0, 18500, "scene_image")], master_ms=18500), "windows end 18500 != probed video 20000"),
     (stamp([window(5, 0, 20000, "scene_image")]), "malformed_window"),
     (stamp([window(0, 9000, 9000, "scene_image")]), "malformed_window"),
+    (stamp([7]), "malformed_window"),
     (stamp([]), "no_windows"),
-    ("not a stamp", "not_a_mapping"),
+    ("not a stamp", "version=None"),
 ])
-def test_a_stamp_that_cannot_be_trusted_falls_back_and_says_why(bad, reason):
+def test_a_stamp_that_cannot_be_trusted_is_replaced_by_the_estimate_and_says_why(bad, reason):
     clips = [clip(0, "diagram")]
     tl = DeliveredTimeline.from_clips(clips, stamp=bad, master_ms=20000)
-    assert tl.source == "fallback" and reason in (tl.stamp_rejected or ""), tl.stamp_rejected
-    assert tl.full_bleed_at(4499) is False      # the fallback read the diagram claim
+    assert tl.source == "estimated" and reason in (tl.stamp_rejected or ""), tl.stamp_rejected
+    assert tl.full_bleed_at(4499) is False      # the estimate read the diagram claim
+
+
+def test_a_video_short_of_its_master_keeps_its_stamp():
+    """The producer refuses the close with `video_short_of_master` when the video ends before the
+    audio. The stamp's `master_ms` is the AUDIO span, so it is never compared with the probed video:
+    the windows end where the video ends, and the gate probes the video stream."""
+    clips = [clip(0, "scene_image"), clip(1, "diagram")]
+    short = stamp([window(0, 0, 9000, "scene_image"), window(1, 9000, 20000, "diagram")],
+                  master_ms=27000)
+    short["close"] = {"applied": False, "fade_start_ms": None, "fade_ms": None,
+                      "reason": "video_short_of_master"}
+    tl = DeliveredTimeline.from_clips(clips, stamp=short, master_ms=20000)
+    assert (tl.source, tl.stamp_rejected) == ("stamp", None)
+    assert tl.full_bleed_at(4499) is True and tl.full_bleed_at(13499) is False
 
 
 def test_a_gap_in_the_stamp_and_the_intro_before_it_are_unknown():
@@ -122,10 +140,20 @@ def produced(name):
     return json.loads((FIXTURES / f"painted_timeline_v1_{name}.json").read_text())
 
 
+URI = "gs://kitesforu-dev-podcasts/visuals/f7df77bf-5f6e-4862-ae2e-5446270d5f1d/painted_timeline.json"
+
+
+def sidecar_of(name):
+    """A vendored producer stamp, read as the sidecar a doc names. ``parse`` stands in for workers'
+    ``parse_v1`` here; the golden-sidecar tests at the bottom of this file run the real one."""
+    body = (FIXTURES / f"painted_timeline_v1_{name}.json").read_bytes()
+    return read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: body,
+                        parse=lambda obj: obj)
+
+
 def test_the_producers_witness_stamp_exempts_every_full_bleed_frame():
     """f7df77bf as the assembler stamps it: 11 traced windows, the J-cut-led boundaries, the tail hold
     to 85033 ms and an applied close. Every sampled frame is a picture with video evidence."""
-    stamp = produced("witness")
     clips = [clip(s, m, i, duration_ms=d, asset_uri=f"gs://b/{i}.mp4", render_mode="video",
                   motion_render=mr)
              for i, (s, d, m, mr) in enumerate(
@@ -135,9 +163,12 @@ def test_the_producers_witness_stamp_exempts_every_full_bleed_frame():
                   (39190, 5846, "scene_image", "kenburns"), (45036, 5845, "scene_image", "kenburns"),
                   (50881, 6576, "scene_image", "kenburns"), (57457, 6575, "scene_image", "kenburns"),
                   (64032, 5208, "scene_image", "kenburns")])]
-    doc = {"master_segment_timeline": [{"index": 0}], "visual": {"clips": clips, "painted_timeline": stamp}}
-    tl = DeliveredTimeline.from_job(doc, master_ms=85033)
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": clips, "painted_timeline_uri": URI}}
+    read = sidecar_of("witness")
+    tl = DeliveredTimeline.from_job(doc, master_ms=85033, sidecar=read)
     assert (tl.source, tl.diagnosis, tl.stamp_rejected) == ("stamp", "stamp", None)
+    assert tl.sidecar_bytes == read.bytes_read == (FIXTURES / "painted_timeline_v1_witness.json").stat().st_size
     for k in (0, 2, 4, 7, 9, 12, 14, 17, 19, 22, 24, 27):     # `_sample_indices(28)`
         assert tl.full_bleed_at(3000 * k + 1499) is True, k
     assert tl.spans_by_clip()[10] == (63912, 85033)
@@ -174,6 +205,78 @@ def test_a_stale_source_index_makes_the_window_unknown():
              clip(16000, "video_hero", 3, **VEO), clip(20000, "video_hero", 4), clip(24000, "scene_image", 5)]
     tl = DeliveredTimeline.from_clips(clips, stamp=stamp, master_ms=27000)
     assert tl.candidates_at(4499) == [None] and tl.candidates_at(13499) == [None]
+
+
+def _untraced_clips():
+    return [clip(0, "scene_image", 0), clip(4000, "diagram", 1),
+            clip(9000, "scene_image", 2, status="failed", asset_uri=""),
+            clip(16000, "video_hero", 3, asset_uri="gs://b/veo_0/clip.mp4", **VEO),
+            clip(20000, "video_hero", 4, render_mode="still", asset_uri="gs://b/title_band.png"),
+            clip(24000, "scene_image", 5)]
+
+
+def test_parse_v1s_typed_model_reads_exactly_like_its_json():
+    """`parse_v1` returns a typed model, not a dict, so every contract field is also read as an
+    attribute. The same stamp as attributes yields the same windows."""
+    from types import SimpleNamespace as Model
+
+    raw = produced("coverage_untraced")
+    typed = Model(**{**raw, "windows": tuple(Model(**w) for w in raw["windows"]),
+                     "close": Model(**raw["close"])})
+    as_json = DeliveredTimeline.from_clips(_untraced_clips(), stamp=raw, master_ms=27000)
+    as_model = DeliveredTimeline.from_clips(_untraced_clips(), stamp=typed, master_ms=27000)
+    assert (as_model.source, as_model.stamp_rejected) == ("stamp", None)
+    assert as_model.windows == as_json.windows and len(as_model.windows) == 6
+
+
+# ── the sidecar is the only channel, and an unread one is an estimate that says why ───────────
+
+def test_from_job_reads_the_sidecar_the_doc_names(monkeypatch):
+    """No caller passes the sidecar in production: `from_job` reads it. Pinned with the read
+    stubbed, so the test spends nothing."""
+    seen = []
+
+    def read(doc):
+        seen.append(doc["visual"]["painted_timeline_uri"])
+        return sidecar_of("coverage_untraced")
+
+    monkeypatch.setattr(dt, "read_sidecar", read)
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": _untraced_clips(), "painted_timeline_uri": URI}}
+    tl = DeliveredTimeline.from_job(doc, master_ms=27000)
+    assert seen == [URI] and (tl.source, tl.stamp_rejected) == ("stamp", None)
+    assert tl.candidates_at(17499) == [None]                 # the untraced window, from the stamp
+
+
+def test_an_inline_timeline_on_the_doc_is_not_read():
+    """`visual.painted_timeline` went away with the sidecar. A copy left on a doc is not a second
+    channel: with no sidecar named, the clips are estimated."""
+    clips = [clip(0, "scene_image", 0), clip(9000, "diagram", 1)]
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": clips,
+                      "painted_timeline": stamp([window(0, 0, 20000, "scene_image")])}}
+    tl = DeliveredTimeline.from_job(doc, master_ms=20000)
+    assert (tl.source, tl.stamp_rejected, tl.sidecar_bytes) == ("estimated", None, 0)
+    assert tl.full_bleed_at(10499) is False                  # the diagram claim
+
+
+@pytest.mark.parametrize("read, why", [
+    (SidecarRead("parser_unavailable", URI, detail="ModuleNotFoundError: No module named 'workers'"),
+     "parser_unavailable: ModuleNotFoundError"),
+    (SidecarRead("uri_unresolvable", "visuals/j/painted_timeline.json",
+                 detail="visuals/j/painted_timeline.json"), "uri_unresolvable"),
+    (SidecarRead("fetch_failed", URI, detail="HTTPError: 404"), "fetch_failed: HTTPError: 404"),
+    (SidecarRead("parse_failed", URI, bytes_read=812, detail="ValueError: v2"),
+     "parse_failed: ValueError: v2"),
+])
+def test_an_unread_sidecar_leaves_an_estimate_that_names_the_failed_step(read, why):
+    clips = [clip(0, "scene_image", 0), clip(9000, "diagram", 1)]
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": clips, "painted_timeline_uri": URI}}
+    tl = DeliveredTimeline.from_job(doc, master_ms=20000, sidecar=read)
+    assert tl.source == "estimated" and (tl.stamp_rejected or "").startswith(why), tl.stamp_rejected
+    assert tl.sidecar_bytes == read.bytes_read
+    assert tl.full_bleed_at(4499) is True and tl.full_bleed_at(10499) is False
 
 
 # ── the fallback: each repro that once exempted a card ─────────────────────────────────────────
@@ -670,3 +773,62 @@ def test_the_fallback_never_exempts_a_frame_the_renderer_paints_with_a_card():
                     f"trial {trial} t={ts}: exempt, but the renderer paints "
                     f"{[c.get('modality') for c in on]}; clips={clips}")
     assert frames > 1000 and exempt > 100, (frames, exempt)   # the property was exercised
+
+
+# ── the producer's golden sidecar, through the producer's parser ───────────────────────────────
+
+_CONTRACT_KEYS = ("modality", "render_mode", "motion_render", "asset_kind")
+
+
+def _golden_sidecar():
+    """workers' ``parse_v1`` and the golden sidecar its assembler test writes. SKIP while the workers
+    tree at ``WORKERS_SRC`` predates the sidecar contract (workers #3257); FAIL once it has
+    ``parse_v1`` but no single golden to read."""
+    parse_v1, why = sidecar_mod.load_parse_v1()
+    if parse_v1 is None:
+        pytest.skip(f"workers at {sidecar_mod.workers_src()} has no painted_timeline.parse_v1 "
+                    f"({why}): it predates the sidecar contract. SKIPPED, not passed.")
+    root = Path(sidecar_mod.workers_src()).parent / "tests"
+    found = sorted(root.rglob("*painted_timeline*.json"))
+    if len(found) != 1:
+        pytest.fail(f"workers ships parse_v1, so it ships one golden sidecar "
+                    f"(*painted_timeline*.json under {root}); found {found}")
+    return found[0]
+
+
+def test_the_producers_golden_sidecar_reads_through_parse_v1():
+    """The golden, fetched as bytes and parsed by workers' own ``parse_v1``, gives the reader the
+    golden's windows exactly: clip, bounds and every painted field."""
+    golden = _golden_sidecar()
+    body = golden.read_bytes()
+    raw = json.loads(body)
+    read = read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: body)
+    assert (read.status, read.bytes_read) == ("read", len(body)), read
+    n = 1 + max(max(w["clip"], w["source_clip"]) for w in raw["windows"])
+    clips = [clip(0, None) for _ in range(n)]
+    for w in raw["windows"]:           # rows that agree with the golden, so no window goes stale
+        if w["source_clip"] >= 0:
+            clips[w["source_clip"]] = clip(w["start_ms"], w["modality"],
+                                           render_mode=w["render_mode"],
+                                           motion_render=w["motion_render"])
+    doc = {"master_segment_timeline": [{"index": 0}], "visual": {"clips": clips}}
+    tl = DeliveredTimeline.from_job(doc, master_ms=max(w["end_ms"] for w in raw["windows"]),
+                                    sidecar=read)
+    assert (tl.source, tl.stamp_rejected) == ("stamp", None)
+    got = sorted((w.clip, w.start_ms, w.end_ms, *(w.fields[k] for k in _CONTRACT_KEYS))
+                 for w in tl.windows)
+    want = sorted((w["clip"], w["start_ms"], w["end_ms"], *(w[k] for k in _CONTRACT_KEYS))
+                  for w in raw["windows"])
+    assert got == want
+
+
+def test_the_vendored_stamps_have_the_goldens_shape():
+    """The two stamps under tests/fixtures/ were built by the producer at #3257 022ffae38. A field
+    the sidecar adds or drops makes them stale, and this goes red. Their ``_fixture_provenance``
+    key is documentation, not contract."""
+    golden = json.loads(_golden_sidecar().read_text())
+    for name in ("witness", "coverage_untraced"):
+        vendored = produced(name)
+        assert {k for k in vendored if not k.startswith("_")} == set(golden), name
+        assert {k for w in vendored["windows"] for k in w} == {k for w in golden["windows"] for k in w}
+        assert set(vendored["close"]) == set(golden["close"]), name

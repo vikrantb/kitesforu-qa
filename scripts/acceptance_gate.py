@@ -176,7 +176,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None, *,
         timeline = DeliveredTimeline.from_clips(clips or [], real_offsets=True)
     coverage: dict[str, Any] = {"sampled": 0, "checked": 0, "exempt_full_bleed": 0, "unknown": 0,
                                 "flagged": 0, "timeline": timeline.diagnosis,
-                                "source": timeline.source}
+                                "source": timeline.source, "sidecar_bytes": timeline.sidecar_bytes}
     if timeline.stamp_rejected:
         coverage["stamp_rejected"] = timeline.stamp_rejected
     try:
@@ -304,7 +304,11 @@ def probe_master(doc: dict[str, Any], mp4: str, frames_dir: str,
                  master_ms: float | None = None) -> tuple[list[str], list[dict], dict[str, Any]]:
     """OBSERVE + PROBE B/C on one master, exactly as ``run_gate`` does: extract, attribute every
     frame against the job's delivered timeline, score. ``full_artifact_checker.sh`` calls this
-    too, so the step-by-step checker and the gate cannot disagree about an edge clip."""
+    too, so the step-by-step checker and the gate cannot disagree about an edge clip.
+
+    The timeline is the producer's sidecar when it reads and describes this video, else qa's
+    estimate; ``coverage["source"]`` says which. ``master_ms`` is the VIDEO stream's duration
+    (``_probe_dims``), the length the sidecar's windows describe."""
     frames = _extract_frames(mp4, frames_dir)
     timeline = DeliveredTimeline.from_job(doc, master_ms=master_ms)
     issues, coverage = _pixel_invariants(frames, timeline=timeline)
@@ -316,7 +320,8 @@ def _edge_clip_note(coverage: dict[str, Any]) -> str | None:
     if coverage.get("sampled") and not coverage.get("checked"):
         return (f"EDGE-CLIP checked 0 of {coverage['sampled']} sampled frames "
                 f"({coverage.get('exempt_full_bleed', 0)} exempt as full-bleed, timeline "
-                f"{coverage.get('timeline')}): this verdict carries no edge-clip observation")
+                f"{coverage.get('timeline')}, {coverage.get('source')}): this verdict carries no "
+                f"edge-clip observation")
     return None
 
 

@@ -6,19 +6,23 @@ and ``full_artifact_checker.sh``'s edge arm (which asked no question at all). Th
 tail, on piles of clips claiming one start and on sort order. Each was a hand copy of renderer
 logic that keeps moving.
 
-THE PRODUCER STAMPS IT. Workers #3257 writes ``visual.painted_timeline``: the windows actually
-rendered, after coverage fill, pacing and the J-cut, each with the painted asset's modality, render
-mode and kind. When the stamp is present (``version == 1``) every reader uses it, and nothing below
-the stamp reader is consulted.
+THE PRODUCER STAMPS IT. Workers #3257 writes the painted timeline: the windows actually rendered,
+after coverage fill, pacing and the J-cut, each with the painted asset's modality, render mode and
+kind. It is a sidecar next to the master, named on the doc as ``visual.painted_timeline_uri``, and
+it is read through workers' own ``parse_v1`` (:mod:`.painted_timeline_sidecar`). When that read
+succeeds and the stamp describes the video being judged (``version == 1``), every reader uses it,
+and nothing below the stamp reader is consulted.
 
-THE FALLBACK IS CONSERVATIVE, NOT A MIRROR. Every master assembled before the stamp is read from
-the persisted ``visual.clips``. Assembly re-times those clips in ways the clips cannot express, so
-the fallback does not try to reproduce the renderer. Instead it OVER-APPROXIMATES: for each clip it
-computes every span the clip MAY be on screen, and :meth:`DeliveredTimeline.candidates_at` returns
-the union. A reader that needs certainty, such as an exemption, must treat any ``None`` candidate,
+THE ESTIMATE IS CONSERVATIVE, NOT A MIRROR. Every other master is read from the persisted
+``visual.clips``: one assembled before the sidecar, one whose sidecar could not be read, and every
+master read where ``parse_v1`` cannot be imported. Such a timeline says so (``source ==
+"estimated"``, and ``stamp_rejected`` names the failed step). Assembly re-times those clips in ways
+the clips cannot express, so the estimate does not try to reproduce the renderer. Instead it
+OVER-APPROXIMATES: for each clip it computes every span the clip MAY be on screen, and
+:meth:`DeliveredTimeline.candidates_at` returns the union. A reader that needs certainty, such as an exemption, must treat any ``None`` candidate,
 or an empty answer, as "unknown". The gate checks such frames and never exempts them.
 
-The renderer passes the fallback has to over-approximate, all in kitesforu-workers
+The renderer passes the estimate has to over-approximate, all in kitesforu-workers
 ``stages/visuals`` (origin/main 17bb3ce, 2026-10-05):
 
 * ``video_assembler.assemble_episode_video`` runs ``coverage_gate.fill_coverage_gaps`` BEFORE its
@@ -66,12 +70,21 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-#: The stamp key on ``visual`` and the one version this reader understands.
-STAMP_KEY = "painted_timeline"
+from .painted_timeline_sidecar import SidecarRead, read_sidecar
+
+#: The one stamp version this reader understands.
 STAMP_VERSION = 1
 
-#: A stamp describes the master it was written for. If its ``master_ms`` is further than this from
-#: the master actually probed, the stamp describes a different render, so it is not used.
+#: Where a timeline came from: the producer's stamp, or qa's conservative estimate.
+SOURCE_STAMP = "stamp"
+SOURCE_ESTIMATED = "estimated"
+
+#: A stamp describes the video it was written for. Its windows run to the end of that video (the
+#: tail hold stretches the last one, and an overrun trim cuts it), so if they end further than this
+#: from the video stream actually probed, the stamp describes a different render and is not used.
+#: The stamp's own ``master_ms`` is the AUDIO span. It is not compared, because a video can end
+#: short of its master: the producer then refuses the close with ``video_short_of_master``, and the
+#: stamp still describes every frame that video has.
 STAMP_MASTER_TOLERANCE_MS = 1000
 
 #: The cut band (see the module docstring for its population). For a stamp the band also covers
@@ -313,11 +326,12 @@ class Window:
 class DeliveredTimeline:
     """The answer to "what is on screen at t", built once and queried per frame."""
 
-    source: str                                   # "stamp" | "fallback"
+    source: str                                   # SOURCE_STAMP | SOURCE_ESTIMATED
     diagnosis: str
     windows: tuple[Window, ...] = ()
-    stamp_rejected: str | None = None             # why a present stamp was not used
+    stamp_rejected: str | None = None             # why a named or given stamp was not used
     burned: frozenset[str] = frozenset()          # the job's stills that carry drawn text
+    sidecar_bytes: int = 0                        # body bytes fetched for the stamp (egress)
     _first_ms: float = math.inf                   # before this instant: unknown (intro lead)
     _spans: tuple[tuple[float, float, Mapping[str, Any] | None], ...] = field(default=(),
                                                                             repr=False)
@@ -326,25 +340,33 @@ class DeliveredTimeline:
     # ── constructors ─────────────────────────────────────────────────────────────────────────
 
     @classmethod
-    def from_job(cls, doc: Mapping[str, Any] | None,
-                 master_ms: float | None = None) -> DeliveredTimeline:
-        """From a ``podcast_jobs`` doc: the stamp if it is valid, else the conservative fallback.
+    def from_job(cls, doc: Mapping[str, Any] | None, master_ms: float | None = None, *,
+                 sidecar: SidecarRead | None = None) -> DeliveredTimeline:
+        """From a ``podcast_jobs`` doc: the producer's sidecar if it reads and describes this video,
+        else the conservative estimate.
 
-        ``master_ms`` is the probed duration of the master being judged. It is used to reject a
-        stamp written for a different render, and to end the last best-estimate window.
+        ``master_ms`` is the probed duration of the master's VIDEO stream. It is used to reject a
+        stamp written for a different render, and to end the last best-estimate window. ``sidecar``
+        is the doc's sidecar, already read; by default it is read here (a few KB over HTTPS, and
+        nothing at all when the doc names none).
         """
         doc = doc or {}
         visual = doc.get("visual") or {}
-        return cls.from_clips(visual.get("clips") or [],
-                              real_offsets=bool(doc.get("master_segment_timeline")),
-                              stamp=visual.get(STAMP_KEY), master_ms=master_ms)
+        if sidecar is None:
+            sidecar = read_sidecar(doc)
+        timeline = cls.from_clips(visual.get("clips") or [],
+                                  real_offsets=bool(doc.get("master_segment_timeline")),
+                                  stamp=sidecar.parsed, master_ms=master_ms)
+        return replace(timeline, stamp_rejected=sidecar.why_unread or timeline.stamp_rejected,
+                       sidecar_bytes=sidecar.bytes_read)
 
     @classmethod
     def from_clips(cls, clips: Sequence[Any] | None, *, real_offsets: bool = True,
                    stamp: Any = None, master_ms: float | None = None) -> DeliveredTimeline:
         """From bare clips. ``real_offsets`` defaults to True, which holds on 461/461 delivered
         masters in the census. A caller holding the job doc should use :meth:`from_job`, which
-        reads the real flag and detects a legacy timeline."""
+        reads the real flag, detects a legacy timeline and reads the sidecar. ``stamp`` is the
+        producer's timeline, as its JSON or as ``parse_v1``'s typed model."""
         clips = list(clips or [])
         burned = burned_text_stills(clips)
         rejected = None
@@ -352,7 +374,7 @@ class DeliveredTimeline:
             built, rejected = _from_stamp(stamp, clips, master_ms)
             if built is not None:
                 return replace(built, burned=burned)
-        timeline = _fallback(clips, real_offsets=real_offsets, master_ms=master_ms)
+        timeline = _estimate(clips, real_offsets=real_offsets, master_ms=master_ms)
         return replace(timeline, stamp_rejected=rejected, burned=burned)
 
     # ── queries ──────────────────────────────────────────────────────────────────────────────
@@ -418,6 +440,11 @@ def _index(value: Any, n: int) -> int | None:
     return None
 
 
+def _field(obj: Any, key: str) -> Any:
+    """A contract field, from a mapping (the JSON) or from an attribute (``parse_v1``'s typed model)."""
+    return obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
+
+
 def _from_stamp(stamp: Any, clips: list[Any],
                 master_ms: float | None) -> tuple[DeliveredTimeline | None, str | None]:
     """The stamped timeline, or ``(None, why)`` when the stamp cannot be trusted.
@@ -426,28 +453,21 @@ def _from_stamp(stamp: Any, clips: list[Any],
     but nothing says whose pixels it holds, so its content is UNKNOWN. So is a window whose source row
     no longer has the window's modality: ``clip`` indexes the array the assembler was handed, and a
     racing pass can re-persist ``visual.clips`` after the mux (workers ``painted_timeline.py``)."""
-    if not isinstance(stamp, Mapping):
-        return None, "not_a_mapping"
-    if stamp.get("version") != STAMP_VERSION:
-        return None, f"version={stamp.get('version')!r}"
-    stamped_master = stamp.get("master_ms")
-    if not _is_number(stamped_master) or stamped_master <= 0:
-        return None, "no_master_ms"
-    if master_ms and abs(float(stamped_master) - float(master_ms)) > STAMP_MASTER_TOLERANCE_MS:
-        return None, f"master_ms {stamped_master} != probed {round(master_ms)}"
-    raw = stamp.get("windows")
-    if not isinstance(raw, list) or not raw:
+    version = _field(stamp, "version")
+    if version != STAMP_VERSION:
+        return None, f"version={version!r}"
+    raw = _field(stamp, "windows")
+    if not isinstance(raw, (list, tuple)) or not raw:
         return None, "no_windows"
     windows: list[Window] = []
     for w in raw:
-        if not isinstance(w, Mapping):
-            return None, "window_not_a_mapping"
-        clip, source = _index(w.get("clip"), len(clips)), _index(w.get("source_clip"), len(clips))
-        start, end = w.get("start_ms"), w.get("end_ms")
+        clip = _index(_field(w, "clip"), len(clips))
+        source = _index(_field(w, "source_clip"), len(clips))
+        start, end = _field(w, "start_ms"), _field(w, "end_ms")
         if clip is None or source is None or not (_is_number(start) and _is_number(end) and end > start):
             return None, "malformed_window"
-        painted: dict[str, Any] = {k: w.get(k) for k in ("modality", "render_mode",
-                                                         "motion_render", "asset_kind")}
+        painted: dict[str, Any] = {k: _field(w, k) for k in ("modality", "render_mode",
+                                                             "motion_render", "asset_kind")}
         painted.update(clip=clip, source_clip=source)
         known = clip != UNTRACED_INDEX and source != UNTRACED_INDEX
         if known:
@@ -457,34 +477,37 @@ def _from_stamp(stamp: Any, clips: list[Any],
                         "card_spec", "diagram_spec"):
                 painted[key] = src.get(key)
         windows.append(Window(clip, float(start), float(end), painted, known))
+    video_end = max(w.end_ms for w in windows)
+    if master_ms and abs(video_end - float(master_ms)) > STAMP_MASTER_TOLERANCE_MS:
+        return None, f"windows end {round(video_end)} != probed video {round(master_ms)}"
     windows.sort(key=lambda w: (w.start_ms, w.end_ms))
     spans = tuple((w.start_ms - CUT_EARLY_MS, w.end_ms + CUT_LATE_MS, w.fields if w.known else None)
                   for w in windows)
-    return DeliveredTimeline(STAMP, STAMP, tuple(windows), _first_ms=windows[0].start_ms,
+    return DeliveredTimeline(SOURCE_STAMP, STAMP, tuple(windows), _first_ms=windows[0].start_ms,
                              _spans=spans, _span_starts=tuple(s[0] for s in spans)), None
 
 
-# ── the fallback ───────────────────────────────────────────────────────────────────────────────
+# ── the estimate ──────────────────────────────────────────────────────────────────────────────
 
-def _fallback(clips: list[Any], *, real_offsets: bool,
+def _estimate(clips: list[Any], *, real_offsets: bool,
               master_ms: float | None) -> DeliveredTimeline:
     rows = [(i, c) for i, c in enumerate(clips) if isinstance(c, Mapping)]
     claims = _claimed_windows(rows, master_ms)
     if not rows:
-        return DeliveredTimeline("fallback", ABSENT, claims)
+        return DeliveredTimeline(SOURCE_ESTIMATED, ABSENT, claims)
     if not any(_painted(c) for _, c in rows):
-        return DeliveredTimeline("fallback", NO_RENDERABLE, claims)
+        return DeliveredTimeline(SOURCE_ESTIMATED, NO_RENDERABLE, claims)
     if not real_offsets:
-        return DeliveredTimeline("fallback", LEGACY, claims)
+        return DeliveredTimeline(SOURCE_ESTIMATED, LEGACY, claims)
     ordered = sorted(rows, key=lambda r: _renderer_sort_key(r[1]))
     starts = [c.get("start_ms") for _, c in ordered]
     if any(isinstance(s, bool) for s in starts):
-        return DeliveredTimeline("fallback", UNTRUSTED_BOOL_START, claims)
+        return DeliveredTimeline(SOURCE_ESTIMATED, UNTRUSTED_BOOL_START, claims)
     anchored = [float(s) for s in starts if _is_number(s)]
     if not anchored:
-        return DeliveredTimeline("fallback", UNTRUSTED_UNANCHORED, claims)
+        return DeliveredTimeline(SOURCE_ESTIMATED, UNTRUSTED_UNANCHORED, claims)
     if any(a > b for a, b in zip(anchored, anchored[1:], strict=False)):
-        return DeliveredTimeline("fallback", UNTRUSTED_DECREASING, claims)
+        return DeliveredTimeline(SOURCE_ESTIMATED, UNTRUSTED_DECREASING, claims)
     diagnosis = TRUSTED if len(anchored) == len(starts) else MIXED_ANCHORED
     # Mixed anchoring: an unanchored clip sits zero-width at the NEXT anchored start (inf: at
     # the end of the master), exactly as `resolve_bounds` lays it before the floor funds it.
@@ -496,7 +519,7 @@ def _fallback(clips: list[Any], *, real_offsets: bool,
         effective.append(float(s) if _is_number(s) else upcoming)
     effective.reverse()
     spans, span_starts = _may_spans(ordered, effective, master_ms)
-    return DeliveredTimeline("fallback", diagnosis, claims, _first_ms=anchored[0], _spans=spans,
+    return DeliveredTimeline(SOURCE_ESTIMATED, diagnosis, claims, _first_ms=anchored[0], _spans=spans,
                              _span_starts=span_starts)
 
 
