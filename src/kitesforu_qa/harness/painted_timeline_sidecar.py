@@ -8,11 +8,24 @@ carries the timeline.
 THE SCHEMA HAS ONE PARSER, AND IT IS THE PRODUCER'S: ``parse_v1`` in kitesforu-workers
 ``src/workers/stages/visuals/painted_timeline.py`` (#3257 ``bfa00e734``). It takes the sidecar's
 bytes as they arrive, so qa does not even decode the JSON. It returns pydantic models that ignore
-unknown fields, and raises ``ValueError`` on anything that is not v1. It is imported lazily from
-``WORKERS_SRC``, which defaults to the sibling ``kitesforu-workers/src`` checkout, the way
-``scripts/fleet_baseline.py`` and ``scripts/measure_delivered_clips.py`` import workers code. If that
-import fails, the sidecar is not fetched at all, and the reader falls back to its own estimate,
-labelled as one (``DeliveredTimeline.source == "estimated"``).
+unknown fields, and raises ``ValueError`` on anything that is not v1.
+
+It is loaded BY FILE PATH from ``WORKERS_SRC`` (default: the sibling ``kitesforu-workers/src``
+checkout), with ``importlib.util.spec_from_file_location`` as qa loads its own scripts. It is never
+imported as ``workers.stages.visuals.painted_timeline``: that runs ``workers/__init__.py``, which
+imports ``workers.base.BaseWorker`` and ``kitesforu_schemas`` and re-classes every logger in the
+process (measured on bfa00e734: ~1.0 s and 806 modules in a fresh process). The module itself needs
+only ``json``, ``logging``, ``typing`` and pydantic, and has no relative import. If it cannot be
+loaded, the sidecar is not fetched at all, and the reader falls back to its own estimate, labelled as
+one (``DeliveredTimeline.source == "estimated"``).
+
+THE MASTER IT DESCRIBES. The sidecar and its master sit at fixed paths, both overwritten in place,
+master first, so a pass that dies between the two leaves an older sidecar beside a newer master, and
+a re-assembly over the same audio keeps the same length. The producer therefore records the uploaded
+master blob's ``master_generation`` and ``master_size`` (two optional v1 fields). :class:`FetchedMaster`
+is the same pair for the master the reader actually fetched: the ``x-goog-generation`` header of that
+GET and the size of the bytes on disk. When both pairs are complete and differ, the stamp describes
+another master (``DeliveredTimeline`` rejects it as ``stale_master``).
 
 Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
@@ -31,6 +44,8 @@ Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -94,16 +109,68 @@ def workers_src() -> str:
     return os.environ.get("WORKERS_SRC") or str(_QA_ROOT.parent / "kitesforu-workers" / "src")
 
 
+def painted_timeline_path() -> Path:
+    return Path(workers_src()) / "workers" / "stages" / "visuals" / "painted_timeline.py"
+
+
+#: One loaded module per file, so each process runs it once. A failure is not cached: a fixed tree is
+#: picked up on the next call.
+_PARSE_V1: dict[str, Callable[[Any], Any]] = {}
+
+
 def load_parse_v1() -> tuple[Callable[[Any], Any] | None, str | None]:
-    """workers' ``parse_v1``, or ``(None, why)`` when this checkout of workers does not have it."""
-    src = workers_src()
-    if src not in sys.path:
-        sys.path.insert(0, src)
+    """workers' ``parse_v1``, loaded from its file, or ``(None, why)`` when this checkout of workers
+    does not have it. The module is registered in ``sys.modules`` under a private name before it runs
+    (pydantic resolves the models' annotations through it), never as a ``workers`` package module."""
+    path = painted_timeline_path()
+    key = str(path.resolve())
+    if key in _PARSE_V1:
+        return _PARSE_V1[key], None
+    if not path.is_file():
+        return None, f"FileNotFoundError: {path}"
+    name = "_kitesforu_qa_workers_painted_timeline_" + hashlib.sha1(key.encode()).hexdigest()[:12]
     try:
-        from workers.stages.visuals.painted_timeline import parse_v1
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        sys.modules[name] = module
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        parse_v1 = module.parse_v1
     except Exception as exc:  # any failure means there is no parser here, and the caller says so
+        sys.modules.pop(name, None)
         return None, f"{type(exc).__name__}: {exc}"
+    _PARSE_V1[key] = parse_v1
     return parse_v1, None
+
+
+@dataclass(frozen=True)
+class FetchedMaster:
+    """The master the reader actually fetched: the ``x-goog-generation`` header of that GET and the
+    size of the bytes on disk. Either is None when it is not known."""
+
+    generation: int | None
+    size: int | None
+
+    @property
+    def complete(self) -> bool:
+        return self.generation is not None and self.size is not None
+
+
+def fetched_master(headers: str, local_path: str) -> FetchedMaster:
+    """The fetched master from the raw response headers of its GET (``curl -D``) and the local file.
+    The LAST ``x-goog-generation`` wins: with ``-L`` every redirect hop writes its own block."""
+    generation = None
+    for line in headers.splitlines():
+        name, sep, value = line.partition(":")
+        if sep and name.strip().lower() == "x-goog-generation":
+            try:
+                generation = int(value.strip())
+            except ValueError:
+                generation = None
+    try:
+        size: int | None = os.path.getsize(local_path)
+    except OSError:
+        size = None
+    return FetchedMaster(generation, size)
 
 
 def _https_get(url: str) -> bytes:

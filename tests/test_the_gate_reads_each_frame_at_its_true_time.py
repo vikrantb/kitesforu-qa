@@ -378,3 +378,66 @@ def test_run_gate_reports_coverage_and_a_note_when_nothing_was_checked(frames, t
     # A job whose edge rule did run carries no note.
     _, cov = gate._pixel_invariants([frames["clipped"]] * 6, _uniform("diagram"))
     assert gate._edge_clip_note(cov) is None
+
+
+def _gate_with_a_stamped_job(monkeypatch, tmp_path, frames, *, stamped_generation, fetched_generation,
+                             fetch_burned=False):
+    """`run_gate` on the witness, its sidecar stubbed with the producer's witness stamp naming master
+    `stamped_generation`, its download stubbed to answer with `fetched_generation`."""
+    from kitesforu_qa.harness import delivered_timeline as dt
+    from kitesforu_qa.harness.painted_timeline_sidecar import read_sidecar
+
+    body = b"\x00" * 4096
+    st = json.loads((pathlib.Path(__file__).parent / "fixtures"
+                     / "painted_timeline_v1_witness.json").read_bytes())
+    st.update(master_generation=stamped_generation, master_size=len(body))
+    monkeypatch.setattr(dt, "read_sidecar", lambda doc: read_sidecar(
+        doc, fetch=lambda url: json.dumps(st).encode(), parse=json.loads))
+    gate = _load_gate()
+    urls = {"video_burned_url": "https://storage.googleapis.com/b/visuals/w/episode_video_captioned.mp4"}
+    if not fetch_burned:
+        urls["video_url"] = "https://storage.googleapis.com/b/visuals/w/episode_video.mp4"
+    doc = {"topic": "a storm", "master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": _witness_clips(), "painted_timeline_uri": "https://x.invalid/pt.json",
+                      **urls}}
+    monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
+    monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
+    calls = []
+
+    def fake_get(cmd, **_kw):
+        calls.append(cmd)
+        pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(body)
+        pathlib.Path(cmd[cmd.index("-D") + 1]).write_text(
+            f"HTTP/1.1 200 OK\r\nx-goog-generation: {fetched_generation}\r\n\r\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_get)
+    monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out: [frames["photo"]] * 28)
+    return gate.run_gate("f7df77bf-witness"), calls
+
+
+def test_run_gate_holds_the_stamp_to_the_master_it_fetched(frames, tmp_path, monkeypatch):
+    """The GET's own `x-goog-generation` and the bytes on disk are the master the stamp must name."""
+    res, calls = _gate_with_a_stamped_job(monkeypatch, tmp_path, frames,
+                                          stamped_generation=1759660800123456,
+                                          fetched_generation=1759660800123456)
+    assert calls[0][:2] == ["curl", "-sL"] and "-D" in calls[0]
+    cov = res["edge_clip_coverage"]
+    assert (cov["source"], cov.get("stamp_rejected")) == ("stamp", None), cov
+    # The master was re-assembled after the stamp was written: same length, another object.
+    res, _ = _gate_with_a_stamped_job(monkeypatch, tmp_path, frames,
+                                      stamped_generation=1759660800123456,
+                                      fetched_generation=1759661999000001)
+    cov = res["edge_clip_coverage"]
+    assert (cov["source"], cov["stamp_rejected"]) == ("estimated", "stale_master"), cov
+    assert sorted(p.suffix for p in tmp_path.iterdir() if p.suffix == ".headers") == []
+
+
+def test_the_captioned_copy_is_not_held_to_the_masters_generation(frames, tmp_path, monkeypatch):
+    """With no `video_url` the gate fetches the captioned copy, a different object from the master
+    the stamp names, so its generation proves nothing: the length check decides."""
+    res, _ = _gate_with_a_stamped_job(monkeypatch, tmp_path, frames,
+                                      stamped_generation=1759660800123456,
+                                      fetched_generation=1759661999000001, fetch_burned=True)
+    cov = res["edge_clip_coverage"]
+    assert (cov["source"], cov.get("stamp_rejected")) == ("stamp", None), cov

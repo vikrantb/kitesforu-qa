@@ -164,3 +164,87 @@ def test_an_http_error_is_a_failed_fetch(monkeypatch):
         10, requests.HTTPError("404 Client Error")))
     read = sc.read_sidecar(DOC, fetch=None, parse=_parse)
     assert read.status == "fetch_failed" and "HTTPError: 404" in (read.why_unread or ""), read
+
+
+# ── workers' parse_v1, loaded from its FILE, never through the workers package ─────────────────
+
+_RAISING_INIT = 'raise RuntimeError("a workers package __init__ ran")\n'
+
+
+def _tree(root, module_source, *, raising_inits=True):
+    """A workers ``src`` tree holding only ``painted_timeline.py``. Every package ``__init__`` raises,
+    so loading the module through the package would fail."""
+    visuals = root / "workers" / "stages" / "visuals"
+    visuals.mkdir(parents=True)
+    if raising_inits:
+        for pkg in (root / "workers", root / "workers" / "stages", visuals):
+            (pkg / "__init__.py").write_text(_RAISING_INIT)
+    (visuals / "painted_timeline.py").write_text(module_source)
+    return root
+
+
+def test_parse_v1_is_loaded_from_its_file_and_no_package_init_runs(tmp_path, monkeypatch):
+    """The real ``workers/__init__.py`` imports ``BaseWorker`` and ``kitesforu_schemas`` and re-classes
+    every logger in the process (~1.0 s, 806 modules, measured on #3257 ``bfa00e734``). The parser
+    needs none of it."""
+    src = _tree(tmp_path / "src", "def parse_v1(data):\n    return ('parsed', data)\n")
+    monkeypatch.setenv("WORKERS_SRC", str(src))
+    parse_v1, why = sc.load_parse_v1()
+    assert why is None and parse_v1 is not None, why
+    assert parse_v1(b"{}") == ("parsed", b"{}")
+    assert parse_v1.__module__.startswith("_kitesforu_qa_workers_painted_timeline_")
+
+
+def test_the_module_runs_once_per_process(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    src = _tree(tmp_path / "src", f"open({str(runs)!r}, 'a').write('x')\n"
+                                  "def parse_v1(data):\n    return data\n")
+    monkeypatch.setenv("WORKERS_SRC", str(src))
+    first, _ = sc.load_parse_v1()
+    second, _ = sc.load_parse_v1()
+    assert first is second and runs.read_text() == "x"
+
+
+def test_a_tree_without_the_module_has_no_parser(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKERS_SRC", str(tmp_path))
+    parse_v1, why = sc.load_parse_v1()
+    assert parse_v1 is None and why.startswith("FileNotFoundError"), why
+
+
+def test_a_module_that_fails_to_load_is_not_cached(tmp_path, monkeypatch):
+    src = _tree(tmp_path / "src", "raise ImportError('half-written checkout')\n")
+    monkeypatch.setenv("WORKERS_SRC", str(src))
+    parse_v1, why = sc.load_parse_v1()
+    assert parse_v1 is None and why == "ImportError: half-written checkout", why
+    (src / "workers" / "stages" / "visuals" / "painted_timeline.py").write_text(
+        "def parse_v1(data):\n    return data\n")
+    assert sc.load_parse_v1()[0] is not None
+
+
+# ── the master the reader fetched ──────────────────────────────────────────────────────────────
+
+def test_the_fetched_master_is_the_gets_generation_and_the_bytes_on_disk(tmp_path):
+    body = tmp_path / "v.mp4"
+    body.write_bytes(b"\x00" * 2048)
+    headers = ("HTTP/1.1 302 Found\r\nLocation: https://storage.googleapis.com/b/v.mp4\r\n"
+               "x-goog-generation: 111\r\n\r\n"
+               "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nX-Goog-Generation: 1759660800123456\r\n\r\n")
+    got = sc.fetched_master(headers, str(body))
+    assert got == sc.FetchedMaster(1759660800123456, 2048) and got.complete
+
+
+@pytest.mark.parametrize("headers, generation", [
+    ("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\r\n", None),
+    ("HTTP/1.1 200 OK\r\nx-goog-generation: not-a-number\r\n\r\n", None),
+    ("", None),
+])
+def test_a_get_without_a_usable_generation_is_incomplete(headers, generation, tmp_path):
+    body = tmp_path / "v.mp4"
+    body.write_bytes(b"\x00" * 10)
+    got = sc.fetched_master(headers, str(body))
+    assert got == sc.FetchedMaster(generation, 10) and not got.complete
+
+
+def test_a_missing_file_has_no_size(tmp_path):
+    got = sc.fetched_master("x-goog-generation: 5\r\n", str(tmp_path / "absent.mp4"))
+    assert got == sc.FetchedMaster(5, None) and not got.complete

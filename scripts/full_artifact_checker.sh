@@ -57,7 +57,10 @@ PY
 
 URL=$(cat $W/url 2>/dev/null)
 [ -z "$URL" ] && { echo "[7-10] SKIPPED — no video"; exit 1; }
-curl -s -o $W/v.mp4 "$URL"
+# The GET's headers name the master object fetched (x-goog-generation), for 9b. Truncated first, so a
+# failed GET can never leave an earlier run's headers vouching for this file.
+: > $W/v.headers
+curl -s -D $W/v.headers -o $W/v.mp4 "$URL"
 curl -s -o /dev/null -w "[7 playable]  HTTP HEAD %{http_code} :: PASS-if-200\n" -I "$URL"
 
 # 8. STREAMS — per-stream, never container (the trap that hid a 9s mismatch)
@@ -108,7 +111,9 @@ import acceptance_gate as ag
 from google.cloud import firestore
 doc = firestore.Client(project="kitesforu-dev").collection("podcast_jobs").document(J).get().to_dict() or {}
 _, _, dur = ag._probe_dims(f"{W}/v.mp4")
-_, issues, cov = ag.probe_master(doc, f"{W}/v.mp4", f"{W}/gate_frames", dur * 1000 if dur else None)
+master = ag.fetched_master(open(f"{W}/v.headers", encoding="latin-1").read(), f"{W}/v.mp4")
+_, issues, cov = ag.probe_master(doc, f"{W}/v.mp4", f"{W}/gate_frames", dur * 1000 if dur else None,
+                                 master=master)
 edge = [i["msg"] for i in issues if "EDGE-CLIP" in i["msg"]]
 print(f"[9b edge]     gate probe C: checked={cov['checked']}/{cov['sampled']} "
       f"exempt_full_bleed={cov['exempt_full_bleed']} flagged={cov['flagged']} "

@@ -27,6 +27,10 @@ from typing import Any
 # answer for this checkout's attribution model.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline  # noqa: E402
+from kitesforu_qa.harness.painted_timeline_sidecar import (  # noqa: E402
+    FetchedMaster,
+    fetched_master,
+)
 
 _EDU_KEYS = ("explain", "educat", "understand", "how ", "what is", "concept",
             "informational", "tutorial", "guide", "why do", "why does")
@@ -300,17 +304,19 @@ def _cut_at_edge(im: Any) -> bool:
             or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12)
 
 
-def probe_master(doc: dict[str, Any], mp4: str, frames_dir: str,
-                 master_ms: float | None = None) -> tuple[list[str], list[dict], dict[str, Any]]:
+def probe_master(doc: dict[str, Any], mp4: str, frames_dir: str, master_ms: float | None = None,
+                 master: FetchedMaster | None = None) -> tuple[list[str], list[dict], dict[str, Any]]:
     """OBSERVE + PROBE B/C on one master, exactly as ``run_gate`` does: extract, attribute every
     frame against the job's delivered timeline, score. ``full_artifact_checker.sh`` calls this
     too, so the step-by-step checker and the gate cannot disagree about an edge clip.
 
     The timeline is the producer's sidecar when it reads and describes this video, else qa's
     estimate; ``coverage["source"]`` says which. ``master_ms`` is the VIDEO stream's duration
-    (``_probe_dims``), the length the sidecar's windows describe."""
+    (``_probe_dims``), the length the sidecar's windows describe. ``master`` is the master object
+    fetched (its ``x-goog-generation`` and size); a stamp written for another one is ``stale_master``.
+    """
     frames = _extract_frames(mp4, frames_dir)
-    timeline = DeliveredTimeline.from_job(doc, master_ms=master_ms)
+    timeline = DeliveredTimeline.from_job(doc, master_ms=master_ms, master=master)
     issues, coverage = _pixel_invariants(frames, timeline=timeline)
     return frames, issues, coverage
 
@@ -338,8 +344,16 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
 
     tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4")
+    # The GET's own headers name the object fetched (x-goog-generation), so the producer's stamp is
+    # held to THIS master. A fresh file per run: a header file left by an earlier run must never
+    # vouch for a download that failed.
+    hdr_fd, hdr = tempfile.mkstemp(prefix=f"ag_{job_id}_", suffix=".headers")
+    os.close(hdr_fd)
     subprocess.run(["gsutil", "-q", "cp", url, tmp] if url.startswith("gs://")
-                   else ["curl", "-sL", "-o", tmp, url], check=False)
+                   else ["curl", "-sL", "-D", hdr, "-o", tmp, url], check=False)
+    with open(hdr, encoding="latin-1") as fh:
+        headers = fh.read()
+    os.remove(hdr)
     if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]}
@@ -364,7 +378,10 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
 
     # OBSERVE: emit frames for the independent vision/adversary step, then invariants B + C.
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
-    frames, pixel_issues, edge_coverage = probe_master(d, tmp, fdir, dur * 1000 if dur else None)
+    # Only the master itself (video_url) is the object the stamp names; the captioned copy is not.
+    fetched = fetched_master(headers, tmp) if url == vis.get("video_url") else None
+    frames, pixel_issues, edge_coverage = probe_master(d, tmp, fdir, dur * 1000 if dur else None,
+                                                       master=fetched)
     issues.extend(pixel_issues)
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \

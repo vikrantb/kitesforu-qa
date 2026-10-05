@@ -70,7 +70,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .painted_timeline_sidecar import SidecarRead, read_sidecar
+from .painted_timeline_sidecar import FetchedMaster, SidecarRead, read_sidecar
 
 #: The one stamp version this reader understands.
 STAMP_VERSION = 1
@@ -86,6 +86,13 @@ SOURCE_ESTIMATED = "estimated"
 #: short of its master: the producer then refuses the close with ``video_short_of_master``, and the
 #: stamp still describes every frame that video has.
 STAMP_MASTER_TOLERANCE_MS = 1000
+
+#: The stamp names a different master object than the one fetched: its ``master_generation`` /
+#: ``master_size`` (the uploaded blob's) differ from the fetched master's ``x-goog-generation`` header
+#: or its size on disk. A re-assembly over the same audio keeps the same length, which the length
+#: check above cannot see; this can. A stamp without the two fields (written before #3257 added them)
+#: is held to the length check alone.
+STALE_MASTER = "stale_master"
 
 #: The cut band (see the module docstring for its population). For a stamp the band also covers
 #: the overlap of a dissolve: ``video_assembler._TRANSITION_S["dissolve"]`` is 0.5 s, and it blends
@@ -341,14 +348,16 @@ class DeliveredTimeline:
 
     @classmethod
     def from_job(cls, doc: Mapping[str, Any] | None, master_ms: float | None = None, *,
-                 sidecar: SidecarRead | None = None) -> DeliveredTimeline:
+                 sidecar: SidecarRead | None = None,
+                 master: FetchedMaster | None = None) -> DeliveredTimeline:
         """From a ``podcast_jobs`` doc: the producer's sidecar if it reads and describes this video,
         else the conservative estimate.
 
         ``master_ms`` is the probed duration of the master's VIDEO stream. It is used to reject a
         stamp written for a different render, and to end the last best-estimate window. ``sidecar``
         is the doc's sidecar, already read; by default it is read here (a few KB over HTTPS, and
-        nothing at all when the doc names none).
+        nothing at all when the doc names none). ``master`` is the master object actually fetched
+        (``painted_timeline_sidecar.fetched_master``); a stamp that names another one is stale.
         """
         doc = doc or {}
         visual = doc.get("visual") or {}
@@ -356,13 +365,14 @@ class DeliveredTimeline:
             sidecar = read_sidecar(doc)
         timeline = cls.from_clips(visual.get("clips") or [],
                                   real_offsets=bool(doc.get("master_segment_timeline")),
-                                  stamp=sidecar.parsed, master_ms=master_ms)
+                                  stamp=sidecar.parsed, master_ms=master_ms, master=master)
         return replace(timeline, stamp_rejected=sidecar.why_unread or timeline.stamp_rejected,
                        sidecar_bytes=sidecar.bytes_read)
 
     @classmethod
     def from_clips(cls, clips: Sequence[Any] | None, *, real_offsets: bool = True,
-                   stamp: Any = None, master_ms: float | None = None) -> DeliveredTimeline:
+                   stamp: Any = None, master_ms: float | None = None,
+                   master: FetchedMaster | None = None) -> DeliveredTimeline:
         """From bare clips. ``real_offsets`` defaults to True, which holds on 461/461 delivered
         masters in the census. A caller holding the job doc should use :meth:`from_job`, which
         reads the real flag, detects a legacy timeline and reads the sidecar. ``stamp`` is the
@@ -371,7 +381,7 @@ class DeliveredTimeline:
         burned = burned_text_stills(clips)
         rejected = None
         if stamp is not None:
-            built, rejected = _from_stamp(stamp, clips, master_ms)
+            built, rejected = _from_stamp(stamp, clips, master_ms, master)
             if built is not None:
                 return replace(built, burned=burned)
         timeline = _estimate(clips, real_offsets=real_offsets, master_ms=master_ms)
@@ -445,8 +455,12 @@ def _field(obj: Any, key: str) -> Any:
     return obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
 
 
-def _from_stamp(stamp: Any, clips: list[Any],
-                master_ms: float | None) -> tuple[DeliveredTimeline | None, str | None]:
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _from_stamp(stamp: Any, clips: list[Any], master_ms: float | None,
+                master: FetchedMaster | None = None) -> tuple[DeliveredTimeline | None, str | None]:
     """The stamped timeline, or ``(None, why)`` when the stamp cannot be trusted.
 
     A window the producer could not trace (``clip`` or ``source_clip`` is -1) is still a painted span,
@@ -456,6 +470,10 @@ def _from_stamp(stamp: Any, clips: list[Any],
     version = _field(stamp, "version")
     if version != STAMP_VERSION:
         return None, f"version={version!r}"
+    stamped_master = (_field(stamp, "master_generation"), _field(stamp, "master_size"))
+    if master is not None and master.complete and all(_is_int(v) for v in stamped_master):
+        if stamped_master != (master.generation, master.size):
+            return None, STALE_MASTER
     raw = _field(stamp, "windows")
     if not isinstance(raw, (list, tuple)) or not raw:
         return None, "no_windows"

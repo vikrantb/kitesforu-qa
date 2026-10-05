@@ -24,7 +24,7 @@ from kitesforu_qa.harness import delivered_timeline as dt
 from kitesforu_qa.harness import painted_timeline_sidecar as sidecar_mod
 from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, bleeds_by_design
 from kitesforu_qa.harness.narration_alignment import delivered_spans
-from kitesforu_qa.harness.painted_timeline_sidecar import SidecarRead, read_sidecar
+from kitesforu_qa.harness.painted_timeline_sidecar import FetchedMaster, SidecarRead, read_sidecar
 
 VEO = {"render_mode": "video", "motion_render": "veo"}
 
@@ -112,6 +112,53 @@ def test_a_video_short_of_its_master_keeps_its_stamp():
     assert tl.full_bleed_at(4499) is True and tl.full_bleed_at(13499) is False
 
 
+# ── the master the stamp names ─────────────────────────────────────────────────────────────────
+
+def named(generation=111, size=2048, *, windows=None, **fields):
+    """A stamp naming its master: the uploaded blob's generation and size (#3257's optional v1 fields)."""
+    st = stamp(windows or [window(0, 0, 9000, "scene_image"), window(1, 9000, 20000, "diagram")])
+    st.update(master_generation=generation, master_size=size, **fields)
+    return st
+
+
+TWO_CLIPS = [clip(0, "scene_image", 0), clip(9000, "diagram", 1)]
+
+
+def test_a_stamp_that_names_the_fetched_master_is_read():
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(), master_ms=20000,
+                                      master=FetchedMaster(111, 2048))
+    assert (tl.source, tl.stamp_rejected) == ("stamp", None)
+
+
+@pytest.mark.parametrize("fetched", [FetchedMaster(112, 2048), FetchedMaster(111, 2049)])
+def test_a_stamp_that_names_another_master_is_stale(fetched):
+    """A pass that uploads a new master and dies before its sidecar leaves the old sidecar at the same
+    URL. Over the same audio the new master has the same length, so only the object can tell."""
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(), master_ms=20000, master=fetched)
+    assert (tl.source, tl.stamp_rejected) == ("estimated", "stale_master")
+    assert tl.full_bleed_at(4499) is True and tl.full_bleed_at(10499) is False   # the estimate
+
+
+@pytest.mark.parametrize("st, fetched", [
+    (stamp([window(0, 0, 9000, "scene_image"), window(1, 9000, 20000, "diagram")]),
+     FetchedMaster(999, 1)),                                   # a sidecar written before the fields
+    (named(), None),                                           # nothing fetched to compare with
+    (named(), FetchedMaster(None, 2048)),                      # a GET without x-goog-generation
+    (named(size=None), FetchedMaster(999, 1)),                 # only one of the two fields
+])
+def test_without_both_pairs_the_length_check_decides(st, fetched):
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=20000, master=fetched)
+    assert (tl.source, tl.stamp_rejected) == ("stamp", None)
+    stale = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=30000, master=fetched)
+    assert stale.stamp_rejected == "windows end 20000 != probed video 30000"
+
+
+def test_the_named_master_does_not_excuse_the_length_check():
+    """The object matches, but the windows end 10 s short of the probed video: the stamp is wrong
+    about this video either way."""
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(), master_ms=30000,
+                                      master=FetchedMaster(111, 2048))
+    assert tl.stamp_rejected == "windows end 20000 != probed video 30000"
 def test_a_gap_in_the_stamp_and_the_intro_before_it_are_unknown():
     clips = [clip(0, "scene_image"), clip(1, "scene_image")]
     tl = DeliveredTimeline.from_clips(clips, stamp=stamp([
@@ -835,3 +882,30 @@ def test_the_vendored_stamps_have_the_goldens_shape():
         assert {k for k in vendored if not k.startswith("_")} == set(golden), name
         assert {k for w in vendored["windows"] for k in w} == {k for w in golden["windows"] for k in w}
         assert set(vendored["close"]) == set(golden["close"]), name
+
+
+def test_the_golden_names_the_master_it_was_written_for():
+    """#3257 adds ``master_generation`` and ``master_size`` to the sidecar. Read through the real
+    ``parse_v1``, the golden is accepted against the master it names and refused, as ``stale_master``,
+    against any other."""
+    golden = _golden_sidecar()
+    raw = json.loads(golden.read_bytes())
+    if raw.get("master_generation") is None or raw.get("master_size") is None:
+        pytest.skip(f"the golden at {golden} names no master yet (no master_generation and "
+                    f"master_size): #3257 has not added them at this WORKERS_SRC. SKIPPED, not passed.")
+    read = read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: golden.read_bytes())
+    n = 1 + max(max(w["clip"], w["source_clip"]) for w in raw["windows"])
+    clips = [clip(0, None) for _ in range(n)]
+    for w in raw["windows"]:
+        if w["source_clip"] >= 0:
+            clips[w["source_clip"]] = clip(w["start_ms"], w["modality"],
+                                           render_mode=w["render_mode"],
+                                           motion_render=w["motion_render"])
+    doc = {"master_segment_timeline": [{"index": 0}], "visual": {"clips": clips}}
+    end = max(w["end_ms"] for w in raw["windows"])
+    gen, size = int(raw["master_generation"]), int(raw["master_size"])
+    same = DeliveredTimeline.from_job(doc, master_ms=end, sidecar=read, master=FetchedMaster(gen, size))
+    other = DeliveredTimeline.from_job(doc, master_ms=end, sidecar=read,
+                                       master=FetchedMaster(gen + 1, size))
+    assert (same.source, same.stamp_rejected) == ("stamp", None)
+    assert (other.source, other.stamp_rejected) == ("estimated", "stale_master")
