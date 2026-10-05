@@ -16,7 +16,9 @@ Exit 0 = deterministic PASS (still run the vision/adversary step); non-zero = de
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
+import math
 import os
 import subprocess
 import sys
@@ -48,38 +50,135 @@ def _probe_dims(path: str) -> tuple[int, int, float]:
     return w, h, dur
 
 
+#: One extracted frame per interval. The frame->time mapping (`_frame_time_ms`) depends on this
+#: AND on the fps filter's rounding mode, so the filter is BUILT from it rather than typed beside
+#: it: `fps=1000/3000` is ffmpeg's rational 1/3, and `round=near` is its default spelled out, so a
+#: changed default cannot silently move every frame. Byte-identical to the old `fps=1/3` filter:
+#: all 28 PNGs of the witness master f7df77bf compare equal with `cmp`.
+_FRAME_INTERVAL_MS = 3000
+_FPS_FILTER = f"fps=1000/{_FRAME_INTERVAL_MS}:round=near"
+
+
 def _extract_frames(mp4: str, out_dir: str) -> list[str]:
     """OBSERVE: one frame every ~3s across the FULL duration (never one hero frame)."""
     os.makedirs(out_dir, exist_ok=True)
-    subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", "fps=1/3,scale=540:-1",
+    subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", f"{_FPS_FILTER},scale=540:-1",
                     os.path.join(out_dir, "f_%03d.png")],
                    capture_output=True)
     return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".png"))
 
 
-#: `_extract_frames` runs ffmpeg at `fps=1/3`, so output frame i (0-based) is the video at
-#: i*3 seconds. Named rather than inlined because the frame->clip mapping below is only as
-#: correct as this constant, and the two must be changed together.
-_FRAME_INTERVAL_MS = 3000
+def _frame_time_ms(index: int) -> int:
+    """The instant of the master that extracted frame ``index`` (0-based) actually shows.
 
+    NOT ``index * interval``, which is what this gate assumed until 2026-10-05. ffmpeg's ``fps``
+    filter rounds every source timestamp to the NEAREST output slot and emits, for each slot, the
+    last source frame rounded into it — so output frame k holds the last source frame BEFORE
+    ``(k + 1/2) * interval``: the MIDDLE of its 3 s slot, not the start.
 
-def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
-    """The authored modality of the clip covering ``ts_ms``, or None when unknown.
+    MEASURED on the witness master f7df77bf (30 fps): every one of its 28 extracted frames is
+    pixel-identical (mean |diff| 0.000) to source frame ``90k + 44`` = ``3k + 1.4667 s``, against
+    1.6-60.1 for the frame at ``3k``. Under the old mapping f_003 (7.47 s, a scene_image) was read
+    as 6.0 s (a video_hero) — every frame was scored as the clip on screen ~1.5 s earlier.
 
-    None is returned for BOTH "no clips supplied" and "no clip covers this timestamp", and both
-    mean the same thing to the caller: keep checking. Absence must never be read as permission
-    to skip a check — that is how a gate silently turns itself off.
+    The value is 1 ms before the slot's midpoint: the instant at which the screen shows exactly
+    that source frame, at any frame rate below 1000 fps (the midpoint itself already shows the
+    NEXT frame whenever a frame boundary falls on it — at 24, 25 and 30 fps it does).
     """
-    for c in clips or []:
-        try:
-            start = int(c.get("start_ms") or 0)
-            dur = int(c.get("duration_ms") or 0)
-        except (TypeError, ValueError):
-            continue
-        if dur > 0 and start <= ts_ms < start + dur:
-            m = c.get("modality")
-            return m if isinstance(m, str) and m else None
-    return None
+    return index * _FRAME_INTERVAL_MS + _FRAME_INTERVAL_MS // 2 - 1
+
+
+#: The modalities whose pixels bleed to every edge BY DESIGN, so the diagram edge rule must not run
+#: on them: a generated photo (`scene_image`) and a generated video (`video_hero` — a Veo clip, or
+#: the scene still that stands in for one). The renderer treats them the same way:
+#: `video_assembler._use_contain_fit` crop-fills "a pictorial photo/scene image/hero video ... a
+#: photo bleed is desired, not a bug".
+#:
+#: `video_hero` is keyed on MODALITY ALONE on purpose. Of the 49 video_hero clips in the 600 newest
+#: job docs (2026-10-05), every one points at a `veo_N/` MP4, yet 21 carry a `diagram_debug.kind`
+#: left over from the beat's original figure (key_term_highlight, flowchart, concept_mermaid, ...)
+#: and 16 carry `ai_generated=False`; four of those assets, opened, are Veo footage filling the
+#: frame, not a card.
+#:
+#: Deliberately NOT here: `motion` (GSAP / Living Stage figures — rendered text), `physics`,
+#: `diagram`/`chart`, and the `relimage` picture filed under `diagram` (it carries a title,
+#: caption and disclosure label that the assembler MOVES, and that label has been delivered
+#: clipped — `relimage_render.py`, a43bddcf, 2026-09-19).
+_FULL_BLEED_MODALITIES = frozenset({"scene_image", "video_hero"})
+
+#: How far a cut in the master can land from the ``start_ms`` it claims. MEASURED with a
+#: frame-difference cut finder (largest |diff| between consecutive full-rate frames near each
+#: claimed start): the 7 visible cuts of the witness f7df77bf (85 s) landed 145-199 ms EARLY, and
+#: 10 cuts spread over 820a8a23 (13.6 min) landed 133-367 ms EARLY; none landed late. The J-cut
+#: leads every internal cut by 120 ms (`video_assembler._JCUT_LEAD_MS`) and segment rounding adds
+#: the rest. A frame within this band of a cut may show either side of it.
+_CUT_EARLY_MS = 500
+_CUT_LATE_MS = 100
+
+
+def _rendered_clips(clips: list[dict] | None) -> list[dict] | None:
+    """The clips the renderer lays on the master's timeline, in order — or None when their
+    ``start_ms`` cannot say where each one is.
+
+    Mirrors ``video_assembler``: a failed clip or one without an asset is never painted (its
+    ``renderable`` filter), and ``resolve_bounds`` trusts the persisted ``start_ms`` only when every
+    renderable clip has a numeric one and they never decrease. Otherwise the renderer re-lays the
+    clips by scaled DURATIONS, which the persisted starts do not describe — so this returns None and
+    every frame stays checked. In the 600 newest job docs that was 82 of the 461 delivered masters
+    (52 with a non-numeric start, 30 decreasing).
+
+    A clip dict WITHOUT an ``asset_uri`` key is kept: every persisted clip carries the key
+    (``VisualClip.asset_uri`` defaults to ""), so only a hand-built record lacks it.
+    """
+    rows = [c for c in clips or [] if isinstance(c, dict) and c.get("status") != "failed"
+            and ("asset_uri" not in c or c.get("asset_uri"))]
+    starts = [c.get("start_ms") for c in rows]
+    if not rows or not all(isinstance(s, (int, float)) and not isinstance(s, bool)
+                           for s in starts):
+        return None
+    if any(a > b for a, b in itertools.pairwise(starts)):
+        return None
+    return rows
+
+
+def _clips_on_screen(clips: list[dict] | None, ts_ms: int) -> list[dict]:
+    """Every clip the master may be showing at ``ts_ms``; [] when that cannot be known.
+
+    The renderer's rule, not the clip's own ``duration_ms``: clip i holds the screen from its
+    ``start_ms`` until the NEXT clip's ``start_ms`` (``resolve_bounds``), and the LAST clip holds it
+    to the end of the master — its window runs to the master span and the tail is held on its final
+    frame (``_hold_tail_to_span``). So a frame past the authored timeline shows the last clip; on the
+    witness the cut finder sees no cut at the timeline's end (69.24 s) and the tail frames re-show
+    the last scene. It is the common case: of the 130 delivered masters with a recorded runtime
+    among the 600 newest job docs, 99 run more than 1.5 s past the end of their last clip.
+
+    Widened where the master can differ from the claim, so the answer errs toward MORE candidates:
+      * within ``_CUT_EARLY_MS`` before / ``_CUT_LATE_MS`` after a cut, both sides are candidates;
+      * a PILE — several clips claiming one ``start_ms`` (690 of 8572 windows in the census) — is
+        spread by the min-hold floor over the window BEFORE the pile and the pile's own window
+        (``beat_timeline._fund_run``), so every member is a candidate anywhere in that span;
+      * before the first clip the master shows the intro lead (a title card, the held first frame
+        or a black plate), so that instant is unknown, as is any instant on an untrusted timeline.
+    """
+    rows = _rendered_clips(clips)
+    if not rows:
+        return []
+    starts = [float(c["start_ms"]) for c in rows]
+    if ts_ms < starts[0] + _CUT_LATE_MS:
+        return []
+    distinct = sorted(set(starts))
+    on = []
+    for c, s in zip(rows, starts, strict=True):
+        k = distinct.index(s)
+        end = distinct[k + 1] if k + 1 < len(distinct) else math.inf
+        begin = distinct[k - 1] if (starts.count(s) > 1 and k > 0) else s
+        if begin - _CUT_EARLY_MS <= ts_ms < end + _CUT_LATE_MS:
+            on.append(c)
+    return on
+
+
+def _bleeds_by_design(clip: dict) -> bool:
+    return str(clip.get("modality") or "").strip().lower() in _FULL_BLEED_MODALITIES
 
 
 def _sample_indices(n: int, want: int = 12) -> list[int]:
@@ -114,12 +213,23 @@ def _sample_indices(n: int, want: int = 12) -> list[int]:
     return [i * (n - 1) // (want - 1) for i in range(want)]
 
 
-def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
+def _pixel_invariants(frames: list[str], clips: list[dict] | None = None,
+                      coverage: dict[str, Any] | None = None) -> list[dict]:
     """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
     measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
     layer would flag, without an LLM call. Rough heuristics, biased toward flagging.
 
-    ── EDGE-CLIP IS SKIPPED ON PHOTO BEATS, AND ONLY ON PHOTO BEATS ──────────────────────────
+    ``coverage``, when given, is filled with what the EDGE-CLIP rule actually ran on — a pass
+    with every frame exempt is a pass by exemption, and the caller must be able to say so.
+
+    ── EDGE-CLIP IS SKIPPED ON FULL-BLEED BEATS, AND ONLY ON FULL-BLEED BEATS ────────────────
+    A frame is exempt only when EVERY clip that may be on screen at its true instant
+    (`_frame_time_ms`, `_clips_on_screen`) bleeds by design (`_FULL_BLEED_MODALITIES`: scene_image
+    and video_hero). On the witness f7df77bf the 4 frames the old code "checked" were all
+    full-bleed, and each fell to a different part of this: f_001 is a Veo frame (video_hero was not
+    exempt), f_003 is a scene_image read 1.5 s early as the Veo clip before it, and f_025/f_028
+    re-show the last scene past the authored timeline, where the old duration lookup returned None.
+
     The gate runs on frames from the DELIVERED MASTER, which interleaves diagram beats with
     generated photography. The pipeline's OWN edge checker (`log_unsafe_bbox`) is called only
     from `diagram/render.py` — it never inspects a photo, because a photo legitimately bleeds to
@@ -176,8 +286,9 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     # a timestamp, and therefore to the clip that authored it.
     samp = [(i, frames[i]) for i in _sample_indices(len(frames))]
     letterbox = edge_clip = 0
-    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
-    edge_skipped_photo = 0
+    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (full-bleed is skipped)
+    edge_skipped_full_bleed = 0
+    edge_unattributed = 0     # checked with NO known clip: intro lead, or an untrusted timeline
     for idx, fp in samp:
         try:
             im = np.asarray(Image.open(fp).convert("L"), dtype=float)
@@ -221,12 +332,17 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             return int((np.abs(np.diff(strip, axis=0)) > 28).sum())
         def _hsteps(strip):
             return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
-        # A photo beat legitimately bleeds to every edge — the pipeline's own checker never
-        # inspects one. Skip the rule, do not merely discount it.
-        if _clip_modality_at(clips, idx * _FRAME_INTERVAL_MS) == "scene_image":
-            edge_skipped_photo += 1
+        # A full-bleed beat legitimately bleeds to every edge — the pipeline's own checker never
+        # inspects one. Skip the rule, do not merely discount it. The frame is read at the
+        # instant it actually shows, and is exempt only if EVERY clip that may be on screen then
+        # bleeds by design; no known clip means UNKNOWN, which is checked.
+        on_screen = _clips_on_screen(clips, _frame_time_ms(idx))
+        if on_screen and all(_bleeds_by_design(c) for c in on_screen):
+            edge_skipped_full_bleed += 1
         else:
             edge_checked += 1
+            if not on_screen:
+                edge_unattributed += 1
             if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
                     or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
                 edge_clip += 1
@@ -234,13 +350,20 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
         issues.append({"sev": "MAJOR", "msg": (
             f"LETTERBOX: {letterbox}/{len(samp)} frames show a persistent dark band — content "
             "not filling the vertical frame (authored for the wrong aspect)")})
+    if coverage is not None:
+        timeline = ("absent" if not clips else
+                    "trusted" if _rendered_clips(clips) else "untrusted")
+        coverage.update({"sampled": len(samp), "checked": edge_checked,
+                         "exempt_full_bleed": edge_skipped_full_bleed,
+                         "unattributed": edge_unattributed, "flagged": edge_clip,
+                         "timeline": timeline})
     # THE DENOMINATOR IS WHAT WAS CHECKED, not what was sampled. Dividing by the full sample
     # after skipping photos would make a photo-heavy job progressively harder to flag — the gate
     # would quietly weaken on exactly the jobs where the skip applies, which is the opposite of
     # what the skip is for.
     if edge_checked and edge_clip >= max(2, edge_checked // 3):
-        skipped = (f" ({edge_skipped_photo} photo frame(s) exempt — a scene_image bleeds to the "
-                   "edge by design)") if edge_skipped_photo else ""
+        skipped = (f" ({edge_skipped_full_bleed} full-bleed frame(s) exempt — scene_image and "
+                   "video_hero bleed to the edge by design)") if edge_skipped_full_bleed else ""
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
             f"the frame edge — content likely cut off-frame{skipped}")})
@@ -287,12 +410,15 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
     # OBSERVE: emit frames for the independent vision/adversary step.
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     frames = _extract_frames(tmp, fdir)
-    issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
+    edge_coverage: dict[str, Any] = {}
+    # invariants B + C on the real frames
+    issues.extend(_pixel_invariants(frames, clips, coverage=edge_coverage))
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
+            "edge_clip": edge_coverage,
             "frames_dir": fdir, "num_frames": len(frames),
             "persona": persona or None,
             "next": _adversary_brief(persona)}
