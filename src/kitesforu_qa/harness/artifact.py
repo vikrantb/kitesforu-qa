@@ -6,7 +6,9 @@ plus optionally-downloaded local audio/images. Checks read typed accessors (``ar
 digging through the raw doc, so a doc-shape change touches ONE place.
 
 Primary path is ``from_doc`` — fully offline, $0, no network (the path for fixtures + CI). ``load``
-fetches a live job + downloads its audio for ad-hoc local verification.
+fetches a live job + downloads its audio for ad-hoc local verification. A download that fails RAISES
+(:class:`ArtifactDownloadError`): an artifact without its audio skips every audio check as N/A, so a
+grade over it would pass on nothing.
 """
 from __future__ import annotations
 
@@ -90,6 +92,15 @@ class VisualReadiness:
 
 class ProvisionalArtifactError(RuntimeError):
     """Raised when a metric is requested from a job whose visual stage has not finished."""
+
+
+class ArtifactDownloadError(RuntimeError):
+    """A job asset could not be downloaded.
+
+    Raised, never returned as ``None``. With no local file, every check that needs it calls
+    ``skip()`` ("no audio file on artifact"), which reads exactly like a job that has no audio, and
+    a scorecard of skips passes. ``_download`` used ``urllib``, which fails every HTTPS GET with
+    CERTIFICATE_VERIFY_FAILED on a stock macOS python, and swallowed that into ``None``."""
 
 
 @dataclass
@@ -386,31 +397,67 @@ class Artifact:
     @classmethod
     def load(cls, job_id: str, client: Any, *, download: bool = True,
              temp_dir: str = "/tmp/kitesforu-qa") -> Artifact:
-        """Fetch a live job doc (+ optionally download its audio) via the kqa client."""
+        """Fetch a live job doc (+ optionally download its audio) via the kqa client.
+
+        With ``download=True`` a failed download raises :class:`ArtifactDownloadError`. Pass
+        ``download=False`` to grade the doc alone, on purpose: the audio checks then skip, and say so.
+        """
         doc = client.get_job(job_id)
         art = cls.from_doc(doc if isinstance(doc, dict) else {"job_id": job_id})
         art.job_id = job_id
         if download:
-            audio_url = None
-            try:
-                audio_url = client.get_job_audio(job_id)
-            except Exception:
-                pass
-            audio_url = audio_url or _g(doc, "outputs", "audio_url")
+            # The URL comes from the doc already in hand: ``client.get_job_audio`` re-fetches this
+            # same doc and returns these same fields, and its failure used to be swallowed into "no
+            # audio", which the checks cannot tell from a job that has none.
+            audio_url = _g(doc, "audio_url") or _g(doc, "audio_path") or _g(doc, "outputs", "audio_url")
             if audio_url:
-                art.audio_path = _download(audio_url, f"{temp_dir}/{job_id}.audio")
+                art.audio_path = _download(str(audio_url), f"{temp_dir}/{job_id}.audio")
         return art
 
 
-def _download(url: str, local_path: str) -> str | None:
+#: Seconds to connect, and to wait for each read (``requests`` applies a timeout per socket operation,
+#: not to the whole transfer, so a long episode that keeps streaming is not cut off).
+_DOWNLOAD_TIMEOUT_S = (10, 60)
+
+
+def _download(url: str, local_path: str) -> str:
+    """Download ``url`` and return the local path of the file. Raises :class:`ArtifactDownloadError`.
+
+    HTTPS goes through ``requests``, a declared dependency that carries its own CA bundle (a stock
+    macOS python fails every storage.googleapis.com GET through ``urllib``). The body is streamed to
+    ``<local_path>.part`` and renamed only when complete and non-empty, so a failed transfer never
+    leaves a truncated file for the checks to grade as a truncated episode. ``gs://`` goes through
+    ``integrations.gcs.download_from_gcs``, unchanged."""
     import os
+
     try:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
         if url.startswith("gs://"):
             from ..integrations.gcs import download_from_gcs
             return download_from_gcs(url, local_path)
-        import urllib.request
-        urllib.request.urlretrieve(url, local_path)
-        return local_path
-    except Exception:
-        return None
+        _stream_to(url, local_path)
+    except Exception as exc:
+        raise ArtifactDownloadError(
+            f"could not download {url[:120]}: {type(exc).__name__}: {str(exc)[:200]}"
+        ) from exc
+    return local_path
+
+
+def _stream_to(url: str, local_path: str) -> None:
+    import os
+
+    import requests
+
+    part = f"{local_path}.part"
+    try:
+        with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as resp:
+            resp.raise_for_status()
+            with open(part, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+        if os.path.getsize(part) == 0:
+            raise ValueError("the response body was empty")
+        os.replace(part, local_path)
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
