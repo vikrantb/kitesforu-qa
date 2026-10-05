@@ -6,18 +6,21 @@ master. The doc records where it is as ``visual.painted_timeline_uri``. Nothing 
 carries the timeline.
 
 THE SCHEMA HAS ONE PARSER, AND IT IS THE PRODUCER'S: ``parse_v1`` in kitesforu-workers
-``src/workers/stages/visuals/painted_timeline.py``. It is imported lazily from ``WORKERS_SRC``,
-which defaults to the sibling ``kitesforu-workers/src`` checkout, the way
-``scripts/fleet_baseline.py`` and ``scripts/measure_delivered_clips.py`` import workers code. qa never
-parses the sidecar by hand. If that import fails, the sidecar is not fetched at all, and the reader
-falls back to its own estimate, labelled as one (``DeliveredTimeline.source == "estimated"``).
+``src/workers/stages/visuals/painted_timeline.py`` (#3257 ``bfa00e734``). It takes the sidecar's
+bytes as they arrive, so qa does not even decode the JSON. It returns pydantic models that ignore
+unknown fields, and raises ``ValueError`` on anything that is not v1. It is imported lazily from
+``WORKERS_SRC``, which defaults to the sibling ``kitesforu-workers/src`` checkout, the way
+``scripts/fleet_baseline.py`` and ``scripts/measure_delivered_clips.py`` import workers code. If that
+import fails, the sidecar is not fetched at all, and the reader falls back to its own estimate,
+labelled as one (``DeliveredTimeline.source == "estimated"``).
 
 Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
 * ``absent``: the doc names no sidecar. That is every master assembled before the sidecar existed,
   so it is not a failure, and nothing is reported as rejected.
 * ``parser_unavailable``: ``parse_v1`` could not be imported.
-* ``uri_unresolvable``: the URI is neither ``gs://bucket/object`` nor ``https://``.
+* ``uri_unresolvable``: the URI is neither ``gs://bucket/object`` nor ``https://``. The producer
+  writes the public ``https://storage.googleapis.com/...`` form (``playable_url.gs_to_public_https``).
 * ``fetch_failed``: the GET failed, or the body exceeded ``MAX_SIDECAR_BYTES``. A URI that points at
   the master MP4 by mistake stops there instead of downloading the whole video.
 * ``parse_failed``: the body is not JSON, or ``parse_v1`` refused it or returned nothing.
@@ -28,7 +31,6 @@ Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -122,7 +124,7 @@ def read_sidecar(doc: Mapping[str, Any] | None, *,
                  fetch: Callable[[str], bytes] | None = None,
                  parse: Callable[[Any], Any] | None = None) -> SidecarRead:
     """Read the sidecar ``doc`` names. ``fetch`` and ``parse`` replace the GET and workers'
-    ``parse_v1`` (tests only). ``parse`` receives the decoded JSON object."""
+    ``parse_v1`` (tests only). ``parse`` receives the body bytes, as ``parse_v1`` does."""
     uri = sidecar_uri(doc)
     if uri is None:
         return SidecarRead(ABSENT)
@@ -138,7 +140,7 @@ def read_sidecar(doc: Mapping[str, Any] | None, *,
     except Exception as exc:  # the read failed; the reader falls back and reports why
         return SidecarRead(FETCH_FAILED, uri, detail=f"{type(exc).__name__}: {exc}")
     try:
-        parsed = parse(json.loads(body))
+        parsed = parse(body)
     except Exception as exc:  # not JSON, or parse_v1 refused it
         return SidecarRead(PARSE_FAILED, uri, bytes_read=len(body),
                            detail=f"{type(exc).__name__}: {exc}")

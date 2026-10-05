@@ -24,8 +24,9 @@ def _never(*_args, **_kwargs):
     raise AssertionError("must not be called")
 
 
-def _identity(obj):
-    return obj
+#: Stands in for workers' ``parse_v1`` where the parser is not what is under test: like it, it takes
+#: the body bytes and raises ``ValueError`` (``JSONDecodeError``) on anything that is not JSON.
+_parse = json.loads
 
 
 @pytest.mark.parametrize("doc", [None, {}, {"visual": None}, {"visual": {}},
@@ -62,7 +63,7 @@ def test_the_uri_resolves_to_its_public_https_form_or_to_nothing(uri, url):
 
 def test_an_unresolvable_uri_is_not_fetched():
     doc = {"visual": {"painted_timeline_uri": "visuals/job/painted_timeline.json"}}
-    read = sc.read_sidecar(doc, fetch=_never, parse=_identity)
+    read = sc.read_sidecar(doc, fetch=_never, parse=_parse)
     assert read.status == "uri_unresolvable" and read.bytes_read == 0, read
 
 
@@ -73,10 +74,23 @@ def test_the_fetch_goes_to_the_public_url_and_counts_the_bytes():
         seen.append(url)
         return BODY
 
-    read = sc.read_sidecar(DOC, fetch=fetch, parse=_identity)
+    read = sc.read_sidecar(DOC, fetch=fetch, parse=_parse)
     assert seen == [PUBLIC]
     assert (read.status, read.why_unread, read.bytes_read) == ("read", None, len(BODY))
     assert read.parsed["version"] == 1
+
+
+def test_the_bytes_reach_parse_v1_as_they_arrived():
+    """qa does not decode the sidecar: ``parse_v1`` takes the body bytes (#3257 ``bfa00e734``), so
+    the producer's parser owns the JSON decoding too."""
+    handed: list[object] = []
+
+    def parse(body):
+        handed.append(body)
+        return _parse(body)
+
+    sc.read_sidecar(DOC, fetch=lambda url: BODY, parse=parse)
+    assert handed == [BODY] and isinstance(handed[0], bytes)
 
 
 def _raises(exc):
@@ -86,8 +100,8 @@ def _raises(exc):
 
 
 @pytest.mark.parametrize("fetch, parse, status, detail", [
-    (_raises(requests.ConnectionError("refused")), _identity, "fetch_failed", "ConnectionError: refused"),
-    (lambda url: b"<html>not found</html>", _identity, "parse_failed", "JSONDecodeError"),
+    (_raises(requests.ConnectionError("refused")), _parse, "fetch_failed", "ConnectionError: refused"),
+    (lambda url: b"<html>not found</html>", _parse, "parse_failed", "JSONDecodeError"),
     (lambda url: BODY, _raises(ValueError("unknown version 2")), "parse_failed",
      "ValueError: unknown version 2"),
     (lambda url: BODY, lambda obj: None, "parse_failed", "parse_v1 returned None"),
@@ -148,5 +162,5 @@ def test_the_get_streams_and_stops_at_the_cap(size, ok, monkeypatch):
 def test_an_http_error_is_a_failed_fetch(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda url, timeout, stream: _Response(
         10, requests.HTTPError("404 Client Error")))
-    read = sc.read_sidecar(DOC, fetch=None, parse=_identity)
+    read = sc.read_sidecar(DOC, fetch=None, parse=_parse)
     assert read.status == "fetch_failed" and "HTTPError: 404" in (read.why_unread or ""), read

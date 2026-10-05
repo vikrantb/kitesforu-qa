@@ -18,6 +18,7 @@ and an exemption widened by one modality goes red. What is on screen at an insta
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import shutil
 import subprocess
@@ -258,7 +259,7 @@ def test_probe_master_reads_the_producers_sidecar_and_says_so(frames, tmp_path, 
     body = (pathlib.Path(__file__).parent / "fixtures" / "painted_timeline_v1_witness.json").read_bytes()
     uri = "gs://kitesforu-dev-podcasts/visuals/f7df77bf/painted_timeline.json"
     monkeypatch.setattr(dt, "read_sidecar", lambda doc: read_sidecar(
-        doc, fetch=lambda url: body, parse=lambda obj: obj))
+        doc, fetch=lambda url: body, parse=json.loads))
     gate = _load_gate()
     monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out: [frames["photo"]] * 28)
     doc = {"master_segment_timeline": [{"index": 0}],

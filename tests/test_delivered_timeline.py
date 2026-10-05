@@ -144,11 +144,12 @@ URI = "gs://kitesforu-dev-podcasts/visuals/f7df77bf-5f6e-4862-ae2e-5446270d5f1d/
 
 
 def sidecar_of(name):
-    """A vendored producer stamp, read as the sidecar a doc names. ``parse`` stands in for workers'
-    ``parse_v1`` here; the golden-sidecar tests at the bottom of this file run the real one."""
+    """A vendored producer stamp, read as the sidecar a doc names. ``json.loads`` stands in for
+    workers' ``parse_v1`` here (both take the body bytes); the golden-sidecar tests at the bottom of
+    this file run the real one."""
     body = (FIXTURES / f"painted_timeline_v1_{name}.json").read_bytes()
     return read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: body,
-                        parse=lambda obj: obj)
+                        parse=json.loads)
 
 
 def test_the_producers_witness_stamp_exempts_every_full_bleed_frame():
@@ -779,21 +780,23 @@ def test_the_fallback_never_exempts_a_frame_the_renderer_paints_with_a_card():
 
 _CONTRACT_KEYS = ("modality", "render_mode", "motion_render", "asset_kind")
 
+#: Written by workers' real assembler test (``tests/unit/visuals/test_the_painted_timeline.py`` with
+#: ``KFU_RECORD_PAINTED_TIMELINE_GOLDEN=1``), next to ``parse_v1`` since #3257 ``bfa00e734``.
+_GOLDEN = Path("tests/fixtures/painted_timeline/painted_timeline_v1.golden.json")
+
 
 def _golden_sidecar():
-    """workers' ``parse_v1`` and the golden sidecar its assembler test writes. SKIP while the workers
-    tree at ``WORKERS_SRC`` predates the sidecar contract (workers #3257); FAIL once it has
-    ``parse_v1`` but no single golden to read."""
+    """The golden sidecar workers' assembler test writes. SKIP while the workers tree at
+    ``WORKERS_SRC`` predates the sidecar contract (no ``parse_v1``); FAIL once it has ``parse_v1`` but
+    not the golden beside it."""
     parse_v1, why = sidecar_mod.load_parse_v1()
     if parse_v1 is None:
         pytest.skip(f"workers at {sidecar_mod.workers_src()} has no painted_timeline.parse_v1 "
                     f"({why}): it predates the sidecar contract. SKIPPED, not passed.")
-    root = Path(sidecar_mod.workers_src()).parent / "tests"
-    found = sorted(root.rglob("*painted_timeline*.json"))
-    if len(found) != 1:
-        pytest.fail(f"workers ships parse_v1, so it ships one golden sidecar "
-                    f"(*painted_timeline*.json under {root}); found {found}")
-    return found[0]
+    golden = Path(sidecar_mod.workers_src()).parent / _GOLDEN
+    if not golden.is_file():
+        pytest.fail(f"workers ships parse_v1, so it ships its golden sidecar at {golden}")
+    return golden
 
 
 def test_the_producers_golden_sidecar_reads_through_parse_v1():
