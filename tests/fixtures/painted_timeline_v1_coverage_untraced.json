@@ -1,6 +1,8 @@
 {
  "version": 1,
  "master_ms": 27000,
+ "master_generation": 1759600000000002,
+ "master_size": 4096,
  "windows": [
   {
    "clip": 0,
@@ -69,5 +71,5 @@
   "fade_ms": null,
   "reason": "portrait_canvas"
  },
- "_fixture_provenance": "built by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline(); the reader ignores this key; title-card lead, coverage fill (2 <- 0), an untraced row, a reclaimed video_hero still"
+ "_fixture_provenance": "built by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline(); the reader ignores this key; title-card lead, coverage fill (2 <- 0), an untraced row, a reclaimed video_hero still; master_generation and master_size added in the shape of #3257 2579ca090 (optional v1 fields), illustrative values for a synthetic master"
 }

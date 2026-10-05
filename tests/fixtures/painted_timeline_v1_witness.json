@@ -1,6 +1,8 @@
 {
  "version": 1,
  "master_ms": 85033,
+ "master_generation": 1791181626794892,
+ "master_size": 17171192,
  "windows": [
   {
    "clip": 0,
@@ -119,5 +121,5 @@
   "fade_ms": 1500,
   "reason": "after_last_word"
  },
- "_fixture_provenance": "built by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline(); the reader ignores this key; witness f7df77bf clip table with a 120 ms J-cut lead"
+ "_fixture_provenance": "built by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline(); the reader ignores this key; witness f7df77bf clip table with a 120 ms J-cut lead; master_generation and master_size added in the shape of #3257 2579ca090 (optional v1 fields), the witness master's own: x-goog-generation and x-goog-stored-content-length of visuals/f7df77bf-5f6e-4862-ae2e-5446270d5f1d/episode_video.mp4, read from a GCS GET on 2026-10-05"
 }

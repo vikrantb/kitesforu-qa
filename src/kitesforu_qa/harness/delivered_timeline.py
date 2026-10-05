@@ -90,8 +90,10 @@ STAMP_MASTER_TOLERANCE_MS = 1000
 #: The stamp names a different master object than the one fetched: its ``master_generation`` /
 #: ``master_size`` (the uploaded blob's) differ from the fetched master's ``x-goog-generation`` header
 #: or its size on disk. A re-assembly over the same audio keeps the same length, which the length
-#: check above cannot see; this can. A stamp without the two fields (written before #3257 added them)
-#: is held to the length check alone.
+#: check above cannot see; this can. A stamp without both fields (written before #3257 added them),
+#: or a master fetched without both, is held to the length check alone, which also applies when the
+#: two match. A generation that is not the header's decimal text, a non-numeric string included,
+#: is a mismatch: the stamp cannot show that it describes this master.
 STALE_MASTER = "stale_master"
 
 #: The cut band (see the module docstring for its population). For a stamp the band also covers
@@ -459,6 +461,17 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _generation(value: Any) -> str | None:
+    """A GCS generation as its decimal text. The contract types ``master_generation`` as
+    ``int | str | None`` (#3257 keeps a string as it was handed one: the GCS JSON API encodes the
+    int64 as a string), and ``x-goog-generation`` is the same number in decimal."""
+    if _is_int(value):
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def _from_stamp(stamp: Any, clips: list[Any], master_ms: float | None,
                 master: FetchedMaster | None = None) -> tuple[DeliveredTimeline | None, str | None]:
     """The stamped timeline, or ``(None, why)`` when the stamp cannot be trusted.
@@ -470,9 +483,11 @@ def _from_stamp(stamp: Any, clips: list[Any], master_ms: float | None,
     version = _field(stamp, "version")
     if version != STAMP_VERSION:
         return None, f"version={version!r}"
-    stamped_master = (_field(stamp, "master_generation"), _field(stamp, "master_size"))
-    if master is not None and master.complete and all(_is_int(v) for v in stamped_master):
-        if stamped_master != (master.generation, master.size):
+    stamped_generation = _generation(_field(stamp, "master_generation"))
+    stamped_size = _field(stamp, "master_size")
+    if (master is not None and master.complete and stamped_generation is not None
+            and _is_int(stamped_size)):
+        if (stamped_generation, stamped_size) != (str(master.generation), master.size):
             return None, STALE_MASTER
     raw = _field(stamp, "windows")
     if not isinstance(raw, (list, tuple)) or not raw:

@@ -124,17 +124,25 @@ def named(generation=111, size=2048, *, windows=None, **fields):
 TWO_CLIPS = [clip(0, "scene_image", 0), clip(9000, "diagram", 1)]
 
 
-def test_a_stamp_that_names_the_fetched_master_is_read():
-    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(), master_ms=20000,
+@pytest.mark.parametrize("generation", [111, "111", " 111 "])
+def test_a_stamp_that_names_the_fetched_master_is_read(generation):
+    """``master_generation`` is ``int | str | None`` in the contract (#3257 keeps a string as it got
+    one), and ``x-goog-generation`` is the same number in decimal."""
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(generation), master_ms=20000,
                                       master=FetchedMaster(111, 2048))
     assert (tl.source, tl.stamp_rejected) == ("stamp", None)
 
 
-@pytest.mark.parametrize("fetched", [FetchedMaster(112, 2048), FetchedMaster(111, 2049)])
-def test_a_stamp_that_names_another_master_is_stale(fetched):
+@pytest.mark.parametrize("st, fetched", [
+    (named(), FetchedMaster(112, 2048)),
+    (named(), FetchedMaster(111, 2049)),
+    (named("112"), FetchedMaster(111, 2048)),
+    (named("not-a-generation"), FetchedMaster(111, 2048)),
+])
+def test_a_stamp_that_names_another_master_is_stale(st, fetched):
     """A pass that uploads a new master and dies before its sidecar leaves the old sidecar at the same
     URL. Over the same audio the new master has the same length, so only the object can tell."""
-    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(), master_ms=20000, master=fetched)
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=20000, master=fetched)
     assert (tl.source, tl.stamp_rejected) == ("estimated", "stale_master")
     assert tl.full_bleed_at(4499) is True and tl.full_bleed_at(10499) is False   # the estimate
 
@@ -145,6 +153,8 @@ def test_a_stamp_that_names_another_master_is_stale(fetched):
     (named(), None),                                           # nothing fetched to compare with
     (named(), FetchedMaster(None, 2048)),                      # a GET without x-goog-generation
     (named(size=None), FetchedMaster(999, 1)),                 # only one of the two fields
+    (named(generation=None), FetchedMaster(999, 1)),
+    (named(generation="  "), FetchedMaster(999, 1)),           # a blank generation is no generation
 ])
 def test_without_both_pairs_the_length_check_decides(st, fetched):
     tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=20000, master=fetched)
@@ -873,9 +883,10 @@ def test_the_producers_golden_sidecar_reads_through_parse_v1():
 
 
 def test_the_vendored_stamps_have_the_goldens_shape():
-    """The two stamps under tests/fixtures/ were built by the producer at #3257 022ffae38. A field
-    the sidecar adds or drops makes them stale, and this goes red. Their ``_fixture_provenance``
-    key is documentation, not contract."""
+    """The two stamps under tests/fixtures/ were built by the producer at #3257 022ffae38, and given
+    ``master_generation`` / ``master_size`` when 2579ca090 added them. A field the sidecar adds or
+    drops makes them stale, and this goes red. Their ``_fixture_provenance`` key is documentation,
+    not contract."""
     golden = json.loads(_golden_sidecar().read_text())
     for name in ("witness", "coverage_untraced"):
         vendored = produced(name)
