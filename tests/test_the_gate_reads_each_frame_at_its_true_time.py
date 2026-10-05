@@ -301,6 +301,10 @@ def test_the_intro_lead_before_the_first_clip_is_unknown(frames):
     issues = gate._pixel_invariants([frames["clipped"]] * 12, clips, coverage=cov)
     assert cov["unattributed"] == 3 and cov["checked"] == 3, cov
     assert _edge_issues(issues), "the clipped lead frames were not flagged"
+    # The lead ends exactly at the first start — the J-cut moves only cuts BETWEEN clips — so a
+    # frame 301 ms before it is still the title card, even inside the band a cut would get.
+    late_first = [_clip(7800, "video_hero"), _clip(20000, "scene_image")]
+    assert gate._clips_on_screen(late_first, gate._frame_time_ms(2)) == []    # 7.5 s
 
 
 def test_a_frame_just_before_a_cut_is_judged_by_both_sides(frames):
@@ -330,6 +334,19 @@ def test_a_pile_of_clips_on_one_start_is_a_candidate_across_the_window_before_it
     assert on_pile == pile, on_pile
     # Without a pile the same photo window is unambiguous.
     assert gate._clips_on_screen([photo, pile[1], after], gate._frame_time_ms(2)) == [photo]
+
+
+def test_a_photo_window_before_a_pile_holding_a_card_is_checked(frames):
+    """The same rule end to end: the card in the pile may be on screen during the photo's
+    claimed window, so those frames are judged by the edge rule rather than exempted."""
+    gate = _load_gate()
+    clips = [_clip(0, "scene_image"), _clip(12000, "diagram"), _clip(12000, "scene_image"),
+             _clip(20000, "scene_image")]
+    cov: dict = {}
+    issues = gate._pixel_invariants([frames["clipped"]] * 12, clips, coverage=cov)
+    # frames 0-6 (1.5-19.5 s) may show the pile's card; frames 7-11 sit after the pile.
+    assert cov["checked"] == 7 and cov["exempt_full_bleed"] == 5, cov
+    assert _edge_issues(issues)
 
 
 @pytest.mark.parametrize("starts", [[0, 9000, 6000], [0, None, 6000], [None, None, None]])
