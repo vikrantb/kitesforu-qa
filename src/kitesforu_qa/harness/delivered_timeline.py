@@ -90,8 +90,22 @@ STROBE_DWELL_MS = 1600
 #: The modalities whose pixels bleed to every edge by design. This is the crop-fill side of the
 #: renderer's ``video_assembler._STATIC_MODALITIES`` (``{"diagram", "chart"}``, contain-fit), and
 #: the same set as ``animatable.ANIMATABLE_MODALITIES``. Any modality not listed here stays
-#: checked. That is deliberate: a new pictorial modality has to be added here as a decision.
+#: checked. That is deliberate: a new pictorial modality has to be added here as a decision. A row
+#: under one of these modalities is still checked when its still carries drawn text
+#: (:func:`carries_drawn_text`).
 FULL_BLEED_MODALITIES = frozenset({"scene_image", "video_hero"})
+
+#: What makes a picture carry DRAWN TEXT, mirrored from kitesforu-workers and pinned against it by
+#: ``tests/test_delivered_timeline.py`` when ``WORKERS_SRC`` is importable:
+#: ``animatable.TEXT_BEARING_KINDS``; ``render_contract.PHOTO_STATEMENT_KIND`` and the
+#: ``modality_reasons`` spellings ``render_contract`` writes (``DEMOTE_*``, ``REFRAMED_FROM``); and
+#: ``image_library._ATTRIBUTION_REQUIRED``, the licence classes whose credit is burned into the bytes.
+TEXT_BEARING_KINDS = frozenset({"relimage"})
+PHOTO_STATEMENT_KIND = "photo_statement"
+_DEMOTE_LIBRARY_IMAGE = "demote→library_image"
+_DEMOTE_PHOTO_STATEMENT = "demote→photo_statement"
+_REFRAMED_FROM = "reframed_from"
+_ATTRIBUTION_REQUIRED = frozenset({"embed_only"})
 
 #: Diagnoses, so a reader can say WHY an instant is unknown.
 STAMP = "stamp"
@@ -117,10 +131,11 @@ def _asset_path(row: Mapping[str, Any]) -> str:
 def has_veo_evidence(row: Mapping[str, Any]) -> bool:
     """Whether a ``video_hero`` row shows video, not a reclaimed still.
 
-    ``degrade_ladder`` stamps a whole reclaim of a still with ``modality="video_hero"``. In the 600
-    newest jobs on 2026-09-24, 3 of 39 seed descriptors were drawn text: 1 flowchart and 2 title-band
-    renders. ``veo_hero._apply_hotswap`` stamps ``render_mode="video"`` and ``motion_render="veo"``
-    together with the modality. Any one of these counts as evidence: those two fields, a ``.mp4``
+    ``degrade_ladder`` stamps a whole reclaim of a still with ``modality="video_hero"``. Its own
+    docstring counts 3 of 39 seed descriptors with that shape in the 600 newest jobs (round-5 code
+    critic census, 2026-09-24): 1 flowchart and 2 title-band renders, all drawn text.
+    ``veo_hero._apply_hotswap`` stamps ``render_mode="video"`` and ``motion_render="veo"`` together
+    with the modality. Any one of these counts as evidence: those two fields, a ``.mp4``
     asset, or a stamp's ``asset_kind == "video"``.
 
     KNOWN RESIDUAL: a reclaimed text still that is later motion-upgraded (a Ken Burns MP4, or a Veo
@@ -133,12 +148,80 @@ def has_veo_evidence(row: Mapping[str, Any]) -> bool:
             or _asset_path(row).endswith(".mp4"))
 
 
-def bleeds_by_design(row: Mapping[str, Any] | None) -> bool:
-    """Whether the painted asset legitimately fills every edge. ``None`` (unknown) never does."""
+def _clip_kind(row: Mapping[str, Any]) -> str:
+    debug = row.get("diagram_debug")
+    return _lower(debug.get("kind") if isinstance(debug, Mapping) else None)
+
+
+def _demote(reason: Any) -> tuple[str, str] | None:
+    """``render_contract.parse_demote_reason``: ``(target, licence)`` or None."""
+    r = str(reason or "")
+    for target in (_DEMOTE_LIBRARY_IMAGE, _DEMOTE_PHOTO_STATEMENT):
+        if r.startswith(target + ":"):
+            return target, r[len(target) + 1:].split("(", 1)[0].strip().lower()
+    return None
+
+
+def _reasons(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    reasons = row.get("modality_reasons")
+    return tuple(reasons) if isinstance(reasons, (list, tuple)) else ()
+
+
+def _reframe_source(row: Mapping[str, Any]) -> str | None:
+    """``render_contract.reframe_source_of``: the ``content_hash`` a crop was cut from."""
+    for reason in _reasons(row):
+        r = str(reason or "")
+        if r.startswith(_REFRAMED_FROM + ":"):
+            return r[len(_REFRAMED_FROM) + 1:].strip() or None
+    return None
+
+
+def burns_text_itself(row: Mapping[str, Any]) -> bool:
+    """``animatable._burns_text_itself``: the row's own record says its still carries drawn words: a
+    text-bearing kind (a ``relimage`` band), a photo statement (by kind or by its demote reason), or
+    a library photo whose licence burns a credit into the bytes."""
+    if _clip_kind(row) in TEXT_BEARING_KINDS or _clip_kind(row) == PHOTO_STATEMENT_KIND:
+        return True
+    for reason in _reasons(row):
+        parsed = _demote(reason)
+        if parsed and (parsed[0] == _DEMOTE_PHOTO_STATEMENT or parsed[1] in _ATTRIBUTION_REQUIRED):
+            return True
+    return False
+
+
+def burned_text_stills(clips: Sequence[Any] | None) -> frozenset[str]:
+    """``animatable.burned_text_stills``: every ``content_hash`` on the job that carries drawn text,
+    plus every reframed crop of one, followed to a fixpoint, so a reuse or a crop is caught too."""
+    rows = [c for c in clips or () if isinstance(c, Mapping)]
+    burned = {str(c["content_hash"]) for c in rows if c.get("content_hash") and burns_text_itself(c)}
+    grew = True
+    while grew:
+        grew = False
+        for c in rows:
+            h = str(c.get("content_hash") or "")
+            if h and h not in burned and _reframe_source(c) in burned:
+                burned.add(h)
+                grew = True
+    return frozenset(burned)
+
+
+def carries_drawn_text(row: Mapping[str, Any], burned: frozenset[str] = frozenset()) -> bool:
+    """The negation of ``animatable.is_animatable_still`` for a picture modality: a card or figure
+    spec, drawn words in its own still, or a reuse or crop of a still that has them."""
+    if row.get("card_spec") or row.get("diagram_spec") or burns_text_itself(row):
+        return True
+    return bool(row.get("content_hash")) and str(row.get("content_hash")) in burned
+
+
+def bleeds_by_design(row: Mapping[str, Any] | None, burned: frozenset[str] = frozenset()) -> bool:
+    """Whether the painted asset legitimately fills every edge AND carries no drawn text: a picture
+    modality (``scene_image``, or a ``video_hero`` with Veo evidence) that ``animatable`` would also
+    call a picture with no burned-in text. A photo statement, a ``relimage`` band or a burned licence
+    credit is text the edge rule must see, whatever the modality says. ``None`` never bleeds."""
     if not row:
         return False
     modality = _lower(row.get("modality"))
-    if modality not in FULL_BLEED_MODALITIES:
+    if modality not in FULL_BLEED_MODALITIES or carries_drawn_text(row, burned):
         return False
     return modality != "video_hero" or has_veo_evidence(row)
 
@@ -187,6 +270,7 @@ class DeliveredTimeline:
     diagnosis: str
     windows: tuple[Window, ...] = ()
     stamp_rejected: str | None = None             # why a present stamp was not used
+    burned: frozenset[str] = frozenset()          # the job's stills that carry drawn text
     _first_ms: float = math.inf                   # before this instant: unknown (intro lead)
     _spans: tuple[tuple[float, float, Mapping[str, Any] | None], ...] = field(default=(),
                                                                             repr=False)
@@ -215,13 +299,14 @@ class DeliveredTimeline:
         masters in the census. A caller holding the job doc should use :meth:`from_job`, which
         reads the real flag and detects a legacy timeline."""
         clips = list(clips or [])
+        burned = burned_text_stills(clips)
         rejected = None
         if stamp is not None:
             built, rejected = _from_stamp(stamp, clips, master_ms)
             if built is not None:
-                return built
+                return replace(built, burned=burned)
         timeline = _fallback(clips, real_offsets=real_offsets, master_ms=master_ms)
-        return replace(timeline, stamp_rejected=rejected) if rejected else timeline
+        return replace(timeline, stamp_rejected=rejected, burned=burned)
 
     # ── queries ──────────────────────────────────────────────────────────────────────────────
 
@@ -244,7 +329,7 @@ class DeliveredTimeline:
         cands = self.candidates_at(ts_ms)
         if not cands or any(c is None for c in cands):
             return None
-        return all(bleeds_by_design(c) for c in cands)
+        return all(bleeds_by_design(c, self.burned) for c in cands)
 
     def painted_windows(self) -> list[Window]:
         """One window per distinct painted span, in time order: what a per-window pixel
@@ -304,13 +389,14 @@ def _from_stamp(stamp: Any, clips: list[Any],
         if isinstance(source, int) and not isinstance(source, bool) and 0 <= source < len(clips):
             painted["source_clip"] = source
             if isinstance(clips[source], Mapping):
-                painted["asset_uri"] = clips[source].get("asset_uri")
-                painted["diagram_debug"] = clips[source].get("diagram_debug")
+                for key in ("asset_uri", "diagram_debug", "modality_reasons", "content_hash",
+                            "card_spec", "diagram_spec"):
+                    painted[key] = clips[source].get(key)
         windows.append(Window(clip, float(start), float(end), painted, True))
     windows.sort(key=lambda w: (w.start_ms, w.end_ms))
     spans = tuple((w.start_ms - CUT_EARLY_MS, w.end_ms + CUT_LATE_MS, w.fields) for w in windows)
-    return DeliveredTimeline(STAMP, STAMP, tuple(windows), None, windows[0].start_ms, spans,
-                             tuple(s[0] for s in spans)), None
+    return DeliveredTimeline(STAMP, STAMP, tuple(windows), _first_ms=windows[0].start_ms,
+                             _spans=spans, _span_starts=tuple(s[0] for s in spans)), None
 
 
 # ── the fallback ───────────────────────────────────────────────────────────────────────────────
@@ -344,8 +430,9 @@ def _fallback(clips: list[Any], *, real_offsets: bool,
             upcoming = float(s)
         effective.append(float(s) if _is_number(s) else upcoming)
     effective.reverse()
-    return DeliveredTimeline("fallback", diagnosis, claims, None, anchored[0],
-                             *_may_spans(ordered, effective, master_ms))
+    spans, span_starts = _may_spans(ordered, effective, master_ms)
+    return DeliveredTimeline("fallback", diagnosis, claims, _first_ms=anchored[0], _spans=spans,
+                             _span_starts=span_starts)
 
 
 def _may_spans(ordered: list[tuple[int, Mapping[str, Any]]], effective: list[float],

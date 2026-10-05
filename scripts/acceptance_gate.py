@@ -138,7 +138,9 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None, *,
     ── EDGE-CLIP IS SKIPPED ON FULL-BLEED BEATS, AND ONLY ON FULL-BLEED BEATS ────────────────
     A frame is exempt only when EVERY asset the master may show at the frame's true instant
     (``_frame_time_ms``) bleeds by design (``DeliveredTimeline.full_bleed_at``: a scene_image, or a
-    video_hero with Veo evidence). Anything the timeline cannot attribute is checked. On the witness
+    video_hero with Veo evidence, whose still carries no drawn text — a photo statement, a relimage
+    band or a burned licence credit stays checked). Anything the timeline cannot attribute is
+    checked. On the witness
     f7df77bf the 4 frames the old code "checked" were all full-bleed, and each fell to a different
     cause: f_001 is a Veo frame (video_hero was not exempt), f_003 is a scene_image read 1.5 s early
     as the Veo clip before it, and f_025/f_028 re-show the last scene past the authored timeline,

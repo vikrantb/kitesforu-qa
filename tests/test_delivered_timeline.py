@@ -331,6 +331,83 @@ def test_full_bleed_is_scene_image_or_video_hero_with_veo_evidence(row, expected
     assert bleeds_by_design(row) is expected
 
 
+# ── a full-bleed modality that carries DRAWN TEXT is checked ────────────────────────────────────
+
+PHOTO = {"modality": "scene_image", "asset_uri": "gs://b/p.mp4", "status": "done"}
+
+
+@pytest.mark.parametrize("row, expected", [
+    (dict(PHOTO), True),
+    (dict(PHOTO, diagram_debug={"kind": "photo_statement"}), False),
+    (dict(PHOTO, modality_reasons=["demote→photo_statement:cc_by($0)"]), False),
+    (dict(PHOTO, diagram_debug={"kind": "relimage"}), False),
+    (dict(PHOTO, modality_reasons=["demote→library_image:embed_only($0)"]), False),
+    (dict(PHOTO, diagram_debug={"kind": "library_photo"},
+          modality_reasons=["demote→library_image:cc0($0)"]), True),
+    (dict(PHOTO, card_spec={"title": "x"}), False),
+    (dict(PHOTO, diagram_debug={"kind": "key_term_highlight"}), True),
+    (dict(PHOTO, modality="video_hero", diagram_debug={"kind": "relimage"}, **VEO), False),
+])
+def test_a_picture_with_drawn_text_is_not_full_bleed(row, expected):
+    """`animatable.is_animatable_still` is the renderer's own answer to "a picture with no burned-in
+    text": a photo statement (its kind or its demote reason), a relimage band, a library photo whose
+    licence burns a credit (`embed_only`), a card or figure spec. Found on real pixels: 072c32c4's
+    last clip is a `scene_image` photo statement whose line drifts to 12 px from the left edge."""
+    assert bleeds_by_design(row) is expected
+
+
+def test_a_reuse_or_crop_of_a_burned_still_carries_its_text():
+    burned_still = dict(PHOTO, content_hash="h1", diagram_debug={"kind": "photo_statement"})
+    reuse = dict(PHOTO, content_hash="h1")
+    crop = dict(PHOTO, content_hash="h2", modality_reasons=["reframed_from:h1"])
+    crop_of_crop = dict(PHOTO, content_hash="h3", modality_reasons=["reframed_from:h2"])
+    burned = dt.burned_text_stills([burned_still, reuse, crop, crop_of_crop])
+    assert burned == {"h1", "h2", "h3"}
+    for row in (reuse, crop, crop_of_crop):
+        assert bleeds_by_design(row, burned) is False
+    assert bleeds_by_design(dict(PHOTO, content_hash="h9"), burned) is True
+
+
+def test_a_photo_statement_holding_the_tail_is_checked():
+    """072c32c4, shape exact: the last clip is a parallax `scene_image` of kind `photo_statement`, and
+    the master holds it 8 s past its claimed end. Every frame there is judged as text."""
+    clips = [clip(78329, "diagram", 12, duration_ms=6228, render_mode="video"),
+             clip(84557, "scene_image", 13, duration_ms=3720, render_mode="parallax_2_5d",
+                  diagram_debug={"kind": "photo_statement"}, ai_generated=False)]
+    tl = DeliveredTimeline.from_clips(clips, master_ms=95500)
+    for t in (85499, 94499):
+        assert tl.full_bleed_at(t) is False, t
+    clips[1]["diagram_debug"] = {"kind": "scene_image"}
+    assert DeliveredTimeline.from_clips(clips, master_ms=95500).full_bleed_at(94499) is True
+
+
+def test_drawn_text_matches_the_renderers_own_predicate():
+    """The mirror against `animatable.is_animatable_still` and `burned_text_stills` themselves, over
+    every combination of the vocabulary they read. SKIPS without kitesforu-workers."""
+    _renderer()
+    animatable = importlib.import_module("workers.stages.visuals.animatable")
+    kinds = [None, "scene_image", "library_photo", "photo_statement", "relimage",
+             "key_term_highlight", "flowchart"]
+    reasons = [None, ["demote→photo_statement:cc_by($0)"], ["demote→library_image:embed_only($0)"],
+               ["demote→library_image:cc0($0)"], ["reframed_from:h0"], ["reframed_from_beat:3"]]
+    rows = []
+    for i, (kind, reason, spec, modality) in enumerate(
+            (k, r, s, m) for k in kinds for r in reasons for s in (None, "card_spec")
+            for m in ("scene_image", "video_hero")):
+        row = {"modality": modality, "content_hash": f"h{i}", "asset_uri": "gs://b/x.png"}
+        if kind:
+            row["diagram_debug"] = {"kind": kind}
+        if reason:
+            row["modality_reasons"] = list(reason)
+        if spec:
+            row[spec] = {"title": "x"}
+        rows.append(row)
+    ours, theirs = dt.burned_text_stills(rows), animatable.burned_text_stills(rows)
+    assert ours == theirs and ours, "the burned-still sets differ"
+    for row in rows:
+        assert dt.carries_drawn_text(row, ours) is (not animatable.is_animatable_still(row, theirs)), row
+
+
 # ── the views agree with each other and with their old owners ──────────────────────────────────
 
 PARITY_SHAPES = {
