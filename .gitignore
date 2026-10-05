@@ -105,6 +105,9 @@ dmypy.json
 # every known finding as NEW on a fresh clone, i.e. a gate that cries wolf until someone silences
 # it. Mirrors kitesforu-workers/config/{mechanism_reach,orphan}_baseline.json, which are committed.
 !scripts/*_baseline.json
+# Test fixtures are SOURCE too: tests/fixtures/painted_timeline_v1_*.json are the producer's own
+# stamps (workers painted_timeline.build_painted_timeline), read verbatim by the reader's tests.
+!tests/fixtures/*.json
 
 # Docker
 docker/output/

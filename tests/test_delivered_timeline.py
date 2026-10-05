@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import os
 import random
 import sys
@@ -110,6 +111,69 @@ def test_a_stamp_reports_one_envelope_per_clip_and_one_window_per_painted_span()
     assert tl.spans_by_clip() == {0: (0, 20000), 1: (4000, 9000)}
     assert [(w.start_ms, w.end_ms) for w in tl.painted_windows()] == [
         (0, 4000), (4000, 9000), (9000, 20000)]
+
+
+# The producer's own stamps: built by kitesforu-workers #3257 (022ffae383a3)
+# `painted_timeline.build_painted_timeline`, and saved verbatim under tests/fixtures/.
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def produced(name):
+    return json.loads((FIXTURES / f"painted_timeline_v1_{name}.json").read_text())
+
+
+def test_the_producers_witness_stamp_exempts_every_full_bleed_frame():
+    """f7df77bf as the assembler stamps it: 11 traced windows, the J-cut-led boundaries, the tail hold
+    to 85033 ms and an applied close. Every sampled frame is a picture with video evidence."""
+    stamp = produced("witness")
+    clips = [clip(s, m, i, duration_ms=d, asset_uri=f"gs://b/{i}.mp4", render_mode="video",
+                  motion_render=mr)
+             for i, (s, d, m, mr) in enumerate(
+                 [(0, 6412, "video_hero", "veo"), (6412, 6412, "scene_image", "kenburns"),
+                  (12824, 6517, "video_hero", "veo"), (19341, 6517, "scene_image", "kenburns"),
+                  (25858, 6666, "scene_image", "kenburns"), (32524, 6666, "scene_image", "kenburns"),
+                  (39190, 5846, "scene_image", "kenburns"), (45036, 5845, "scene_image", "kenburns"),
+                  (50881, 6576, "scene_image", "kenburns"), (57457, 6575, "scene_image", "kenburns"),
+                  (64032, 5208, "scene_image", "kenburns")])]
+    doc = {"master_segment_timeline": [{"index": 0}], "visual": {"clips": clips, "painted_timeline": stamp}}
+    tl = DeliveredTimeline.from_job(doc, master_ms=85033)
+    assert (tl.source, tl.diagnosis, tl.stamp_rejected) == ("stamp", "stamp", None)
+    for k in (0, 2, 4, 7, 9, 12, 14, 17, 19, 22, 24, 27):     # `_sample_indices(28)`
+        assert tl.full_bleed_at(3000 * k + 1499) is True, k
+    assert tl.spans_by_clip()[10] == (63912, 85033)
+
+
+def test_the_producers_stamp_with_a_lead_a_fill_and_an_untraced_row():
+    """A title-card lead (no window), a coverage-filled row painting its donor's picture, a window the
+    producer could not trace (`clip` -1), a Veo clip, a reclaimed `video_hero` still, and a refused
+    close (`portrait_canvas`)."""
+    stamp = produced("coverage_untraced")
+    clips = [clip(0, "scene_image", 0), clip(4000, "diagram", 1),
+             clip(9000, "scene_image", 2, status="failed", asset_uri=""),
+             clip(16000, "video_hero", 3, asset_uri="gs://b/veo_0/clip.mp4", **VEO),
+             clip(20000, "video_hero", 4, render_mode="still", asset_uri="gs://b/title_band.png"),
+             clip(24000, "scene_image", 5)]
+    tl = DeliveredTimeline.from_clips(clips, stamp=stamp, master_ms=27000)
+    assert tl.source == "stamp"
+    assert tl.candidates_at(1499) == []                      # the title card: no clip
+    assert tl.full_bleed_at(4499) is True                    # clip 0's picture
+    assert tl.full_bleed_at(13499) is True                   # clip 2, painted with clip 0's picture
+    assert tl.candidates_at(17499) == [None]                 # untraced: whose pixels is unknown
+    assert tl.full_bleed_at(20499) is True                   # Veo
+    assert tl.full_bleed_at(25499) is False                  # a reclaimed still: no video evidence
+    assert -1 not in tl.spans_by_clip() and tl.spans_by_clip()[2] == (12000, 16000)
+    assert [w.clip for w in tl.painted_windows()] == [0, 1, 2, -1, 3, 4]
+
+
+def test_a_stale_source_index_makes_the_window_unknown():
+    """`clip` indexes the array the assembler was handed; a racing pass can re-persist `visual.clips`
+    after the mux. When the source row no longer has the window's modality, its pixels are unknown."""
+    stamp = produced("coverage_untraced")
+    clips = [clip(0, "diagram", 0), clip(4000, "diagram", 1),
+             clip(9000, "scene_image", 2, status="failed", asset_uri=""),
+             clip(16000, "video_hero", 3, **VEO), clip(20000, "video_hero", 4), clip(24000, "scene_image", 5)]
+    tl = DeliveredTimeline.from_clips(clips, stamp=stamp, master_ms=27000)
+    assert tl.candidates_at(4499) == [None] and tl.candidates_at(13499) == [None]
 
 
 # ── the fallback: each repro that once exempted a card ─────────────────────────────────────────
@@ -345,7 +409,14 @@ PHOTO = {"modality": "scene_image", "asset_uri": "gs://b/p.mp4", "status": "done
     (dict(PHOTO, diagram_debug={"kind": "library_photo"},
           modality_reasons=["demote→library_image:cc0($0)"]), True),
     (dict(PHOTO, card_spec={"title": "x"}), False),
-    (dict(PHOTO, diagram_debug={"kind": "key_term_highlight"}), True),
+    # `animatable` would call this a picture; the crop rule (`has_picture_pixels`) fails closed on a
+    # kind that is not a picture kind, and so does the gate: 4f6da264's `mermaid_ext` "scene_image"
+    # is a labelled diagram on screen.
+    (dict(PHOTO, diagram_debug={"kind": "key_term_highlight"}), False),
+    (dict(PHOTO, diagram_debug={"kind": "mermaid_ext"}), False),
+    (dict(PHOTO, modality_reasons=["aptness_fail→reframe"]), False),
+    (dict(PHOTO, modality_reasons=["reframed_from:h1"]), False),
+    (dict(PHOTO, modality_reasons=["reframed_from:h1", "reframed_from_beat:4"]), True),
     (dict(PHOTO, modality="video_hero", diagram_debug={"kind": "relimage"}, **VEO), False),
 ])
 def test_a_picture_with_drawn_text_is_not_full_bleed(row, expected):
@@ -354,6 +425,35 @@ def test_a_picture_with_drawn_text_is_not_full_bleed(row, expected):
     licence burns a credit (`embed_only`), a card or figure spec. Found on real pixels: 072c32c4's
     last clip is a `scene_image` photo statement whose line drifts to 12 px from the left edge."""
     assert bleeds_by_design(row) is expected
+
+
+def test_an_unvouched_reframe_crop_is_checked():
+    """Five delivered frames head once exempted show labels torn at the edge: each is a reframe
+    crop (`aptness_fail→reframe` / `prompt_blocked→reframe`) stamped `scene_image` with no
+    `reframed_from_beat`, i.e. cut before the whole-root rule from a source nobody vouched for
+    (038d4717 f_093, 1f6dd462 f_011, 3c3856d4 f_001, 5d0bc058 f_002, 726487d1 f_007)."""
+    row = dict(PHOTO, diagram_debug={"kind": "scene_image"}, ai_generated=True,
+               render_mode="parallax_2_5d", modality_reasons=["prompt_blocked→reframe"])
+    assert dt.is_unvouched_crop(row) and bleeds_by_design(row) is False
+    vouched = dict(row, modality_reasons=["reframed_from:abc", "reframed_from_beat:3"])
+    assert not dt.is_unvouched_crop(vouched) and bleeds_by_design(vouched) is True
+
+
+def test_picture_pixels_match_the_renderers_own_predicate():
+    """The mirror against `render_contract.has_picture_pixels` itself. SKIPS without workers."""
+    _renderer()
+    contract = importlib.import_module("workers.stages.visuals.render_contract")
+    for kind in (None, "scene_image", "image", "library_photo", "photo_statement", "relimage",
+                 "mermaid_ext", "concept_mermaid", "key_term_highlight", "schematic"):
+        for reasons in (None, ["demote→library_image:cc0($0)"], ["demote→library_image:embed_only($0)"],
+                        ["demote→photo_statement:cc_by($0)"], ["aptness_fail→reframe"]):
+            for modality in ("scene_image", "image", "video_hero", "diagram", None):
+                row = {"modality": modality}
+                if kind:
+                    row["diagram_debug"] = {"kind": kind}
+                if reasons:
+                    row["modality_reasons"] = list(reasons)
+                assert dt.has_picture_pixels(row) is contract.has_picture_pixels(row), row
 
 
 def test_a_reuse_or_crop_of_a_burned_still_carries_its_text():

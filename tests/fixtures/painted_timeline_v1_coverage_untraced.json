@@ -1,0 +1,73 @@
+{
+ "version": 1,
+ "master_ms": 27000,
+ "windows": [
+  {
+   "clip": 0,
+   "source_clip": 0,
+   "start_ms": 3000,
+   "end_ms": 7000,
+   "modality": "scene_image",
+   "render_mode": "still",
+   "motion_render": null,
+   "asset_kind": "image"
+  },
+  {
+   "clip": 1,
+   "source_clip": 1,
+   "start_ms": 7000,
+   "end_ms": 12000,
+   "modality": "diagram",
+   "render_mode": "still",
+   "motion_render": null,
+   "asset_kind": "image"
+  },
+  {
+   "clip": 2,
+   "source_clip": 0,
+   "start_ms": 12000,
+   "end_ms": 16000,
+   "modality": "scene_image",
+   "render_mode": "still",
+   "motion_render": null,
+   "asset_kind": "image"
+  },
+  {
+   "clip": -1,
+   "source_clip": -1,
+   "start_ms": 16000,
+   "end_ms": 19000,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 3,
+   "source_clip": 3,
+   "start_ms": 19000,
+   "end_ms": 23000,
+   "modality": "video_hero",
+   "render_mode": "video",
+   "motion_render": "veo",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 4,
+   "source_clip": 4,
+   "start_ms": 23000,
+   "end_ms": 27000,
+   "modality": "video_hero",
+   "render_mode": "still",
+   "motion_render": null,
+   "asset_kind": "image"
+  }
+ ],
+ "close": {
+  "applied": false,
+  "fade_start_ms": null,
+  "fade_ms": null,
+  "reason": "portrait_canvas"
+ },
+ "_fixture_provenance": "built by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline(); the reader ignores this key; title-card lead, coverage fill (2 <- 0), an untraced row, a reclaimed video_hero still"
+}

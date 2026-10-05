@@ -106,6 +106,16 @@ _DEMOTE_LIBRARY_IMAGE = "demote→library_image"
 _DEMOTE_PHOTO_STATEMENT = "demote→photo_statement"
 _REFRAMED_FROM = "reframed_from"
 _ATTRIBUTION_REQUIRED = frozenset({"embed_only"})
+#: ``render_contract.PICTURE_KINDS`` / ``PICTURE_MODALITIES``: the kinds (or, with no kind, the
+#: modalities) whose stored pixels are a picture. Every other kind is a render an engine drew.
+PICTURE_KINDS = frozenset({"scene_image", "image", "library_photo"})
+PICTURE_MODALITIES = frozenset({"scene_image", "image"})
+#: The degrade ladder's reframe crop: ``<why>→reframe`` decision reasons, ``reframed_from:<hash>``,
+#: and ``reframed_from_beat:<n>``, which only a crop cut under the whole-root rule (2026-09-23)
+#: carries. A crop without it "names a source nobody vouched for" (``render_contract``), and some were
+#: cut from labelled diagrams (workers names 200227db; qa #184 opened five more).
+_REFRAME_RUNG = "→reframe"
+_REFRAMED_FROM_BEAT = "reframed_from_beat"
 
 #: Diagnoses, so a reader can say WHY an instant is unknown.
 STAMP = "stamp"
@@ -176,17 +186,23 @@ def _reframe_source(row: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _is_photo_statement(row: Mapping[str, Any]) -> bool:
+    """``render_contract.is_photo_statement``: by kind, or by its declared demote reason."""
+    if _clip_kind(row) == PHOTO_STATEMENT_KIND:
+        return True
+    return any((p := _demote(r)) is not None and p[0] == _DEMOTE_PHOTO_STATEMENT for r in _reasons(row))
+
+
+def _carries_burned_credit(row: Mapping[str, Any]) -> bool:
+    """``render_contract.carries_burned_credit``: a library serve whose licence burns a credit."""
+    return any((p := _demote(r)) is not None and p[1] in _ATTRIBUTION_REQUIRED for r in _reasons(row))
+
+
 def burns_text_itself(row: Mapping[str, Any]) -> bool:
     """``animatable._burns_text_itself``: the row's own record says its still carries drawn words: a
-    text-bearing kind (a ``relimage`` band), a photo statement (by kind or by its demote reason), or
-    a library photo whose licence burns a credit into the bytes."""
-    if _clip_kind(row) in TEXT_BEARING_KINDS or _clip_kind(row) == PHOTO_STATEMENT_KIND:
-        return True
-    for reason in _reasons(row):
-        parsed = _demote(reason)
-        if parsed and (parsed[0] == _DEMOTE_PHOTO_STATEMENT or parsed[1] in _ATTRIBUTION_REQUIRED):
-            return True
-    return False
+    text-bearing kind (a ``relimage`` band), a photo statement, or a burned licence credit."""
+    return (_clip_kind(row) in TEXT_BEARING_KINDS or _is_photo_statement(row)
+            or _carries_burned_credit(row))
 
 
 def burned_text_stills(clips: Sequence[Any] | None) -> frozenset[str]:
@@ -205,6 +221,32 @@ def burned_text_stills(clips: Sequence[Any] | None) -> frozenset[str]:
     return frozenset(burned)
 
 
+def has_picture_pixels(row: Mapping[str, Any]) -> bool:
+    """``render_contract.has_picture_pixels``: are the stored pixels a picture with no engine-drawn
+    words? Not a photo statement or a burned credit; a library serve is; then the KIND decides
+    (``PICTURE_KINDS``), and only a row with no kind falls back to its modality. Fail closed: the
+    renderer's own rule, because the other direction delivers a torn label."""
+    if _is_photo_statement(row) or _carries_burned_credit(row):
+        return False
+    for reason in _reasons(row):
+        parsed = _demote(reason)
+        if parsed and parsed[0] == _DEMOTE_LIBRARY_IMAGE:
+            return True
+    kind = _clip_kind(row)
+    if kind:
+        return kind in PICTURE_KINDS
+    return _lower(row.get("modality")) in PICTURE_MODALITIES
+
+
+def is_unvouched_crop(row: Mapping[str, Any]) -> bool:
+    """A reframe crop that does not carry ``reframed_from_beat``: its source was never vouched for as a
+    root picture, so its pixels may be a crop of a labelled figure, whatever the row's own kind says
+    (a reframe is always stamped ``scene_image``)."""
+    reasons = [str(r) for r in _reasons(row)]
+    crop = any(_REFRAME_RUNG in r or r.startswith(_REFRAMED_FROM + ":") for r in reasons)
+    return crop and not any(r.startswith(_REFRAMED_FROM_BEAT + ":") for r in reasons)
+
+
 def carries_drawn_text(row: Mapping[str, Any], burned: frozenset[str] = frozenset()) -> bool:
     """The negation of ``animatable.is_animatable_still`` for a picture modality: a card or figure
     spec, drawn words in its own still, or a reuse or crop of a still that has them."""
@@ -214,16 +256,21 @@ def carries_drawn_text(row: Mapping[str, Any], burned: frozenset[str] = frozense
 
 
 def bleeds_by_design(row: Mapping[str, Any] | None, burned: frozenset[str] = frozenset()) -> bool:
-    """Whether the painted asset legitimately fills every edge AND carries no drawn text: a picture
-    modality (``scene_image``, or a ``video_hero`` with Veo evidence) that ``animatable`` would also
-    call a picture with no burned-in text. A photo statement, a ``relimage`` band or a burned licence
-    credit is text the edge rule must see, whatever the modality says. ``None`` never bleeds."""
+    """Whether the painted asset legitimately fills every edge AND carries no drawn text: a
+    ``scene_image`` whose stored pixels are a picture (``has_picture_pixels``), or a ``video_hero`` with
+    Veo evidence; in both cases no burned text (``animatable``) and no unvouched reframe crop. A photo
+    statement, a ``relimage`` band, a burned credit, a diagram kind under a picture modality or a crop
+    of an unknown source is text the edge rule must see. ``None`` never bleeds."""
     if not row:
         return False
     modality = _lower(row.get("modality"))
-    if modality not in FULL_BLEED_MODALITIES or carries_drawn_text(row, burned):
+    if (modality not in FULL_BLEED_MODALITIES or carries_drawn_text(row, burned)
+            or is_unvouched_crop(row)):
         return False
-    return modality != "video_hero" or has_veo_evidence(row)
+    if modality == "video_hero":
+        # The pixels are Veo's, not the still's, so the still's (often stale) kind says nothing.
+        return has_veo_evidence(row)
+    return has_picture_pixels(row)
 
 
 def _is_number(value: Any) -> bool:
@@ -348,7 +395,7 @@ class DeliveredTimeline:
         windows for one clip, possible on a stamp, are reported as their envelope."""
         out: dict[int, tuple[int, int]] = {}
         for w in self.windows:
-            if not math.isfinite(w.end_ms) or w.end_ms <= w.start_ms:
+            if w.clip < 0 or not math.isfinite(w.end_ms) or w.end_ms <= w.start_ms:
                 continue
             lo, hi = int(w.start_ms), int(w.end_ms)
             if w.clip in out:
@@ -359,9 +406,26 @@ class DeliveredTimeline:
 
 # ── the stamp ──────────────────────────────────────────────────────────────────────────────────
 
+#: ``painted_timeline.UNTRACED``: the producer could not trace a window back to a clip row.
+UNTRACED_INDEX = -1
+
+
+def _index(value: Any, n: int) -> int | None:
+    """A window's ``clip`` / ``source_clip``: an index into ``visual.clips``, or ``UNTRACED_INDEX``.
+    None when it is neither (a malformed or stale stamp)."""
+    if isinstance(value, int) and not isinstance(value, bool) and UNTRACED_INDEX <= value < n:
+        return value
+    return None
+
+
 def _from_stamp(stamp: Any, clips: list[Any],
                 master_ms: float | None) -> tuple[DeliveredTimeline | None, str | None]:
-    """The stamped timeline, or ``(None, why)`` when the stamp cannot be trusted."""
+    """The stamped timeline, or ``(None, why)`` when the stamp cannot be trusted.
+
+    A window the producer could not trace (``clip`` or ``source_clip`` is -1) is still a painted span,
+    but nothing says whose pixels it holds, so its content is UNKNOWN. So is a window whose source row
+    no longer has the window's modality: ``clip`` indexes the array the assembler was handed, and a
+    racing pass can re-persist ``visual.clips`` after the mux (workers ``painted_timeline.py``)."""
     if not isinstance(stamp, Mapping):
         return None, "not_a_mapping"
     if stamp.get("version") != STAMP_VERSION:
@@ -378,23 +442,24 @@ def _from_stamp(stamp: Any, clips: list[Any],
     for w in raw:
         if not isinstance(w, Mapping):
             return None, "window_not_a_mapping"
-        clip, start, end = w.get("clip"), w.get("start_ms"), w.get("end_ms")
-        if not (isinstance(clip, int) and not isinstance(clip, bool) and 0 <= clip < len(clips)
-                and _is_number(start) and _is_number(end) and end > start):
+        clip, source = _index(w.get("clip"), len(clips)), _index(w.get("source_clip"), len(clips))
+        start, end = w.get("start_ms"), w.get("end_ms")
+        if clip is None or source is None or not (_is_number(start) and _is_number(end) and end > start):
             return None, "malformed_window"
         painted: dict[str, Any] = {k: w.get(k) for k in ("modality", "render_mode",
                                                          "motion_render", "asset_kind")}
-        painted["clip"] = clip
-        source = w.get("source_clip")
-        if isinstance(source, int) and not isinstance(source, bool) and 0 <= source < len(clips):
-            painted["source_clip"] = source
-            if isinstance(clips[source], Mapping):
-                for key in ("asset_uri", "diagram_debug", "modality_reasons", "content_hash",
-                            "card_spec", "diagram_spec"):
-                    painted[key] = clips[source].get(key)
-        windows.append(Window(clip, float(start), float(end), painted, True))
+        painted.update(clip=clip, source_clip=source)
+        known = clip != UNTRACED_INDEX and source != UNTRACED_INDEX
+        if known:
+            src = clips[source] if isinstance(clips[source], Mapping) else {}
+            known = _lower(src.get("modality")) == _lower(painted.get("modality"))
+            for key in ("asset_uri", "diagram_debug", "modality_reasons", "content_hash",
+                        "card_spec", "diagram_spec"):
+                painted[key] = src.get(key)
+        windows.append(Window(clip, float(start), float(end), painted, known))
     windows.sort(key=lambda w: (w.start_ms, w.end_ms))
-    spans = tuple((w.start_ms - CUT_EARLY_MS, w.end_ms + CUT_LATE_MS, w.fields) for w in windows)
+    spans = tuple((w.start_ms - CUT_EARLY_MS, w.end_ms + CUT_LATE_MS, w.fields if w.known else None)
+                  for w in windows)
     return DeliveredTimeline(STAMP, STAMP, tuple(windows), _first_ms=windows[0].start_ms,
                              _spans=spans, _span_starts=tuple(s[0] for s in spans)), None
 
