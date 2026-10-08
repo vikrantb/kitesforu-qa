@@ -71,6 +71,21 @@ def _by_check(art) -> tuple:
     return sr, {c["check_id"]: c for c in sr.data["checks"]}
 
 
+#: What each check says when it failed ON A WORD, as opposed to any other failure.
+_FAILED_ON = {"visual.text_not_edge_cropped": "touches the frame edge",
+              "visual.text_in_safe_area": "safe area over"}
+
+
+def _failed_on_a_word(check: dict) -> None:
+    """The check read frames and failed on text. A check that RAISES is recorded as failed
+    (``check raised: …``, harness/check.py), so a bare ``not passed`` went green with no frame
+    read at all: in a venv without Pillow every "must fail" pin here passed (#179 round-1 claims
+    SF). The evidence must name the failure the pin is about."""
+    assert not check["skipped"], check["evidence"]
+    assert not check["passed"], check["evidence"]
+    assert _FAILED_ON[check["check_id"]] in str(check["evidence"]), check["evidence"]
+
+
 def test_edge_clipped_text_fails_both_checks_and_gates_the_dimension(tmp_path):
     # x=-40 draws the label PARTLY off-canvas — the VISIBLE remainder is truncated at x=0, the
     # literal pixel-level "chopped at the frame edge" bug (not merely "close to the edge").
@@ -79,12 +94,10 @@ def test_edge_clipped_text_fails_both_checks_and_gates_the_dimension(tmp_path):
     sr, by = _by_check(art)
 
     crit = by["visual.text_not_edge_cropped"]
-    assert not crit["skipped"], crit["evidence"]
-    assert not crit["passed"], f"expected edge-clipped text to FAIL: {crit['evidence']}"
+    _failed_on_a_word(crit)  # edge-clipped text must FAIL on the word
 
     adv = by["visual.text_in_safe_area"]
-    assert not adv["skipped"], adv["evidence"]
-    assert not adv["passed"], f"edge-clipped text is also outside the safe area: {adv['evidence']}"
+    _failed_on_a_word(adv)  # edge-clipped text is also outside the safe area
 
     # a CRITICAL check failing must gate the whole dimension (battery.py's _GATING contract)
     assert not sr.passed, "critical text_not_edge_cropped failure must fail the dimension gate"
@@ -101,8 +114,7 @@ def test_crowded_but_not_clipped_text_fails_only_the_advisory_check(tmp_path):
     assert crit["passed"], f"x=50 is >3px from the edge — must NOT be flagged as clipped: {crit['evidence']}"
 
     adv = by["visual.text_in_safe_area"]
-    assert not adv["skipped"], adv["evidence"]
-    assert not adv["passed"], f"x=50 < {_MARGIN_PX}px margin — must be flagged advisory: {adv['evidence']}"
+    _failed_on_a_word(adv)  # x=50 < the safe-area margin: flagged advisory
 
     # advisory (low severity) never gates the dimension on its own.
     assert sr.passed, "an advisory-only failure must not fail the gate"
@@ -136,3 +148,101 @@ def test_no_video_skips_cleanly():
     assert by["visual.text_not_edge_cropped"]["skipped"]
     assert by["visual.text_in_safe_area"]["skipped"]
     assert sr.passed
+
+
+def test_a_cut_word_mid_beat_is_caught_though_the_beat_ends_clean(tmp_path):
+    """The canary's shape (job 29355571, "Air molecu"): an engine tour cuts a neighbour mid-dwell and
+    ends on its widest view, so the last ~500ms is clean. The edge-cut label shows only from 1 s to 3 s
+    of a 6 s beat; a centred label holds throughout. Sampled only at its tail the beat passed; sampled
+    across its window it fails."""
+    video = str(tmp_path / "tour.mp4")
+    _ffmpeg(
+        "-f", "lavfi", "-i", f"color=c=0x0b1020:s={_W}x{_H}:d=6",
+        "-vf", "drawtext=text='EDGE LABEL':x=-40:y=500:fontsize=54:fontcolor=white:enable='between(t,1,3)',"
+               "drawtext=text='CENTRE LABEL':x=800:y=700:fontsize=54:fontcolor=white",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", video,
+    )
+    doc = _diagram_doc()
+    doc["visual_clips"][0]["end_ms"] = 6000
+    art = Artifact.from_doc(doc, video_path=video)
+    sr, by = _by_check(art)
+    crit = by["visual.text_not_edge_cropped"]
+    _failed_on_a_word(crit)  # a word cut mid-beat must fail
+    assert not sr.passed
+
+
+def test_the_beat_is_sampled_across_its_window_and_at_its_tail():
+    from kitesforu_qa.harness.checks.visual import _beat_sample_times
+
+    assert _beat_sample_times(0.0, 6.0) == [0.5, 1.5, 3.5, 4.5, 5.5]   # 4 spread, last interior kept, + tail
+    assert _beat_sample_times(0.0, 20.0) == [0.5, 6.5, 12.5, 18.5, 19.5]  # no 5 s hole before the tail
+    assert _beat_sample_times(10.0, 10.4) == [10.0]                      # a sliver: its start
+    assert _beat_sample_times(0.0, 2.0) == [0.5, 1.5]                    # the tail is 1.5 itself
+
+
+# ── The OCR reader itself: what counts as a word, and what a failure means (#179 round-1 critic) ──
+
+_TSV_HEAD = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"
+
+
+def _tsv(*rows):
+    return "\n".join([_TSV_HEAD] + ["\t".join(map(str, r)) for r in rows]) + "\n"
+
+
+class _Img:
+    size = (1920, 1080)
+
+    def save(self, path):
+        open(path, "wb").close()
+
+
+def _fake_tesseract(monkeypatch, *, stdout="", rc=0, missing=False):
+    import subprocess
+
+    real = subprocess.run
+
+    def run(args, *a, **kw):
+        if args and args[0] == "tesseract":
+            if missing:
+                raise FileNotFoundError("tesseract")
+            return subprocess.CompletedProcess(args, rc, stdout=stdout, stderr="boom" if rc else "")
+        return real(args, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_the_reader_keeps_words_and_drops_what_is_not_text(monkeypatch):
+    """Structure rows (conf -1), blanks, low confidence, a lone glyph (an AI badge's `·` read as `-`)
+    and a box taller than a quarter of the frame (texture read as a word) are not words."""
+    from kitesforu_qa.harness.checks.visual import _ocr_words
+
+    _fake_tesseract(monkeypatch, stdout=_tsv(
+        (1, 1, 0, 0, 0, 0, 0, 0, 1920, 1080, -1, ""),
+        (5, 1, 1, 1, 1, 1, 10, 500, 180, 50, 91, "molecu"),
+        (5, 1, 1, 1, 1, 2, 300, 500, 60, 50, 12, "noise"),
+        (5, 1, 1, 1, 1, 3, 400, 500, 20, 50, 95, "   "),
+        (5, 1, 1, 1, 1, 4, 1483, 2, 12, 45, 88, "-"),
+        (5, 1, 1, 1, 1, 5, 0, 0, 1488, 991, 60, "Whe"),
+        (5, 1, 1, 1, 1, 6, 700, 600, 120, 48, 90, "Café"),
+    ))
+    assert [w for w, *_ in _ocr_words(_Img())] == ["molecu", "Café"]
+
+
+def test_a_failing_tesseract_run_is_an_error_not_zero_words(monkeypatch):
+    """A non-zero exit with empty output must not read as "no words on this frame", which PASSES."""
+    from kitesforu_qa.harness.checks.visual import _ocr_words
+
+    _fake_tesseract(monkeypatch, rc=1)
+    with pytest.raises(RuntimeError):
+        _ocr_words(_Img())
+
+
+def test_a_missing_tesseract_skips_the_check_never_passes_it(tmp_path, monkeypatch):
+    """Fail-open means SKIP: no OCR available must never read as a clean frame. On the edge-clipped
+    fixture a PASS here would hide exactly the cut the check exists for."""
+    video = _diagram_video_with_text(str(tmp_path / "edge.mp4"), x=-40)
+    _fake_tesseract(monkeypatch, missing=True)
+    art = Artifact.from_doc(_diagram_doc(), video_path=video)
+    _sr, by = _by_check(art)
+    for cid in ("visual.text_not_edge_cropped", "visual.text_in_safe_area"):
+        assert by[cid]["skipped"], by[cid]
