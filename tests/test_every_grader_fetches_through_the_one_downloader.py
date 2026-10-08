@@ -241,10 +241,12 @@ def test_frame_proof_holds_the_stamp_to_the_master_it_fetched(tmp_path, monkeypa
     monkeypatch.setattr(firestore, "Client", lambda project=None: _Firestore(doc))
     monkeypatch.setattr(dt, "read_sidecar", lambda d: SidecarRead("read", "u", parsed=stamp, bytes_read=1))
     fp = _load("frame_proof")
-    monkeypatch.setattr(fp, "download", _writes(master.read_bytes(), generation=111))
+    seen = []
+    monkeypatch.setattr(fp, "download", _writes(master.read_bytes(), generation=111, seen=seen))
     monkeypatch.setattr(sys, "argv", ["frame_proof.py", "j"])
     assert fp.main() == 0
     assert f"timeline: {source}" in capsys.readouterr().out
+    assert not pathlib.Path(seen[0][1]).parent.exists()       # the master went with the run
 
 
 def test_frame_proof_reports_an_unfetchable_master(tmp_path, monkeypatch, capsys):
@@ -433,3 +435,17 @@ def test_perclip_lit_census_counts_a_fetch_failure_apart(tmp_path, monkeypatch, 
     with pytest.raises(SystemExit, match="FETCH FAILED on all 3 fetched assets"):
         plc.main()
     assert "measured=0 skipped=4 (not gs:// 1, fetch failed 3, no frame 0)" in capsys.readouterr().out
+
+
+def test_perclip_lit_census_measures_what_it_fetched_and_keeps_nothing(tmp_path, monkeypatch, capsys):
+    from google.cloud import firestore
+
+    plc = _load("perclip_lit_census")
+    seen = []
+    monkeypatch.setattr(firestore, "Client", lambda project=None: _Firestore({"visual": {"clips": CLIPS}}))
+    monkeypatch.setattr(plc, "download", _writes(b"png", seen=seen))
+    monkeypatch.setattr(plc, "_gray_frame", lambda path, is_video: bytes([10, 200] * 50))
+    monkeypatch.setattr(sys, "argv", ["perclip_lit_census.py", "job-1"])
+    plc.main()
+    assert "measured=3 skipped=0 (not gs:// 0, fetch failed 0, no frame 0)" in capsys.readouterr().out
+    assert len(seen) == 3 and not any(pathlib.Path(p).parent.exists() for _, p in seen)

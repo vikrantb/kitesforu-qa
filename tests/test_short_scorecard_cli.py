@@ -182,6 +182,25 @@ def test_main_writes_out_file_when_requested(sc, tmp_path) -> None:
     assert written["job_id"] == "offline-2"
 
 
+def test_main_scores_the_downloaded_video_and_keeps_nothing(sc, tmp_path, monkeypatch, capsys) -> None:
+    """Round 2: the video was downloaded into a ``mkdtemp`` that nobody deleted."""
+    from kitesforu_qa.integrations.download import Downloaded
+
+    seen = []
+
+    def fake(uri, local_path, **_kw):
+        seen.append(local_path)
+        Path(local_path).write_bytes(b"not really an mp4")
+        return Downloaded(uri, local_path, 17, None, "video/mp4")
+
+    monkeypatch.setattr(sc, "download", fake)
+    doc_file = tmp_path / "job.json"
+    doc_file.write_text(json.dumps({"job_id": "offline-3", "format": "short_video",
+                                    "visual": {"video_url": "https://storage.googleapis.com/b/v.mp4"}}))
+    assert sc.main(["--doc-file", str(doc_file)]) == 0
+    assert len(seen) == 1 and not Path(seen[0]).parent.exists()
+
+
 def test_main_requires_job_id_or_doc_file(sc) -> None:
     with pytest.raises(SystemExit):
         sc.main([])
