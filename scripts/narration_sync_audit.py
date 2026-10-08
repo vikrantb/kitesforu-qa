@@ -31,7 +31,9 @@ from statistics import median
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from job_status import TERMINAL  # noqa: E402  (one list for every qa poller)
 from kitesforu_qa.harness.checks.video_sync import _parse_vtt_cues  # noqa: E402
 from kitesforu_qa.harness.narration_alignment import (  # noqa: E402
     Cue,
@@ -54,7 +56,11 @@ def _cues(doc: dict[str, Any]) -> list[Cue]:
     return [Cue(c["start_ms"], c["end_ms"], c.get("text") or "") for c in _parse_vtt_cues(vtt)]
 
 
-_TERMINAL = {"completed", "failed_qa", "failed"}
+# Every terminal status, from the one list every qa poller reads. This was
+# {"completed", "failed_qa", "failed"}, so the census silently dropped every finished
+# `needs_review` episode, the held ones, and every `cancelled` one (kitesforu-qa #175 round-2
+# design D1). A terminal doc is not mid-flight, which is what this filter exists to require.
+_TERMINAL = TERMINAL
 
 
 def _cards(doc: dict[str, Any], clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
