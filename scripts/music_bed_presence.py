@@ -24,6 +24,10 @@ USAGE:  python3 scripts/music_bed_presence.py [N]     # N = pairs to sample (def
 from __future__ import annotations
 import json, os, subprocess, sys, tempfile
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 CUTOVER = datetime(2026, 7, 1, tzinfo=timezone.utc)   # masters exist only after this
 
@@ -70,13 +74,21 @@ def main() -> int:
     pairs = _pairs(want)
     print(f"selected {len(pairs)} post-{CUTOVER:%Y-%m} pairs")
     rows = []
+    unfetched: list[tuple[str, str]] = []   # counted and printed: a pair that never downloads is not
+    tiny: list[str] = []                    # silently out of the population
     with tempfile.TemporaryDirectory() as tmp:
         for jid, m, s in pairs:
             a, b = f"{tmp}/{jid[:8]}_m.mp3", f"{tmp}/{jid[:8]}_s.mp3"
             ok = True
             for p, u in ((a, m), (b, s)):
-                subprocess.run(["curl", "-sSL", "-m", "120", "-o", p, u], capture_output=True)
-                if not os.path.exists(p) or os.path.getsize(p) < 5000:
+                try:
+                    got = download(u, p)
+                except DownloadError as exc:
+                    unfetched.append((jid[:8], str(exc)[:120]))
+                    ok = False
+                    break
+                if got.size < 5000:
+                    tiny.append(jid[:8])
                     ok = False
                     break
             if not ok:
@@ -95,6 +107,7 @@ def main() -> int:
                 continue
             diff = dm[quiet] - ds[quiet]
             rows.append((jid[:8], k, float(np.median(diff)), float((diff > 6.0).mean() * 100)))
+    print(f"pairs not fetched: {len(unfetched)} {unfetched[:4]}; under 5000 bytes: {len(tiny)} {tiny[:4]}")
     rows.sort(key=lambda r: r[3])
     print(f"\n{'job':10s} {'frames':>7s} {'median dB':>10s} {'% frames >6dB':>14s}")
     for jid, k, med, pct in rows:

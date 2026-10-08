@@ -40,12 +40,15 @@ import sys
 import tempfile
 from typing import Any, Optional
 
-# Reading Firestore and then forking (gsutil, ffprobe, ffmpeg, git) stalls ~62.7 s while gRPC fork
-# support is on (measured on the gate by qa #184's round-2 latency lens). No child makes a gRPC call.
+# Reading Firestore and then forking (ffprobe, ffmpeg, git) stalls ~62.7 s while gRPC fork support is
+# on and the client was just dropped (measured on the gate by qa #184's round 2). No child makes a
+# gRPC call.
 os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, stamp_note  # noqa: E402
+from kitesforu_qa.harness.painted_timeline_sidecar import FetchedMaster  # noqa: E402
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 _W, _H = 96, 171
 _N = _W * _H
@@ -100,8 +103,8 @@ def _score(diffs: list[float]) -> dict[str, Any]:
 
 def _timeline_lines(timeline: DeliveredTimeline) -> list[str]:
     """What this tool prints about the timeline it measured against: where it came from, why a stamp
-    the job named was not used, and whether a used stamp was held to the master OBJECT. This tool
-    compares no object, so a used stamp's identity reads "unchecked" rather than nothing."""
+    the job named was not used, and whether a used stamp was held to the master OBJECT the
+    downloader fetched (``verified``) or could not be (``unchecked``)."""
     why = f"; {timeline.stamp_rejected}" if timeline.stamp_rejected else ""
     identity = f"; master identity {timeline.master_identity}" if timeline.master_identity else ""
     lines = [f"\n  timeline: {timeline.source} ({timeline.diagnosis}{why}{identity})"]
@@ -121,6 +124,7 @@ def main() -> int:
     path = args.file
     clips: list[dict] = []
     job: dict = {}
+    fetched: FetchedMaster | None = None
     if not path:
         if not args.job_id:
             print("need a job_id or --file", file=sys.stderr)
@@ -143,17 +147,15 @@ def main() -> int:
             return 1
         clips = [c for c in (vis.get("clips") or []) if isinstance(c, dict)]
         path = f"{tempfile.mkdtemp()}/master.mp4"
-        if url.startswith("gs://"):
-            subprocess.run(["gsutil", "-q", "cp", url, path], check=True)
-        elif url.startswith("http"):
-            # Fetch via gsutil, NOT urllib: a public storage.googleapis.com URL still fails local
-            # `urlopen` with CERTIFICATE_VERIFY_FAILED on a stock macOS python, and gsutil is
-            # already required by the gs:// branch. Translate the public form back to gs://.
-            gs = url.replace("https://storage.googleapis.com/", "gs://", 1)
-            subprocess.run(["gsutil", "-q", "cp", gs, path], check=True)
-        else:
-            print(f"job {args.job_id}: unrecognised video_url scheme: {url!r}", file=sys.stderr)
+        # The shared downloader, https and gs:// alike. It reports the object it fetched (its GCS
+        # generation and the bytes on disk), so a producer's painted timeline is held to THIS master
+        # (``stale_master``); gsutil reported nothing, and this script had the length check only.
+        try:
+            got = download(url, path)
+        except DownloadError as exc:
+            print(f"job {args.job_id}: could not fetch {url}: {exc}", file=sys.stderr)
             return 1
+        fetched = FetchedMaster(got.generation, got.size)
 
     span = _probe_duration(path)
     whole = _score(_diffs(path))
@@ -170,10 +172,10 @@ def main() -> int:
     # producer's sidecar when it reads, else the estimate from the persisted claims (consecutive
     # starts, never `duration_ms`; the last window runs to the master span, as `resolve_bounds`
     # does). The line below says which.
-    # No master object is passed: this tool does not compare the fetched master's generation and
-    # size with the stamp's, and a used stamp says so. A probe of 0 s is an unknown length, so a
-    # stamp with nothing else to tie it to this video is not used (``delivered_timeline.UNTIED``).
-    timeline = DeliveredTimeline.from_job(job, master_ms=span * 1000)
+    # The master the downloader fetched is passed, so a stamp that names another object is
+    # ``stale_master``. A probe of 0 s is an unknown length, so a stamp with nothing else to tie it
+    # to this video is not used (``delivered_timeline.UNTIED``).
+    timeline = DeliveredTimeline.from_job(job, master_ms=span * 1000, master=fetched)
     for line in _timeline_lines(timeline):
         print(line)
     print(f"\n  {'start':>6} {'win':>6} {'mode':14} {'kind':20} {'median':>8}  verdict")

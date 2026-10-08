@@ -43,6 +43,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .integrations.download import DownloadError, download
 from .profiles import get_profile
 from .stages.listen_test import (
     GenreProfile,
@@ -186,37 +187,6 @@ def load_job_context(job_id: str) -> Optional[JobAudioContext]:
 
 
 # ---------------------------------------------------------------------------
-# GCS download (single file)
-# ---------------------------------------------------------------------------
-
-
-def _gcs_download(uri: str, dest_path: str) -> bool:
-    """Download a single gs:// blob. Returns True on success, False
-    when the blob is missing / google-cloud-storage isn't installed.
-    Never raises — the verifier degrades gracefully on missing inputs."""
-    try:
-        from google.cloud import storage  # type: ignore[import-not-found]
-        from urllib.parse import urlparse
-    except ImportError:
-        return False
-    try:
-        parsed = urlparse(uri)
-        if parsed.scheme != "gs":
-            return False
-        bucket = parsed.netloc
-        blob_path = parsed.path.lstrip("/")
-        client = storage.Client()
-        blob = client.bucket(bucket).blob(blob_path)
-        if not blob.exists(client=client):
-            return False
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        blob.download_to_filename(dest_path)
-        return True
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
 # Public entry point — verify a single job by id
 # ---------------------------------------------------------------------------
 
@@ -285,24 +255,34 @@ def verify_job_live(
     speech_path = os.path.join(work_dir, f"{job_id}.speech_only.mp3")
 
     try:
-        if not ctx.audio_gcs_uri or not _gcs_download(
-            ctx.audio_gcs_uri, audio_path,
-        ):
-            return LiveVerifyResult(
-                context=ctx, report=None,
-                error=(
-                    f"could not download {ctx.audio_gcs_uri} "
-                    "(missing google-cloud-storage, missing blob, or "
-                    "permission denied)"
-                ),
-            )
+        # The shared downloader: a failure RAISES DownloadError, and only a source that says the
+        # object does not exist (``not_found``) may be read as an absence.
+        if not ctx.audio_gcs_uri:
+            return LiveVerifyResult(context=ctx, report=None,
+                                    error="no master audio URI for this job")
+        try:
+            download(ctx.audio_gcs_uri, audio_path)
+        except DownloadError as exc:
+            return LiveVerifyResult(context=ctx, report=None,
+                                    error=f"could not download {ctx.audio_gcs_uri}: {exc}")
 
         speech_local: Optional[str] = None
-        if ctx.speech_only_gcs_uri and _gcs_download(
-            ctx.speech_only_gcs_uri, speech_path,
-        ):
-            speech_local = speech_path
-        else:
+        speech_missing = not ctx.speech_only_gcs_uri
+        if ctx.speech_only_gcs_uri:
+            try:
+                download(ctx.speech_only_gcs_uri, speech_path)
+                speech_local = speech_path
+            except DownloadError as exc:
+                if not exc.not_found:
+                    # A 403, an expired credential or a dropped connection is not a legacy job: grading
+                    # on would drop four axes under a false label.
+                    return LiveVerifyResult(
+                        context=ctx, report=None,
+                        error=(f"could not download {ctx.speech_only_gcs_uri}: {exc}. It is not "
+                               f"reported missing, so this is not read as a legacy job."),
+                    )
+                speech_missing = True
+        if speech_missing:
             ctx.notes.append(
                 "speech_only.mp3 not in GCS (legacy pre-PR-737 job?) — "
                 "STOI/SMR/music_presence/SFX axes will not grade"

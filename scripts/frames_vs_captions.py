@@ -36,16 +36,14 @@ import argparse
 import json
 import os
 import pathlib
-import shutil
-import ssl
 import subprocess
 import sys
-import urllib.request
 
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "src"))
 
 from kitesforu_qa.harness.checks.video_sync import _parse_vtt_cues  # noqa: E402
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 
 def _fetch_job(job_id: str, project: str) -> dict:
@@ -75,28 +73,14 @@ def _surfaced_url(job: dict) -> str:
 
 
 def _download(url: str, dest: pathlib.Path) -> None:
-    """Fetch the master, surviving a macOS Python with no usable trust store.
-
-    A framework Python on macOS ships no CA bundle, so ``urlretrieve`` dies with
-    CERTIFICATE_VERIFY_FAILED on a perfectly valid storage.googleapis.com URL. That failure
-    is about the LOCAL interpreter, not the artifact — reporting it as "could not fetch the
-    video" would read as a pipeline defect. Try certifi, then fall back to curl, and only
-    then admit defeat."""
+    """Fetch the master through the shared downloader (``integrations.download``), which brings its
+    own CA bundle. A failure exits with its cause. The old path tried certifi, then curl, because a
+    python.org framework python without its CA bundle installed fails ``urlretrieve`` with
+    CERTIFICATE_VERIFY_FAILED; that failure is about the LOCAL interpreter, not the artifact."""
     try:
-        import certifi  # noqa: PLC0415
-
-        ctx = ssl.create_default_context(cafile=certifi.where())
-        with urllib.request.urlopen(url, context=ctx) as r, dest.open("wb") as f:  # noqa: S310
-            shutil.copyfileobj(r, f)
-        return
-    except Exception:  # noqa: BLE001 — fall through to curl
-        pass
-    rc = subprocess.run(["curl", "-fsSL", "-o", str(dest), url], check=False).returncode
-    if rc != 0 or not dest.exists() or dest.stat().st_size == 0:
-        raise SystemExit(
-            f"could not fetch the master ({url[:80]}). Neither certifi nor curl worked — "
-            "this is a LOCAL fetch failure, not evidence about the artifact."
-        )
+        download(url, str(dest))
+    except DownloadError as exc:
+        raise SystemExit(f"could not fetch the master ({url[:80]}): {exc}") from exc
 
 
 def _duration_ms(path: str) -> int:

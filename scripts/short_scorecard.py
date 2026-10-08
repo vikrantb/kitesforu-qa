@@ -34,6 +34,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
+from kitesforu_qa.integrations.download import download  # noqa: E402
 from kitesforu_qa.scorecard import ScorecardConfig, score_short  # noqa: E402
 
 
@@ -53,23 +54,22 @@ def fetch_job_doc(project: str, job_id: str) -> dict[str, Any]:
 
 
 def resolve_video(video: str | None, doc: dict[str, Any], work_dir: str) -> str | None:
-    """Return a LOCAL filesystem path to the rendered MP4, downloading a ``gs://`` URI via
-    ``gsutil`` if needed. Falls back to the doc's own ``visual.video_burned_url``/``video_url``
-    when ``--video`` isn't passed. Returns ``None`` (never raises) when no video can be resolved —
-    the video-dependent axes then degrade honestly rather than crash the whole run."""
+    """Return a LOCAL filesystem path to the rendered MP4: a local path as it is, else the URI
+    fetched by the shared downloader (https and gs:// alike). Falls back to the doc's own
+    ``visual.video_burned_url``/``video_url`` when ``--video`` isn't passed.
+
+    ``None`` only when no video is named at all. A download that fails, or a ``--video`` that is
+    neither a file nor a URI, RAISES ``DownloadError``: before, an https ``video_url`` (the form the
+    pipeline persists) came back ``None`` and every video-dependent axis degraded on nothing."""
     uri = video or (doc.get("visual") or {}).get("video_burned_url") or (doc.get("visual") or {}).get("video_url")
     if not uri:
         return None
     uri = str(uri)
-    if not uri.startswith("gs://"):
-        return uri if os.path.exists(uri) else None
-    dest = os.path.join(work_dir, os.path.basename(uri) or "episode_video.mp4")
-    try:
-        subprocess.run(["gsutil", "-q", "cp", uri, dest], check=True, timeout=180)
-        return dest
-    except Exception as exc:  # noqa: BLE001 — degrade, don't crash the whole scorecard run
-        print(f"warning: gsutil cp failed for {uri}: {exc}", file=sys.stderr)
-        return None
+    if os.path.exists(uri):
+        return uri
+    job_id = str(doc.get("job_id") or doc.get("id") or "job")
+    name = os.path.basename(uri.split("?", 1)[0]) or "episode_video.mp4"
+    return download(uri, os.path.join(work_dir, f"{job_id}_{name}")).path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

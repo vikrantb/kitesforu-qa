@@ -30,9 +30,10 @@ THE MASTER IT DESCRIBES. The sidecar and its master sit at fixed paths, both ove
 master first, so a pass that dies between the two leaves an older sidecar beside a newer master, and
 a re-assembly over the same audio keeps the same length. The producer therefore records the uploaded
 master blob's ``master_generation`` and ``master_size`` (two optional v1 fields). :class:`FetchedMaster`
-is the same pair for the master the reader actually fetched: the ``x-goog-generation`` header of that
-GET and the size of the bytes on disk. Every field that both sides carry is compared, and any mismatch
-means the stamp describes another master (``DeliveredTimeline`` rejects it as ``stale_master``).
+is the same pair for the master the reader actually fetched, as ``integrations.download`` reports it:
+the GCS generation of that fetch and the size of the bytes on disk. Every field that both sides carry
+is compared, and any mismatch means the stamp describes another master (``DeliveredTimeline``
+rejects it as ``stale_master``).
 
 Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
@@ -218,8 +219,9 @@ def load_parse_v1() -> tuple[Callable[[Any], Any] | None, str | None]:
 
 @dataclass(frozen=True)
 class FetchedMaster:
-    """The master the reader actually fetched: the ``x-goog-generation`` header of that GET and the
-    size of the bytes on disk. Either is None when it is not known."""
+    """The master the reader actually fetched: its GCS generation (the ``x-goog-generation`` of that
+    GET, or the blob's) and the size of the bytes on disk, as ``integrations.download.Downloaded``
+    reports them. Either is None when it is not known."""
 
     generation: int | None
     size: int | None
@@ -229,30 +231,11 @@ class FetchedMaster:
         return self.generation is not None and self.size is not None
 
 
-def fetched_master(headers: str, local_path: str) -> FetchedMaster:
-    """The fetched master from the raw response headers of its GET (``curl -D``) and the local file.
-    Only the FINAL response's block counts: with ``-L`` every redirect hop writes its own block, and
-    a generation on an earlier hop names some other object (or none at all)."""
-    blocks = [b for b in headers.replace("\r\n", "\n").split("\n\n") if b.strip()]
-    generation = None
-    for line in (blocks[-1].splitlines() if blocks else []):
-        name, sep, value = line.partition(":")
-        if sep and name.strip().lower() == "x-goog-generation":
-            try:
-                generation = int(value.strip())
-            except ValueError:
-                generation = None
-    try:
-        size: int | None = os.path.getsize(local_path)
-    except OSError:
-        size = None
-    return FetchedMaster(generation, size)
-
-
 def _https_get(url: str) -> bytes:
-    """The body, capped at ``MAX_SIDECAR_BYTES``. Uses ``requests`` (a declared dependency), because
-    ``urllib`` on a stock macOS python fails every storage.googleapis.com GET with
-    CERTIFICATE_VERIFY_FAILED, and ``requests`` carries its own CA bundle."""
+    """The body, capped at ``MAX_SIDECAR_BYTES``. Uses ``requests`` (a declared dependency), which
+    carries its own CA bundle: ``urllib`` on a python.org framework python whose ``Install
+    Certificates.command`` was never run (here ``/usr/local/bin/python3`` 3.12.3) fails every
+    storage.googleapis.com GET with CERTIFICATE_VERIFY_FAILED."""
     import requests
 
     with requests.get(url, timeout=FETCH_TIMEOUT_S, stream=True) as resp:

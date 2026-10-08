@@ -50,7 +50,6 @@ _VLM_TIMEOUT_S = 20.0
 _VLM_MAX_ATTEMPTS = 2          # per-provider retry cap (not a whole-chain retry)
 _FRAME_MAX_DIM_PX = 512        # downscale — classification needs shape/texture, not fidelity ($ control)
 _FFMPEG_TIMEOUT_S = 30.0
-_DOWNLOAD_TIMEOUT_S = 60.0
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 _VERDICT_INSTRUCTION = (
@@ -180,21 +179,20 @@ def _ffmpeg_frame(src: str, at_s: float, out_path: str) -> bool:
 
 
 def _download_asset(uri: str, dest_dir: str) -> str | None:
-    """Download (or resolve a local path for) ``uri`` into ``dest_dir``. ``None`` on any failure."""
-    dest = os.path.join(dest_dir, os.path.basename(uri) or "asset")
-    try:
-        if uri.startswith("gs://"):
-            subprocess.run(["gsutil", "-q", "cp", uri, dest], check=True, timeout=_DOWNLOAD_TIMEOUT_S)
-        elif uri.startswith("http://") or uri.startswith("https://"):
-            import urllib.request
-            urllib.request.urlretrieve(uri, dest)  # noqa: S310 — vetted job-doc-stamped asset URI
-        elif os.path.exists(uri):
-            return uri
-        else:
-            return None
-        return dest
-    except Exception:  # noqa: BLE001
+    """A local path for ``uri``: the path itself when it is a local file, else the asset fetched into
+    ``dest_dir`` by the shared downloader (https and gs:// alike). ``None`` only for a reference that
+    is neither a file nor a URI, so there is nothing to fetch.
+
+    A download that fails RAISES ``DownloadError``. ``judge_one_beat`` then records its cause as the
+    beat's reason. The old ``None`` surfaced as "no frame source available", and the cause was lost."""
+    if os.path.exists(uri):
+        return uri
+    if not uri.startswith(("gs://", "https://", "http://")):
         return None
+    from ..integrations.download import download
+
+    name = os.path.basename(uri.split("?", 1)[0]) or "asset"
+    return download(uri, os.path.join(dest_dir, name)).path
 
 
 def _is_image_path(path: str) -> bool:

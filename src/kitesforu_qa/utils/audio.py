@@ -41,9 +41,12 @@ def normalize_audio_path(audio_path: str, temp_dir: str = "/tmp/kitesforu-qa") -
     Returns:
         Local file path
     """
-    if audio_path.startswith("gs://"):
-        from ..integrations.gcs import download_from_gcs
-        return download_from_gcs(audio_path, temp_dir)
+    if audio_path.startswith(("gs://", "https://", "http://")):
+        # The one shared downloader: an https URL (the API's signed /audio-url) is fetched too, not
+        # handed on as if it were a file, and any failure raises DownloadError.
+        from ..integrations.download import download
+        name = os.path.basename(audio_path.split("?", 1)[0]) or "audio"
+        return download(audio_path, os.path.join(temp_dir, name)).path
     return audio_path
 
 

@@ -50,6 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
+from kitesforu_qa.integrations.download import download  # noqa: E402
 from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
     CONTENT_CLASS_COURSE,
     CONTENT_CLASS_EPISODE,
@@ -199,30 +200,27 @@ def score_all(
 
 
 def resolve_audio(doc: dict[str, Any], work_dir: str) -> str | None:
-    """Local audio path for an EPISODE/COURSE job — downloads ``outputs.audio_url`` via ``gsutil``
-    when it's a ``gs://`` URI (the SAME technique ``resolve_video`` uses; duplicated here rather than
-    imported since ``short_scorecard.py`` has no audio resolver of its own — its ``--audio`` flag only
-    accepts an already-local path). Returns ``None`` (never raises) when unresolvable — the
-    audio-mix/music-sfx dimensions then degrade to an honest skip rather than crash the whole run.
+    """Local audio path for an EPISODE/COURSE job: the doc's audio URL (``Artifact.audio_url``, the
+    one reader of where it lives), fetched by the shared downloader, https and gs:// alike.
+
+    ``None`` only when the doc names no audio at all (0 of the 3,162 completed jobs on 2026-10-05).
+    A download that fails RAISES ``DownloadError``; ``score_all_episodes_courses`` then records the
+    job as unscored, with the cause. Before, this function fetched only ``gs://`` and returned
+    ``None`` for anything else, so the 3,154 completed jobs with an https ``outputs.audio_url`` had
+    their audio-mix battery skip ("no audio file on artifact") and pass on nothing.
 
     Most EPISODE jobs are audio-only (no rendered video) — without this, the audio-mix dimension
     (the largest deterministic battery besides content: clipping/loudness/silence/truncation/channel
     balance) would silently skip on every pure-audio podcast, which is exactly the "right measurement
     for episodes" this extension exists to restore."""
-    outputs = doc.get("outputs")
-    uri = outputs.get("audio_url") if isinstance(outputs, dict) else None
-    if not uri:
+    url = Artifact.from_doc(doc).audio_url
+    if not url:
         return None
-    uri = str(uri)
-    if not uri.startswith("gs://"):
-        return uri if os.path.exists(uri) else None
-    dest = os.path.join(work_dir, os.path.basename(uri) or "episode_audio.mp3")
-    try:
-        subprocess.run(["gsutil", "-q", "cp", uri, dest], check=True, timeout=180)
-        return dest
-    except Exception as exc:  # noqa: BLE001 — degrade, don't crash the whole run
-        print(f"warning: gsutil cp failed for audio {uri}: {exc}", file=sys.stderr)
-        return None
+    if os.path.exists(url):
+        return url  # --docs-dir: a doc that already points at a local file
+    job_id = str(doc.get("job_id") or doc.get("id") or "job")
+    name = os.path.basename(url.split("?", 1)[0]) or "episode_audio.mp3"
+    return download(url, os.path.join(work_dir, f"{job_id}_{name}")).path
 
 
 def score_all_episodes_courses(

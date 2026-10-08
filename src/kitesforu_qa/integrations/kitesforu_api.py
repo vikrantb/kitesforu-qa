@@ -134,16 +134,28 @@ class KitesForUClient:
 
     def get_job_audio(self, job_id: str) -> Optional[str]:
         """
-        Get audio URL for completed job.
+        Get the master audio's URL for a completed job.
+
+        The status snapshot ``get_job`` returns carries no audio URL (kitesforu-api
+        ``build_job_public_snapshot``), so this asks ``GET /v1/podcasts/{job_id}/audio-url``, which
+        re-signs the master and returns ``{audio_url, expires_at, ttl_minutes, gcs_path}``.
 
         Args:
             job_id: Job ID
 
         Returns:
-            Audio URL or None
+            The signed audio URL, or None when the API says the job has no signable master audio
+            (404). Any other failure raises ``requests.HTTPError``.
         """
-        job = self.get_job(job_id)
-        return job.get('audio_url') or job.get('audio_path')
+        response = requests.get(
+            f"{self.base_url}/v1/podcasts/{job_id}/audio-url",
+            headers=self.headers,
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return (response.json() or {}).get("audio_url") or None
 
     def get_job_script(self, job_id: str) -> Optional[str]:
         """
