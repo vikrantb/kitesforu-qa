@@ -2,6 +2,66 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-10-08 — the verification job buys paid clips and stills on a QA identity, and its estimate is computed from the body it sends (opt-in `--motion-clips` only: ~$0.39-2.11 per `--tier low --motion-clips 2` run; $0 change on every other run)
+
+**Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py` (new),
+`scripts/job_status.py` (new), `scripts/canary_loop.py`, `scripts/narration_sync_audit.py`,
+`tests/test_create_verification_job.py`, `tests/test_one_terminal_status_list.py`, this entry.
+PR #175, all four rounds.
+
+**This is the record #175 owed since round 2.** Round 1 added `--motion-clips N`
+(`visual_options.motion_clips`). Round 2 (`212ee49`) also began sending `real_images: true,
+max_images: 6` with every such run, which bought up to 6 paid stills, and wrote no entry here (round-2
+cost D1, claims D3). Round 3 (`9d334fc`) cut that to 3 at `--tier low` and 4 at any other tier.
+Round 4 prices both purchases from the producer and prints the price from the body that is sent.
+
+**What a run buys, by flag.** The default T3 run, `--tier`, `--visuals`, `--visuals-auto`, `--short`,
+`--format`, `--language`, `--content-rating` and `--source-writeup` send the same bytes as before:
+six variants, base `9d334fc` against head, same machine, `cmp` on non-empty bodies (237-313 B).
+Only `--motion-clips N` buys clips (N x 12 credits) and, unless `--paid-stills off`, 3 or 4 stills
+(1 credit each, charged upfront; on a `completed` job the api refunds stills it never rendered).
+
+**Per-run provider $: an ESTIMATE from the catalog, not a measured job.** Command:
+`create_verification_job.sh --tier low --style Explainer --motion-clips 2 --visuals-auto --dry-run`,
+priced at kitesforu-workers origin/main `66f5c4f1db79`, which is also the image
+`kitesforu-worker-visuals` serves (`gcloud run services describe`, 2026-10-08):
+
+| term | range | how |
+|---|---|---|
+| audio | ~$0.025 | the T3 band (measured per job, unchanged) |
+| 2 purchased clips | $0.36-1.28 | workers `select_provider` on the purchased budget ($0.65 cap, 6 s), all four cells `veo_hero` can ask. **Fal bound** (FAL_KEY is set on the serving visuals worker): $0.36 on both cells, minimax/h3/image-to-video (plain) and minimax/h3/reference-to-video (anchored). **No fal key:** veo-3.1-lite-generate-001 $0.18 (6 s, plain), veo-3.1-fast-generate-001 $0.64 (8 s reference, anchored). |
+| up to 3 paid stills | $0.009-0.80 | the 8 enabled, unretired IMAGE rows: flux-schnell $0.003 x1 up to gemini-3-pro-image $0.134 x2 (one scene-verify regen per beat). A verify REJECT can add a render on another row; this range does not bound that. |
+| **total** | **~$0.39-2.11** | the sum |
+
+A purchased clip lands on the purchased arm only. `policy_for_job` sizes the entitlement allowance
+($0.45/4 s: veo-3.1-lite $0.12 or minimax reference-to-video $0.30, the arm workers #3273 discusses)
+only when `vo_motion == 0`. So a run that buys clips never also draws entitlement clips.
+
+**Yes, a QA identity can now spend.** With `visual_options` present, workers
+`scene_budget.resolve_scene_budget` returns at its passthrough (`scene_budget.py:363`), before the
+QA-identity hard zero (`:377`). `policy_for_job` builds the purchased hero budget whenever
+`vo_motion > 0`, whoever owns the job. Default runs send no `visual_options`, so the workers line
+"`create_verification_job.sh` ... runs stay $0 forever" (workers COST_CHANGELOG.md:14465, written
+about the born-short floor) still holds for every run without `--motion-clips`. `test_user_e2e`
+holds `tier: ultimate` (`users/test_user_e2e`, read-only, 2026-10-08). The live api sets no
+`TEST_USER_ID`; the control was that the same probe found `MODE` and `ALLOW_TEST_API_KEY`. So the
+api's free-tier clamp does not reach the default identity. With `--on-behalf-of` a free user it
+does, and the script now exits 6 instead of reporting a purchase the api dropped.
+
+**Operator-facing estimate print** (the spend ledger records it verbatim):
+- Unchanged for every run without a purchase, except `--tier X --visuals`. That one now leads with a
+  total: `~$LO-HI = audio <band> + visuals (~$0.10-0.50; ...)`.
+- With a purchase: `~$LO-HI = audio ... + N paid clip(s) $a-b + up to M paid still(s) $c-d`, plus one
+  line per priced row and cell.
+
+**Wait-loop cost.** On a job with `wants_visuals`, `--wait` now waits for the assembled video for up
+to 5400 s, instead of stopping when the audio completes. After the audio it polls once a minute, so
+there are at most ~90 extra `/status` reads, each of which runs the api's refund check (a Firestore
+transaction). An audio-only wait is bounded at 1800 s of wall clock. Census of the newest 600
+`podcast_jobs` (read-only, 2026-10-08): created -> completed_at, n=591, median 368 s, p99 1208 s.
+
+**Pricing-page implication:** none. This is QA tooling, and user prices are unchanged.
+
 ## 2026-09-06 — the T4 estimate print learns the story-topic price; #173's owed record lands ($0 per-unit; operator-facing EST only)
 
 **Files:** `scripts/create_verification_job.sh` (EST case arm + comments), `COST_CHANGELOG.md`
