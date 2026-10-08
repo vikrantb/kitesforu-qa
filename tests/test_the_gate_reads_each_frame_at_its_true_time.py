@@ -477,6 +477,9 @@ def _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail):
     def failing_get(cmd, **_kw):
         if fail == "exit":
             return subprocess.CompletedProcess(cmd, 22)        # curl -f on a 404, nothing written
+        if fail == "partial":                                   # the connection dropped mid-body
+            pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 18)
         if fail == "missing":
             raise FileNotFoundError(2, "No such file or directory", cmd[0])
         raise subprocess.TimeoutExpired(cmd, 900)
@@ -488,15 +491,18 @@ def _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail):
     return res, sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".headers")
 
 
-@pytest.mark.parametrize("fail", ["exit", "missing", "timeout"])
+@pytest.mark.parametrize("fail", ["exit", "partial", "missing", "timeout"])
 def test_a_failed_get_fails_the_gate_and_leaves_no_headers(frames, tmp_path, monkeypatch, fail):
     """Round-2 code critic #2 and #5: the master path is fixed per job, so a GET that failed used to
     leave the PREVIOUS run's bytes to be scored as this run's, with empty headers. The old file is
-    removed first, the GET's exit status counts, and the header file goes whatever happens."""
+    removed first, the GET's exit status counts (a body cut short is on disk, and curl says so), and
+    the header file goes whatever happens."""
     res, headers = _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail)
     assert res["verdict"] == "FAIL" and res["issues"][0]["sev"] == "BLOCKER", res
     assert res["issues"][0]["msg"].startswith("artifact not fetchable: https://example.invalid/m.mp4")
-    assert not (tmp_path / "ag_f7df77bf-witness.mp4").exists() and headers == []
+    if fail != "partial":
+        assert not (tmp_path / "ag_f7df77bf-witness.mp4").exists()
+    assert headers == []
 
 
 @pytest.mark.parametrize("where", ["probe", "extract"])

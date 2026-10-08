@@ -45,11 +45,7 @@ from typing import Any, Optional
 os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from kitesforu_qa.harness.delivered_timeline import (  # noqa: E402
-    IDENTITY_UNCHECKED,
-    DeliveredTimeline,
-    stamp_note,
-)
+from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, stamp_note  # noqa: E402
 
 _W, _H = 96, 171
 _N = _W * _H
@@ -107,12 +103,7 @@ def _timeline_lines(timeline: DeliveredTimeline) -> list[str]:
     the job named was not used, and whether a used stamp was held to the master OBJECT. This tool
     compares no object, so a used stamp's identity reads "unchecked" rather than nothing."""
     why = f"; {timeline.stamp_rejected}" if timeline.stamp_rejected else ""
-    identity = ""
-    if timeline.master_identity == IDENTITY_UNCHECKED:
-        identity = ("; master identity unchecked: the fetched object's generation and size were "
-                    "not compared")
-    elif timeline.master_identity:
-        identity = f"; master identity {timeline.master_identity}"
+    identity = f"; master identity {timeline.master_identity}" if timeline.master_identity else ""
     lines = [f"\n  timeline: {timeline.source} ({timeline.diagnosis}{why}{identity})"]
     note = stamp_note(timeline.stamp_rejected)
     if note:
