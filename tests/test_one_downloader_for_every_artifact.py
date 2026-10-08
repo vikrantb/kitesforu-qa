@@ -470,6 +470,39 @@ def test_download_from_gcs_keeps_its_directory_contract(server, tmp_path, monkey
         gcs.download_from_gcs("gs://b/audio/job/other.mp3", str(tmp_path))
 
 
+def test_an_upload_goes_through_the_one_client_constructor(tmp_path, monkeypatch):
+    """Round-2 design: ``upload_to_gcs`` built its own ``storage.Client``. It uses
+    ``gcs.storage_client()`` now; a direct construction would raise here, never reach GCS."""
+    from google.cloud import storage
+
+    calls = []
+
+    class Blob:
+        def upload_from_filename(self, path):
+            calls.append(("upload", path))
+
+    class Bucket:
+        def blob(self, name):
+            calls.append(("blob", name))
+            return Blob()
+
+    class Client:
+        def bucket(self, name):
+            calls.append(("bucket", name))
+            return Bucket()
+
+    def direct(*_a, **_k):
+        raise AssertionError("upload_to_gcs built its own storage.Client")
+
+    monkeypatch.setattr(storage, "Client", direct)
+    monkeypatch.setattr(gcs, "storage_client", Client)
+    local = tmp_path / "a.mp3"
+    local.write_bytes(b"x")
+    assert gcs.upload_to_gcs(str(local), "gs://never-a-bucket-qa/a/b.mp3") == "gs://never-a-bucket-qa/a/b.mp3"
+    assert calls == [("bucket", "never-a-bucket-qa"), ("blob", "a/b.mp3"), ("upload", str(local))]
+    assert not hasattr(gcs, "gcs_file_exists")      # an existence check that read a 403 as "absent"
+
+
 # ── a run's budget ────────────────────────────────────────────────────────────────────────────
 
 class _Clock:

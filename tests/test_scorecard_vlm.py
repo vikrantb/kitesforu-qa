@@ -346,6 +346,31 @@ def test_a_failed_asset_download_is_the_beats_reason(monkeypatch) -> None:
     assert verdict.verdict is None and "CERTIFICATE_VERIFY_FAILED" in verdict.reason
 
 
+def test_a_failed_asset_download_leaves_no_frame_directory(monkeypatch) -> None:
+    """``extract_frame`` hands back a cleanup only with a frame; when the asset download raised, its
+    temporary directory was left behind for every such beat."""
+    import os
+    import tempfile
+
+    from kitesforu_qa.integrations.download import DownloadError
+
+    made = []
+    real = tempfile.mkdtemp
+
+    def mkdtemp(**kw):
+        made.append(real(**kw))
+        return made[-1]
+
+    def failing(uri, dest_dir):
+        raise DownloadError(f"{uri}: HTTP 503", uri=uri, transient=True)
+
+    monkeypatch.setattr(vlm.tempfile, "mkdtemp", mkdtemp)
+    monkeypatch.setattr(vlm, "_download_asset", failing)
+    with pytest.raises(DownloadError, match="HTTP 503"):
+        vlm.extract_frame({"beat_index": 0, "asset_uri": "https://x/a.png"}, None)
+    assert made and not os.path.exists(made[0])
+
+
 def test_is_image_path() -> None:
     assert vlm._is_image_path("/tmp/x.PNG") is True
     assert vlm._is_image_path("/tmp/x.jpg") is True
