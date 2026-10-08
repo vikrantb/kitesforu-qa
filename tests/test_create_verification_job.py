@@ -505,6 +505,15 @@ def test_an_ended_job_is_exit_5_and_never_invites_grading(harness, status):
     assert "nothing to grade" in r.stderr and "Grade it" not in r.stdout
 
 
+def test_a_last_unreadable_probe_does_not_erase_the_last_status_read(harness):
+    """119 good reads, then an unreadable probe on the last allowed poll. The job was last READ as
+    running; it used to report "never read a status" (#175 round-2 code critic D7)."""
+    harness.statuses([snap("running")] * 119 + ["<html>502</html>"])
+    r = harness.run("--wait")
+    assert r.returncode == 4, (r.returncode, r.stderr[-300:])
+    assert "last read as 'running'" in r.stderr and "never read a status" not in r.stderr
+
+
 def test_running_out_of_time_is_exit_4_not_a_result(harness):
     harness.statuses([snap("running")])
     r = harness.run("--wait")
@@ -670,7 +679,8 @@ def test_help_documents_what_the_script_does(harness):
     text = r.stdout
     for needle in ("--paid-stills", "--on-behalf-of", "--dry-run", "Exit:", "Auth:", "03-money.md"):
         assert needle in text, needle
-    assert "test-cost-ladder.md" not in SCRIPT.read_text(), "the script cites a rules file that does not exist"
+    for cited_by in (SCRIPT, QA / "src" / "kitesforu_qa" / "cli.py"):
+        assert "test-cost-ladder.md" not in cited_by.read_text(), f"{cited_by.name} cites a rules file that does not exist"
     caveat = next(i for i, line in enumerate(lines) if "short-form craft" in line)
     assert "--short" in lines[caveat - 1], "the short-form caveat is attached to the wrong example"
 
