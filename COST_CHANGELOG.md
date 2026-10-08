@@ -30,6 +30,17 @@ What changes is operator-side GCS egress and local work:
    4d41320d (measured with `_extract_frames(mp4, dir, 1000)` against `3000`, one run each).
 
 **Pricing-page implication: none.** QA tooling; user prices unchanged.
+## 2026-10-07 — graders download the audio and video they grade ($0 per unit; operator egress)
+
+**Files:** `src/kitesforu_qa/integrations/download.py` and every site that adopts it (qa #185).
+
+**$0 per-unit delta.** No job's cost changes: no provider, LLM, TTS or infra call. What changes is
+operator egress. `quality_matrix.resolve_audio` never downloaded an https `outputs.audio_url` (3,154
+of 3,162 completed jobs), and the `urllib` fetches downloaded nothing on a python.org framework python
+without its CA bundle. Both now download the real file, once per grade, plus up to two retries of a
+transfer that fails transiently. Size: ~1.08 MB per minute of speech (HEAD `Content-Length` over the
+speech timeline of the 12 newest completed jobs, 2026-10-07). At the GCS internet egress list price
+of ~$0.12/GiB that is about $0.0001 per minute graded.
 
 ## 2026-09-06 — the T4 estimate print learns the story-topic price; #173's owed record lands ($0 per-unit; operator-facing EST only)
 

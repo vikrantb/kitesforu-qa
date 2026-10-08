@@ -27,9 +27,10 @@ returns ``None`` or ``False``. Both schemes give the same guarantees:
 ``x-goog-generation`` header, or the blob's) and the bytes on disk. That is the master identity
 ``harness.painted_timeline_sidecar.FetchedMaster`` holds a producer's stamp to.
 
-COST, for operators: every call downloads the whole object, about 1 MB per minute of mp3 audio (an
-estimate). A transient failure can re-download it, up to ``ATTEMPTS`` times. GCS internet egress list
-price is ~$0.12/GiB. No provider is called.
+COST, for operators: every call downloads the whole object. Master audio runs ~1.08 MB per minute of
+speech (HEAD ``Content-Length`` over the speech timeline of the 12 newest completed jobs, 2026-10-07),
+about $0.0001 per minute at the GCS internet egress list price of ~$0.12/GiB. A transient failure can
+re-download it, up to ``ATTEMPTS`` times in all. No provider is called. See ``COST_CHANGELOG.md``.
 """
 
 from __future__ import annotations
