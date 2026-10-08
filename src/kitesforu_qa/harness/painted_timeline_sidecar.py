@@ -31,8 +31,8 @@ master first, so a pass that dies between the two leaves an older sidecar beside
 a re-assembly over the same audio keeps the same length. The producer therefore records the uploaded
 master blob's ``master_generation`` and ``master_size`` (two optional v1 fields). :class:`FetchedMaster`
 is the same pair for the master the reader actually fetched: the ``x-goog-generation`` header of that
-GET and the size of the bytes on disk. When both pairs are complete and differ, the stamp describes
-another master (``DeliveredTimeline`` rejects it as ``stale_master``).
+GET and the size of the bytes on disk. Every field that both sides carry is compared, and any mismatch
+means the stamp describes another master (``DeliveredTimeline`` rejects it as ``stale_master``).
 
 Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
