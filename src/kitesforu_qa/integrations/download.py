@@ -84,14 +84,16 @@ class _Fetched:
 
 
 class _DeadlineWriter:
-    """The file being written, refusing to grow past the download's deadline: a trickle that never
-    trips a per-read timeout still ends."""
+    """The file being written, refusing to grow past the download's deadline. HTTPS writes whatever
+    each read returned (:func:`_http_once`); the GCS client writes every chunk it receives (8 KiB),
+    so a gs:// transfer is checked between chunks, and a stall inside one is bounded by the read
+    timeout."""
 
     def __init__(self, fh: BinaryIO, deadline: float, uri: str) -> None:
-        self._fh, self._deadline, self._uri = fh, deadline, uri
+        self._fh, self.deadline, self._uri = fh, deadline, uri
 
     def write(self, data: bytes) -> int:
-        if time.monotonic() > self._deadline:
+        if time.monotonic() > self.deadline:
             raise DownloadError(f"{self._uri}: the download outran its deadline", uri=self._uri)
         return self._fh.write(data)
 
@@ -168,9 +170,21 @@ def _http_once(uri: str, out: _DeadlineWriter, timeout: tuple[float, float]) -> 
         if code in (408, 429) or code >= 500:
             raise DownloadError(f"{uri}: HTTP {code}", uri=uri, transient=True)
         resp.raise_for_status()
-        for chunk in resp.iter_content(chunk_size=_CHUNK):
-            if chunk:
-                out.write(chunk)
+        # ``read1`` returns whatever has arrived, so the deadline is checked at every arrival. A
+        # ``read(n)`` (and ``iter_content``, which uses it) blocks until n bytes come in, as long as
+        # a trickle lands a byte inside every read timeout: measured, a 1 MiB read sat through a whole
+        # 6 s trickle past a 1 s deadline. urllib3 1.x has no ``read1``; it falls back to chunks.
+        read1 = getattr(resp.raw, "read1", None)
+        if read1 is not None:
+            while True:
+                data = read1(_CHUNK, decode_content=True)
+                if not data:
+                    break
+                out.write(data)
+        else:
+            for chunk in resp.iter_content(chunk_size=_CHUNK):
+                if chunk:
+                    out.write(chunk)
         headers = resp.headers
         encoded = (headers.get("Content-Encoding") or "identity").lower() != "identity"
         return _Fetched(generation=_int(headers.get("x-goog-generation")),
