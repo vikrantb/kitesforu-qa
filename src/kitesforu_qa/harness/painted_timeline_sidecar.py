@@ -6,18 +6,25 @@ master. The doc records where it is as ``visual.painted_timeline_uri``. Nothing 
 carries the timeline.
 
 THE SCHEMA HAS ONE PARSER, AND IT IS THE PRODUCER'S: ``parse_v1`` in kitesforu-workers
-``src/workers/stages/visuals/painted_timeline.py`` (#3257 ``bfa00e734``). It takes the sidecar's
-bytes as they arrive, so qa does not even decode the JSON. It returns pydantic models that ignore
-unknown fields, and raises ``ValueError`` on anything that is not v1.
+``src/workers/stages/visuals/painted_timeline.py`` (#3257, merged as ``2d707598c``). It takes the
+sidecar's bytes as they arrive, so qa does not even decode the JSON. It returns pydantic models that
+ignore unknown fields, and raises ``ValueError`` on anything that is not v1.
 
-It is loaded BY FILE PATH from ``WORKERS_SRC`` (default: the sibling ``kitesforu-workers/src``
-checkout), with ``importlib.util.spec_from_file_location`` as qa loads its own scripts. It is never
-imported as ``workers.stages.visuals.painted_timeline``: that runs ``workers/__init__.py``, which
-imports ``workers.base.BaseWorker`` and ``kitesforu_schemas`` and re-classes every logger in the
-process (measured on bfa00e734: ~1.0 s and 806 modules in a fresh process). The module itself needs
-only ``json``, ``logging``, ``typing`` and pydantic, and has no relative import. If it cannot be
-loaded, the sidecar is not fetched at all, and the reader falls back to its own estimate, labelled as
-one (``DeliveredTimeline.source == "estimated"``).
+WHICH COPY OF IT RUNS. By default, the PINNED GIT OBJECT ``origin/main:<that path>`` of the workers
+repository (``git show``), never a working tree: the shared workers checkout sits on whatever branch
+a peer last checked out, and a qa worktree has no sibling checkout at all, so a working-tree default
+read nothing wherever the gate actually runs. The repository is ``WORKERS_REPO``, else the sibling of
+qa's canonical checkout (found through git's common directory, so a worktree resolves it too); the
+ref is ``WORKERS_REF``. ``WORKERS_SRC`` (a workers ``src`` tree) overrides both. When none of them
+has the file, the reader says so (``parser_unavailable``, and ``delivered_timeline.stamp_note`` puts
+it in every reader's headline output) and falls back to its estimate, labelled as one
+(``DeliveredTimeline.source == "estimated"``).
+
+The source is executed as a private module. It is never imported as
+``workers.stages.visuals.painted_timeline``: that runs ``workers/__init__.py``, which imports
+``workers.base.BaseWorker`` and ``kitesforu_schemas`` and re-classes every logger in the process
+(measured on bfa00e734: ~1.0 s and 806 modules in a fresh process). The module itself needs only
+``json``, ``logging``, ``typing`` and pydantic, and has no relative import.
 
 THE MASTER IT DESCRIBES. The sidecar and its master sit at fixed paths, both overwritten in place,
 master first, so a pass that dies between the two leaves an older sidecar beside a newer master, and
@@ -31,7 +38,7 @@ Each step can fail on its own, and :class:`SidecarRead` says which one did:
 
 * ``absent``: the doc names no sidecar. That is every master assembled before the sidecar existed,
   so it is not a failure, and nothing is reported as rejected.
-* ``parser_unavailable``: ``parse_v1`` could not be imported.
+* ``parser_unavailable``: ``parse_v1`` could not be loaded; ``detail`` says from where it was asked.
 * ``uri_unresolvable``: the URI is neither ``gs://bucket/object`` nor ``https://``. The producer
   writes the public ``https://storage.googleapis.com/...`` form (``playable_url.gs_to_public_https``).
 * ``fetch_failed``: the GET failed, or the body exceeded ``MAX_SIDECAR_BYTES``. A URI that points at
@@ -45,9 +52,10 @@ Each step can fail on its own, and :class:`SidecarRead` says which one did:
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
+import subprocess
 import sys
+import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,40 +113,106 @@ def public_url(uri: str) -> str | None:
     return uri if uri.startswith("https://") else None
 
 
-def workers_src() -> str:
-    return os.environ.get("WORKERS_SRC") or str(_QA_ROOT.parent / "kitesforu-workers" / "src")
+#: Where ``painted_timeline.py`` lives inside a workers checkout.
+PAINTED_TIMELINE_IN_REPO = "src/workers/stages/visuals/painted_timeline.py"
+#: The workers ref read by default. A git OBJECT, never a working tree: which branch a peer has
+#: checked out in the shared workers checkout must not decide which parser runs.
+WORKERS_REF_DEFAULT = "origin/main"
 
 
-def painted_timeline_path() -> Path:
-    return Path(workers_src()) / "workers" / "stages" / "visuals" / "painted_timeline.py"
+def workers_src_override() -> str | None:
+    """``WORKERS_SRC``: an explicit workers ``src`` tree, which wins over the git object."""
+    return os.environ.get("WORKERS_SRC") or None
 
 
-#: One loaded module per file, so each process runs it once. A failure is not cached: a fixed tree is
-#: picked up on the next call.
-_PARSE_V1: dict[str, Callable[[Any], Any]] = {}
+def workers_repo() -> Path:
+    """The workers git repository: ``WORKERS_REPO``, else the sibling of qa's CANONICAL checkout. A
+    qa worktree has no sibling of its own, so the canonical checkout is found through git's common
+    directory."""
+    if os.environ.get("WORKERS_REPO"):
+        return Path(os.environ["WORKERS_REPO"])
+    try:
+        out = subprocess.run(["git", "-C", str(_QA_ROOT), "rev-parse", "--path-format=absolute",
+                              "--git-common-dir"], capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return Path(out.stdout.strip()).parent.parent / "kitesforu-workers"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return _QA_ROOT.parent / "kitesforu-workers"
+
+
+def workers_ref() -> str:
+    return os.environ.get("WORKERS_REF") or WORKERS_REF_DEFAULT
+
+
+def workers_tree() -> str:
+    """A workers ``src`` tree on disk, for code that must IMPORT workers modules (the renderer oracle
+    in the tests): the override, else the workers repo's working tree."""
+    return workers_src_override() or str(workers_repo() / "src")
+
+
+def read_workers_file(relpath: str) -> tuple[bytes, str]:
+    """``relpath`` (from the workers repo root) as bytes, and where it came from. From the
+    ``WORKERS_SRC`` override's checkout when one is set; else from the pinned git object
+    ``<workers_ref()>:<relpath>``. Raises ``FileNotFoundError`` when neither has it."""
+    override = workers_src_override()
+    if override:
+        path = Path(override).parent / relpath
+        if not path.is_file():
+            raise FileNotFoundError(f"WORKERS_SRC={override} has no {relpath}")
+        return path.read_bytes(), f"WORKERS_SRC={override}"
+    repo, ref = workers_repo(), workers_ref()
+    try:
+        shown = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{relpath}"],
+                               capture_output=True, timeout=30)
+        commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", ref],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FileNotFoundError(f"cannot read {ref}:{relpath} in {repo}: {exc}") from exc
+    if shown.returncode != 0:
+        why = shown.stderr.decode(errors="replace").strip().splitlines()[-1:] or ["git show failed"]
+        raise FileNotFoundError(f"{repo} has no {ref}:{relpath} ({why[0]}); set WORKERS_SRC to a "
+                                f"workers src tree that has it, or WORKERS_REPO/WORKERS_REF")
+    return shown.stdout, f"{repo.name} {ref} ({commit.stdout.strip() or '?'})"
+
+
+#: One loaded parser per SOURCE ASKED FOR (the override, else the repo and ref), so a process reads
+#: and runs workers' file once and a cached call forks nothing: the key is built from the environment
+#: alone. A failure is not cached: a fixed tree or a fetched ref is picked up on the next call.
+_PARSE_V1: dict[tuple[str, str, str], Callable[[Any], Any]] = {}
+
+
+def _source_asked_for() -> tuple[str, str, str]:
+    return (workers_src_override() or "", os.environ.get("WORKERS_REPO") or "", workers_ref())
 
 
 def load_parse_v1() -> tuple[Callable[[Any], Any] | None, str | None]:
-    """workers' ``parse_v1``, loaded from its file, or ``(None, why)`` when this checkout of workers
-    does not have it. The module is registered in ``sys.modules`` under a private name before it runs
-    (pydantic resolves the models' annotations through it), never as a ``workers`` package module."""
-    path = painted_timeline_path()
-    key = str(path.resolve())
-    if key in _PARSE_V1:
-        return _PARSE_V1[key], None
-    if not path.is_file():
-        return None, f"FileNotFoundError: {path}"
-    name = "_kitesforu_qa_workers_painted_timeline_" + hashlib.sha1(key.encode()).hexdigest()[:12]
+    """workers' ``parse_v1``, or ``(None, why)`` when it cannot be loaded.
+
+    The source is read with :func:`read_workers_file`: the ``WORKERS_SRC`` override, else the pinned
+    git object ``origin/main:src/workers/stages/visuals/painted_timeline.py`` of the workers repo. It
+    is executed as a private module, registered in ``sys.modules`` before it runs (pydantic resolves
+    the models' annotations through it), never as a ``workers`` package module."""
+    asked = _source_asked_for()
+    if asked in _PARSE_V1:
+        return _PARSE_V1[asked], None
     try:
-        spec = importlib.util.spec_from_file_location(name, path)
-        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        source, origin = read_workers_file(PAINTED_TIMELINE_IN_REPO)
+    except FileNotFoundError as exc:
+        return None, f"FileNotFoundError: {exc}"
+    # One module name per source asked for: two sources holding the same text never share a module.
+    name = ("_kitesforu_qa_workers_painted_timeline_"
+            + hashlib.sha1(repr(asked).encode() + source).hexdigest()[:12])
+    try:
+        module = types.ModuleType(name)
+        module.__file__ = f"<{origin}>/{PAINTED_TIMELINE_IN_REPO}"
         sys.modules[name] = module
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        exec(compile(source, module.__file__, "exec"), module.__dict__)  # noqa: S102 — workers' own source
         parse_v1 = module.parse_v1
     except Exception as exc:  # any failure means there is no parser here, and the caller says so
         sys.modules.pop(name, None)
         return None, f"{type(exc).__name__}: {exc}"
-    _PARSE_V1[key] = parse_v1
+    _PARSE_V1[asked] = parse_v1
     return parse_v1, None
 
 
@@ -157,9 +231,11 @@ class FetchedMaster:
 
 def fetched_master(headers: str, local_path: str) -> FetchedMaster:
     """The fetched master from the raw response headers of its GET (``curl -D``) and the local file.
-    The LAST ``x-goog-generation`` wins: with ``-L`` every redirect hop writes its own block."""
+    Only the FINAL response's block counts: with ``-L`` every redirect hop writes its own block, and
+    a generation on an earlier hop names some other object (or none at all)."""
+    blocks = [b for b in headers.replace("\r\n", "\n").split("\n\n") if b.strip()]
     generation = None
-    for line in headers.splitlines():
+    for line in (blocks[-1].splitlines() if blocks else []):
         name, sep, value = line.partition(":")
         if sep and name.strip().lower() == "x-goog-generation":
             try:

@@ -71,5 +71,5 @@
   "fade_ms": null,
   "reason": "portrait_canvas"
  },
- "_fixture_provenance": "built by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline(); the reader ignores this key; title-card lead, coverage fill (2 <- 0), an untraced row, a reclaimed video_hero still; master_generation and master_size added in the shape of #3257 2579ca090 (optional v1 fields), illustrative values for a synthetic master"
+ "_fixture_provenance": "built OFFLINE by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline() from a clip table, not the stamp of a real render; the reader ignores this key; title-card lead, coverage fill (2 <- 0), an untraced row, a reclaimed video_hero still; master_generation and master_size added BY HAND in the shape of #3257 (merged as 2d707598c) (optional v1 fields), illustrative values for a synthetic master"
 }

@@ -40,8 +40,16 @@ import sys
 import tempfile
 from typing import Any, Optional
 
+# Reading Firestore and then forking (gsutil, ffprobe, ffmpeg, git) stalls ~62.7 s while gRPC fork
+# support is on (measured on the gate by qa #184's round-2 latency lens). No child makes a gRPC call.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline  # noqa: E402
+from kitesforu_qa.harness.delivered_timeline import (  # noqa: E402
+    IDENTITY_UNCHECKED,
+    DeliveredTimeline,
+    stamp_note,
+)
 
 _W, _H = 96, 171
 _N = _W * _H
@@ -92,6 +100,24 @@ def _score(diffs: list[float]) -> dict[str, Any]:
         "seconds": len(secs),
         "below_bar": sum(1 for s in secs if s < _BAR),
     }
+
+
+def _timeline_lines(timeline: DeliveredTimeline) -> list[str]:
+    """What this tool prints about the timeline it measured against: where it came from, why a stamp
+    the job named was not used, and whether a used stamp was held to the master OBJECT. This tool
+    compares no object, so a used stamp's identity reads "unchecked" rather than nothing."""
+    why = f"; {timeline.stamp_rejected}" if timeline.stamp_rejected else ""
+    identity = ""
+    if timeline.master_identity == IDENTITY_UNCHECKED:
+        identity = ("; master identity unchecked: the fetched object's generation and size were "
+                    "not compared")
+    elif timeline.master_identity:
+        identity = f"; master identity {timeline.master_identity}"
+    lines = [f"\n  timeline: {timeline.source} ({timeline.diagnosis}{why}{identity})"]
+    note = stamp_note(timeline.stamp_rejected)
+    if note:
+        lines.append(f"  NOTE: {note}")
+    return lines
 
 
 def main() -> int:
@@ -153,9 +179,12 @@ def main() -> int:
     # producer's sidecar when it reads, else the estimate from the persisted claims (consecutive
     # starts, never `duration_ms`; the last window runs to the master span, as `resolve_bounds`
     # does). The line below says which.
+    # No master object is passed: this tool does not compare the fetched master's generation and
+    # size with the stamp's, and a used stamp says so. A probe of 0 s is an unknown length, so a
+    # stamp with nothing else to tie it to this video is not used (``delivered_timeline.UNTIED``).
     timeline = DeliveredTimeline.from_job(job, master_ms=span * 1000)
-    why = f"; {timeline.stamp_rejected}" if timeline.stamp_rejected else ""
-    print(f"\n  timeline: {timeline.source} ({timeline.diagnosis}{why})")
+    for line in _timeline_lines(timeline):
+        print(line)
     print(f"\n  {'start':>6} {'win':>6} {'mode':14} {'kind':20} {'median':>8}  verdict")
     for w in timeline.painted_windows():
         s, d = w.start_ms / 1000.0, (w.end_ms - w.start_ms) / 1000.0

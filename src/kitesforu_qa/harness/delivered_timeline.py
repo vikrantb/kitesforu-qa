@@ -70,7 +70,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .painted_timeline_sidecar import FetchedMaster, SidecarRead, read_sidecar
+from .painted_timeline_sidecar import PARSER_UNAVAILABLE, FetchedMaster, SidecarRead, read_sidecar
 
 #: The one stamp version this reader understands.
 STAMP_VERSION = 1
@@ -87,14 +87,38 @@ SOURCE_ESTIMATED = "estimated"
 #: stamp still describes every frame that video has.
 STAMP_MASTER_TOLERANCE_MS = 1000
 
-#: The stamp names a different master object than the one fetched: its ``master_generation`` /
-#: ``master_size`` (the uploaded blob's) differ from the fetched master's ``x-goog-generation`` header
-#: or its size on disk. A re-assembly over the same audio keeps the same length, which the length
-#: check above cannot see; this can. A stamp without both fields (written before #3257 added them),
-#: or a master fetched without both, is held to the length check alone, which also applies when the
-#: two match. A generation that is not the header's decimal text, a non-numeric string included,
-#: is a mismatch: the stamp cannot show that it describes this master.
+#: The stamp names a different master object than the one fetched. Every identity field that BOTH
+#: sides carry is compared: the stamp's ``master_generation`` with the fetched master's GCS
+#: generation, and its ``master_size`` with the bytes on disk. Any mismatch is stale, a size mismatch
+#: on its own included. A re-assembly over the same audio keeps the same length, which the length
+#: check above cannot see; this can. A generation that is not the fetched one's decimal text, a
+#: non-numeric string included, is a mismatch.
 STALE_MASTER = "stale_master"
+#: Neither a probed length nor a compared identity ties the stamp to this video, so it is not used.
+#: A probe that returned 0 s is an unknown length, never a pass.
+UNTIED = "untied: no probed video length and no master identity compared"
+
+#: ``DeliveredTimeline.master_identity``: whether the fetched master's identity was compared with
+#: the stamp's and matched (``verified``), or could not be compared (``unchecked``).
+IDENTITY_VERIFIED = "verified"
+IDENTITY_UNCHECKED = "unchecked"
+
+
+def stamp_note(stamp_rejected: str | None) -> str | None:
+    """The line every reader prints in its headline output when the job named the producer's timeline
+    and it was not used, so a verdict that rests on qa's estimate says so. None when the stamp was
+    used, and when the doc named none. A missing parser is the loudest case, because it is a setup
+    fault, not a fact about the job, and the line says how to fix it. The gate, the step-by-step
+    checker's 9b and ``frame_proof`` all print this one line."""
+    if not stamp_rejected:
+        return None
+    why = stamp_rejected[:300]
+    if stamp_rejected.startswith(PARSER_UNAVAILABLE):
+        return (f"NO PARSER: this job names the producer's painted timeline, but workers' parse_v1 "
+                f"could not be loaded ({why}), so qa's estimate attributed every frame. Set WORKERS_SRC "
+                f"to a workers src tree that has it, or WORKERS_REPO / WORKERS_REF to a workers repo "
+                f"and ref that do.")
+    return f"the producer's painted timeline was not used ({why}); qa's estimate attributed every frame"
 
 #: The cut band (see the module docstring for its population). For a stamp the band also covers
 #: the overlap of a dissolve: ``video_assembler._TRANSITION_S["dissolve"]`` is 0.5 s, and it blends
@@ -341,6 +365,7 @@ class DeliveredTimeline:
     stamp_rejected: str | None = None             # why a named or given stamp was not used
     burned: frozenset[str] = frozenset()          # the job's stills that carry drawn text
     sidecar_bytes: int = 0                        # body bytes fetched for the stamp (egress)
+    master_identity: str | None = None            # IDENTITY_VERIFIED | IDENTITY_UNCHECKED, stamps only
     _first_ms: float = math.inf                   # before this instant: unknown (intro lead)
     _spans: tuple[tuple[float, float, Mapping[str, Any] | None], ...] = field(default=(),
                                                                             repr=False)
@@ -483,12 +508,9 @@ def _from_stamp(stamp: Any, clips: list[Any], master_ms: float | None,
     version = _field(stamp, "version")
     if version != STAMP_VERSION:
         return None, f"version={version!r}"
-    stamped_generation = _generation(_field(stamp, "master_generation"))
-    stamped_size = _field(stamp, "master_size")
-    if (master is not None and master.complete and stamped_generation is not None
-            and _is_int(stamped_size)):
-        if (stamped_generation, stamped_size) != (str(master.generation), master.size):
-            return None, STALE_MASTER
+    identity = _compare_identity(stamp, master)
+    if identity is False:
+        return None, STALE_MASTER
     raw = _field(stamp, "windows")
     if not isinstance(raw, (list, tuple)) or not raw:
         return None, "no_windows"
@@ -511,13 +533,36 @@ def _from_stamp(stamp: Any, clips: list[Any], master_ms: float | None,
                 painted[key] = src.get(key)
         windows.append(Window(clip, float(start), float(end), painted, known))
     video_end = max(w.end_ms for w in windows)
-    if master_ms and abs(video_end - float(master_ms)) > STAMP_MASTER_TOLERANCE_MS:
+    length_known = _is_number(master_ms) and float(master_ms) > 0
+    if length_known and abs(video_end - float(master_ms)) > STAMP_MASTER_TOLERANCE_MS:
         return None, f"windows end {round(video_end)} != probed video {round(master_ms)}"
+    if not length_known and identity is not True:
+        return None, UNTIED
     windows.sort(key=lambda w: (w.start_ms, w.end_ms))
     spans = tuple((w.start_ms - CUT_EARLY_MS, w.end_ms + CUT_LATE_MS, w.fields if w.known else None)
                   for w in windows)
     return DeliveredTimeline(SOURCE_STAMP, STAMP, tuple(windows), _first_ms=windows[0].start_ms,
-                             _spans=spans, _span_starts=tuple(s[0] for s in spans)), None
+                             _spans=spans, _span_starts=tuple(s[0] for s in spans),
+                             master_identity=IDENTITY_VERIFIED if identity else IDENTITY_UNCHECKED), None
+
+
+def _compare_identity(stamp: Any, master: FetchedMaster | None) -> bool | None:
+    """True when every identity field both sides carry matches (and at least one is compared), False
+    on any mismatch, None when nothing can be compared."""
+    if master is None:
+        return None
+    compared = False
+    stamped_generation = _generation(_field(stamp, "master_generation"))
+    if stamped_generation is not None and master.generation is not None:
+        if stamped_generation != str(master.generation):
+            return False
+        compared = True
+    stamped_size = _field(stamp, "master_size")
+    if _is_int(stamped_size) and master.size is not None:
+        if stamped_size != master.size:
+            return False
+        compared = True
+    return True if compared else None
 
 
 # ── the estimate ──────────────────────────────────────────────────────────────────────────────
@@ -655,7 +700,8 @@ def _claimed_windows(rows: list[tuple[int, Mapping[str, Any]]],
 
 
 def _own_end(row: Mapping[str, Any]) -> int | None:
-    """The clip's own claimed end, as ``narration_alignment._span`` reads it."""
+    """The clip's own claimed end: ``end_ms``, else ``start_ms + duration_ms``. It bounds the last
+    claim when the master's length is unknown (``narration_alignment.delivered_spans``)."""
     try:
         start = int(row.get("start_ms"))  # type: ignore[arg-type]
     except (TypeError, ValueError):

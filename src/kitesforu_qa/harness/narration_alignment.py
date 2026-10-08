@@ -233,35 +233,6 @@ def delivered_spans(clips: Sequence[dict[str, Any]]) -> dict[int, tuple[int, int
     return DeliveredTimeline.from_clips(clips).spans_by_clip()
 
 
-def _span(clip: dict[str, Any]) -> tuple[int, int] | None:
-    """(start_ms, end_ms) for a clip, tolerating end_ms-vs-duration_ms shapes. None if unusable.
-
-    Used only to bound the LAST clip (which has no successor) and by :func:`starved_clips`. Every
-    other consumer must use :func:`delivered_spans` — see its docstring for why ``duration_ms`` is
-    the wrong window."""
-    start = clip.get("start_ms")
-    if start is None:
-        return None
-    try:
-        start = int(start)
-    except (TypeError, ValueError):
-        return None
-    end = clip.get("end_ms")
-    if end is None:
-        dur = clip.get("duration_ms")
-        if dur is None:
-            return None
-        try:
-            end = start + int(dur)
-        except (TypeError, ValueError):
-            return None
-    try:
-        end = int(end)
-    except (TypeError, ValueError):
-        return None
-    return (start, end) if end > start else None
-
-
 def _asset_key(clip: dict[str, Any]) -> str | None:
     """Identity of the PICTURE, so re-showing the same asset counts as one hold, not two."""
     for key in ("content_hash", "asset_uri", "image_url"):

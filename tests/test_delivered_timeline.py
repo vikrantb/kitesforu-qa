@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
-import os
 import random
 import sys
 from pathlib import Path
@@ -77,8 +76,10 @@ def test_a_stamped_video_hero_needs_video_evidence_in_the_stamp():
     painted_still = stamp([window(0, 0, 20000, "video_hero", asset_kind="image",
                                   render_mode="still")])
     painted_video = stamp([window(0, 0, 20000, "video_hero", asset_kind="video")])
-    assert DeliveredTimeline.from_clips(clips, stamp=painted_still).full_bleed_at(4499) is False
-    assert DeliveredTimeline.from_clips(clips, stamp=painted_video).full_bleed_at(4499) is True
+    assert DeliveredTimeline.from_clips(clips, stamp=painted_still,
+                                        master_ms=20000).full_bleed_at(4499) is False
+    assert DeliveredTimeline.from_clips(clips, stamp=painted_video,
+                                        master_ms=20000).full_bleed_at(4499) is True
 
 
 @pytest.mark.parametrize("bad, reason", [
@@ -138,29 +139,57 @@ def test_a_stamp_that_names_the_fetched_master_is_read(generation):
     (named(), FetchedMaster(111, 2049)),
     (named("112"), FetchedMaster(111, 2048)),
     (named("not-a-generation"), FetchedMaster(111, 2048)),
+    # Only ONE field on a side is still compared: a size that differs is another object.
+    (named(), FetchedMaster(None, 4096)),           # a GET without x-goog-generation, wrong size
+    (named(generation=None), FetchedMaster(111, 4096)),
+    (named(size=None), FetchedMaster(112, None)),   # a size not known, a generation that differs
 ])
 def test_a_stamp_that_names_another_master_is_stale(st, fetched):
     """A pass that uploads a new master and dies before its sidecar leaves the old sidecar at the same
-    URL. Over the same audio the new master has the same length, so only the object can tell."""
+    URL. Over the same audio the new master has the same length, so only the object can tell. Each
+    identity field that BOTH sides carry is compared on its own (round-2 code critic: a 4096-byte
+    file against a stamp naming 9999 bytes was accepted because no generation was known)."""
     tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=20000, master=fetched)
     assert (tl.source, tl.stamp_rejected) == ("estimated", "stale_master")
     assert tl.full_bleed_at(4499) is True and tl.full_bleed_at(10499) is False   # the estimate
 
 
-@pytest.mark.parametrize("st, fetched", [
+@pytest.mark.parametrize("st, fetched, identity", [
     (stamp([window(0, 0, 9000, "scene_image"), window(1, 9000, 20000, "diagram")]),
-     FetchedMaster(999, 1)),                                   # a sidecar written before the fields
-    (named(), None),                                           # nothing fetched to compare with
-    (named(), FetchedMaster(None, 2048)),                      # a GET without x-goog-generation
-    (named(size=None), FetchedMaster(999, 1)),                 # only one of the two fields
-    (named(generation=None), FetchedMaster(999, 1)),
-    (named(generation="  "), FetchedMaster(999, 1)),           # a blank generation is no generation
+     FetchedMaster(999, 1), "unchecked"),                      # a sidecar written before the fields
+    (named(), None, "unchecked"),                              # nothing fetched to compare with
+    (named(generation=None, size=None), FetchedMaster(111, 2048), "unchecked"),
+    (named(generation="  ", size=None), FetchedMaster(999, 1), "unchecked"),  # blank is no generation
+    (named(size=None), FetchedMaster(None, 2048), "unchecked"),  # no field on BOTH sides
+    (named(), FetchedMaster(None, 2048), "verified"),          # the size agrees, no generation known
+    (named(size=None), FetchedMaster(111, 1), "verified"),     # the generation agrees
+    (named(), FetchedMaster(111, 2048), "verified"),
 ])
-def test_without_both_pairs_the_length_check_decides(st, fetched):
+def test_with_nothing_to_contradict_the_length_check_decides(st, fetched, identity):
+    """No field disagrees, so the windows' end against the probed video decides, and the timeline
+    says whether the object itself was compared (``master_identity``)."""
     tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=20000, master=fetched)
-    assert (tl.source, tl.stamp_rejected) == ("stamp", None)
+    assert (tl.source, tl.stamp_rejected, tl.master_identity) == ("stamp", None, identity)
     stale = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=30000, master=fetched)
     assert stale.stamp_rejected == "windows end 20000 != probed video 30000"
+
+
+@pytest.mark.parametrize("master_ms", [None, 0, 0.0])
+def test_a_stamp_tied_to_nothing_is_not_used(master_ms):
+    """No probed length (a probe that returned 0 s is no length) and no identity compared: nothing
+    ties the stamp to this video, so it is not used, and the timeline says why (round-2 code critic:
+    a falsy `master_ms` skipped the length check and trusted the stamp unchecked)."""
+    for st, fetched in ((named(), None), (named(), FetchedMaster(None, None)),
+                        (named(generation=None, size=None), FetchedMaster(111, 2048))):
+        tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=st, master_ms=master_ms, master=fetched)
+        assert (tl.source, tl.stamp_rejected) == ("estimated", dt.UNTIED), (st, fetched)
+
+
+@pytest.mark.parametrize("master_ms", [None, 0])
+def test_a_verified_identity_ties_a_stamp_whose_length_is_unknown(master_ms):
+    tl = DeliveredTimeline.from_clips(TWO_CLIPS, stamp=named(), master_ms=master_ms,
+                                      master=FetchedMaster(111, 2048))
+    assert (tl.source, tl.stamp_rejected, tl.master_identity) == ("stamp", None, "verified")
 
 
 def test_the_named_master_does_not_excuse_the_length_check():
@@ -172,7 +201,7 @@ def test_the_named_master_does_not_excuse_the_length_check():
 def test_a_gap_in_the_stamp_and_the_intro_before_it_are_unknown():
     clips = [clip(0, "scene_image"), clip(1, "scene_image")]
     tl = DeliveredTimeline.from_clips(clips, stamp=stamp([
-        window(0, 3000, 6000, "scene_image"), window(1, 9000, 20000, "scene_image")]))
+        window(0, 3000, 6000, "scene_image"), window(1, 9000, 20000, "scene_image")]), master_ms=20000)
     assert tl.candidates_at(1499) == []         # before the first painted window: the lead
     assert tl.candidates_at(7499) == []         # 1.5 s clear of both windows
     assert tl.full_bleed_at(10499) is True
@@ -182,14 +211,17 @@ def test_a_stamp_reports_one_envelope_per_clip_and_one_window_per_painted_span()
     clips = [clip(0, "scene_image"), clip(1, "diagram")]
     tl = DeliveredTimeline.from_clips(clips, stamp=stamp([
         window(0, 0, 4000, "scene_image"), window(1, 4000, 9000, "diagram"),
-        window(0, 9000, 20000, "scene_image")]))
+        window(0, 9000, 20000, "scene_image")]), master_ms=20000)
     assert tl.spans_by_clip() == {0: (0, 20000), 1: (4000, 9000)}
     assert [(w.start_ms, w.end_ms) for w in tl.painted_windows()] == [
         (0, 4000), (4000, 9000), (9000, 20000)]
 
 
-# The producer's own stamps: built by kitesforu-workers #3257 (022ffae383a3)
-# `painted_timeline.build_painted_timeline`, and saved verbatim under tests/fixtures/.
+# Two stamps in the producer's shape: built OFFLINE by kitesforu-workers #3257 (022ffae383a3)
+# `painted_timeline.build_painted_timeline` from a clip table (the witness f7df77bf's own, for
+# `witness`), and saved under tests/fixtures/. Neither is the stamp of a real render: the witness
+# master predates the producer by three hours. `master_generation` / `master_size` were added by
+# hand, the witness's from a GET of its master.
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
@@ -288,6 +320,21 @@ def test_parse_v1s_typed_model_reads_exactly_like_its_json():
 
 
 # ── the sidecar is the only channel, and an unread one is an estimate that says why ───────────
+
+@pytest.mark.parametrize("rejected, expect", [
+    (None, None),
+    ("parser_unavailable: FileNotFoundError: /x/kitesforu-workers has no origin/main:src/w.py",
+     "NO PARSER: this job names the producer's painted timeline"),
+    ("stale_master", "was not used (stale_master)"),
+    (dt.UNTIED, f"was not used ({dt.UNTIED})"),
+    ("fetch_failed: HTTPError: 404", "was not used (fetch_failed: HTTPError: 404)"),
+])
+def test_every_reader_prints_one_line_for_a_stamp_it_could_not_use(rejected, expect):
+    note = dt.stamp_note(rejected)
+    assert (note is None) if expect is None else (expect in note), note
+    if rejected and rejected.startswith("parser_unavailable"):
+        assert "WORKERS_SRC" in note and "WORKERS_REPO" in note      # it says how to fix the setup
+
 
 def test_from_job_reads_the_sidecar_the_doc_names(monkeypatch):
     """No caller passes the sidecar in production: `from_job` reads it. Pinned with the read
@@ -556,6 +603,50 @@ def test_full_bleed_is_scene_image_or_video_hero_with_veo_evidence(row, expected
     assert bleeds_by_design(row) is expected
 
 
+#: Real persisted rows whose MODALITY is ``diagram`` while their kind is a picture kind
+#: (``diagram_debug.kind == "scene_image"``), read from Firestore 2026-10-08. Widening
+#: ``FULL_BLEED_MODALITIES`` alone (sabotage arm E1) exempts every such row, because
+#: ``has_picture_pixels`` decides by kind. The round-2 claims lens counted 40 such rows in 9 of 461
+#: delivered jobs. One frame from each of five of them (seeked over HTTPS at the row's mid-window)
+#: shows 3 photographs and 2 drawn renders, so the kind cannot vouch for the pixels:
+#:   * a9dc0a4f row 56 (parallax_2_5d, "weave:adjacent_diagram→scene"): a four-step diagram the
+#:     parallax pushes off the right edge, card 3 cut at 331.0 s. Its frame is the gate's fixture
+#:     ``tests/fixtures/edge_witness_a9dc0a4f_331s.png``;
+#:   * 33ae4811 row 10 (``motion_render`` card_gsap): a text card.
+#: The renderer's ``_is_pictorial`` crop-fills these rows (workers ``video_assembler.py``), which is
+#: exactly how a labelled figure gets cut, so they stay CHECKED. Exempting them is a decision for
+#: the producer's stamp to make, not for a stale kind.
+DIAGRAM_ROWS_WITH_A_PICTURE_KIND = {
+    "a9dc0a4f_row56": {
+        "start_ms": 326057, "duration_ms": 6294, "modality": "diagram",
+        "diagram_debug": {"kind": "scene_image"}, "render_mode": "parallax_2_5d",
+        "modality_reasons": ["scenario_tailoring.modality_policy=authored_diagrams",
+                             "rule3:diagram_spec_present", "weave:adjacent_diagram→scene",
+                             "imagination:director_scene", "editorial_director:reveal_inherit(diagram)",
+                             "carried_through_render_mode_upgrade:parallax_2_5d"],
+        "asset_uri": "gs://b/a9dc0a4f/72a97591ec8add79dca0_63600ms_dav2-small-fp16-v1_parallax.mp4",
+        "status": "done"},
+    "33ae4811_row10": {
+        "start_ms": 39473, "duration_ms": 4877, "modality": "diagram",
+        "diagram_debug": {"kind": "scene_image"}, "render_mode": "video", "motion_render": "card_gsap",
+        "asset_uri": "gs://b/33ae4811/35513fc2d3617e019aeb8979_5323ms.mp4", "status": "done"},
+    "motion_with_a_library_demote": {
+        "modality": "motion", "modality_reasons": ["demote→library_image:cc0"],
+        "asset_uri": "gs://b/m.png", "status": "done"},
+}
+
+
+@pytest.mark.parametrize("name", sorted(DIAGRAM_ROWS_WITH_A_PICTURE_KIND))
+def test_a_drawn_modality_with_a_picture_kind_stays_checked(name):
+    """The pin the round-2 claims lens asked for: E1 ("widen FULL_BLEED_MODALITIES alone") was called
+    an equivalent mutant, and it is not. It flips these rows from checked to exempt; this goes red."""
+    row = DIAGRAM_ROWS_WITH_A_PICTURE_KIND[name]
+    assert dt.has_picture_pixels(row) is True        # PREMISE: the kind (or demote) says picture
+    assert bleeds_by_design(row) is False
+    tl = DeliveredTimeline.from_clips([dict(row, start_ms=0, duration_ms=6000)], master_ms=6000)
+    assert tl.full_bleed_at(1499) is False
+
+
 # ── a full-bleed modality that carries DRAWN TEXT is checked ────────────────────────────────────
 
 PHOTO = {"modality": "scene_image", "asset_uri": "gs://b/p.mp4", "status": "done"}
@@ -746,19 +837,17 @@ def test_painted_windows_hand_a_pile_to_its_last_claim():
 
 # ── the renderer as an oracle ──────────────────────────────────────────────────────────────────
 
-_QA_ROOT = Path(__file__).resolve().parents[1]
-_EXPLICIT_SRC = os.environ.get("WORKERS_SRC")
-_WORKERS_SRC = _EXPLICIT_SRC or str(_QA_ROOT.parent / "kitesforu-workers" / "src")
-
-
 def _renderer():
     """The renderer's own passes, or SKIP when kitesforu-workers is absent (FAIL when WORKERS_SRC
-    names a tree without it): the pattern of `test_qa_mirrors_match_production.py`."""
-    if _WORKERS_SRC not in sys.path:
-        sys.path.insert(0, _WORKERS_SRC)
+    names a tree without it): the pattern of `test_qa_mirrors_match_production.py`. The tree is the
+    loader's own (``workers_tree``): the override, else the workers repo's working tree, which the
+    renderer's modules must be importable from."""
+    tree, explicit = sidecar_mod.workers_tree(), sidecar_mod.workers_src_override()
+    if tree not in sys.path:
+        sys.path.insert(0, tree)
     if importlib.util.find_spec("workers") is None:
-        if _EXPLICIT_SRC:
-            pytest.fail(f"WORKERS_SRC={_EXPLICIT_SRC} holds no `workers` package")
+        if explicit:
+            pytest.fail(f"WORKERS_SRC={explicit} holds no `workers` package")
         pytest.skip("kitesforu-workers is not importable here (set WORKERS_SRC). SKIPPED, not passed.")
     cov = importlib.import_module("workers.stages.visuals.coverage_gate")
     pace = importlib.import_module("workers.stages.visuals.pacing.master_span_refloor")
@@ -838,29 +927,30 @@ def test_the_fallback_never_exempts_a_frame_the_renderer_paints_with_a_card():
 _CONTRACT_KEYS = ("modality", "render_mode", "motion_render", "asset_kind")
 
 #: Written by workers' real assembler test (``tests/unit/visuals/test_the_painted_timeline.py`` with
-#: ``KFU_RECORD_PAINTED_TIMELINE_GOLDEN=1``), next to ``parse_v1`` since #3257 ``bfa00e734``.
-_GOLDEN = Path("tests/fixtures/painted_timeline/painted_timeline_v1.golden.json")
+#: ``KFU_RECORD_PAINTED_TIMELINE_GOLDEN=1``), next to ``parse_v1`` since #3257 (merged as 2d707598c).
+_GOLDEN = "tests/fixtures/painted_timeline/painted_timeline_v1.golden.json"
 
 
-def _golden_sidecar():
-    """The golden sidecar workers' assembler test writes. SKIP while the workers tree at
-    ``WORKERS_SRC`` predates the sidecar contract (no ``parse_v1``); FAIL once it has ``parse_v1`` but
-    not the golden beside it."""
+def _golden_sidecar() -> bytes:
+    """The golden sidecar workers' assembler test writes, read from the SAME source as ``parse_v1``
+    (the loader's ``read_workers_file``: the ``WORKERS_SRC`` override's checkout, else the pinned git
+    object). SKIP while that source predates the sidecar contract (no ``parse_v1``); FAIL once it has
+    ``parse_v1`` but not the golden beside it, which is what a ``WORKERS_SRC`` archive of ``src``
+    alone looks like: archive ``tests/fixtures/painted_timeline`` too."""
     parse_v1, why = sidecar_mod.load_parse_v1()
     if parse_v1 is None:
-        pytest.skip(f"workers at {sidecar_mod.workers_src()} has no painted_timeline.parse_v1 "
-                    f"({why}): it predates the sidecar contract. SKIPPED, not passed.")
-    golden = Path(sidecar_mod.workers_src()).parent / _GOLDEN
-    if not golden.is_file():
-        pytest.fail(f"workers ships parse_v1, so it ships its golden sidecar at {golden}")
-    return golden
+        pytest.skip(f"workers has no painted_timeline.parse_v1 here ({why}): it predates the sidecar "
+                    f"contract. SKIPPED, not passed.")
+    try:
+        return sidecar_mod.read_workers_file(_GOLDEN)[0]
+    except FileNotFoundError as exc:
+        pytest.fail(f"workers ships parse_v1, so it ships its golden sidecar: {exc}")
 
 
 def test_the_producers_golden_sidecar_reads_through_parse_v1():
     """The golden, fetched as bytes and parsed by workers' own ``parse_v1``, gives the reader the
     golden's windows exactly: clip, bounds and every painted field."""
-    golden = _golden_sidecar()
-    body = golden.read_bytes()
+    body = _golden_sidecar()
     raw = json.loads(body)
     read = read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: body)
     assert (read.status, read.bytes_read) == ("read", len(body)), read
@@ -883,11 +973,11 @@ def test_the_producers_golden_sidecar_reads_through_parse_v1():
 
 
 def test_the_vendored_stamps_have_the_goldens_shape():
-    """The two stamps under tests/fixtures/ were built by the producer at #3257 022ffae38, and given
-    ``master_generation`` / ``master_size`` when 2579ca090 added them. A field the sidecar adds or
-    drops makes them stale, and this goes red. Their ``_fixture_provenance`` key is documentation,
-    not contract."""
-    golden = json.loads(_golden_sidecar().read_text())
+    """The two stamps under tests/fixtures/ were built offline by the producer's own
+    ``build_painted_timeline`` at #3257 022ffae38, and given ``master_generation`` / ``master_size``
+    by hand when #3257 added them. A field the sidecar adds or drops makes them stale, and this goes
+    red. Their ``_fixture_provenance`` key is documentation, not contract."""
+    golden = json.loads(_golden_sidecar())
     for name in ("witness", "coverage_untraced"):
         vendored = produced(name)
         assert {k for k in vendored if not k.startswith("_")} == set(golden), name
@@ -900,11 +990,11 @@ def test_the_golden_names_the_master_it_was_written_for():
     ``parse_v1``, the golden is accepted against the master it names and refused, as ``stale_master``,
     against any other."""
     golden = _golden_sidecar()
-    raw = json.loads(golden.read_bytes())
+    raw = json.loads(golden)
     if raw.get("master_generation") is None or raw.get("master_size") is None:
-        pytest.skip(f"the golden at {golden} names no master yet (no master_generation and "
-                    f"master_size): #3257 has not added them at this WORKERS_SRC. SKIPPED, not passed.")
-    read = read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: golden.read_bytes())
+        pytest.skip("the golden names no master yet (no master_generation and master_size): #3257 "
+                    "has not added them at this workers source. SKIPPED, not passed.")
+    read = read_sidecar({"visual": {"painted_timeline_uri": URI}}, fetch=lambda url: golden)
     n = 1 + max(max(w["clip"], w["source_clip"]) for w in raw["windows"])
     clips = [clip(0, None) for _ in range(n)]
     for w in raw["windows"]:

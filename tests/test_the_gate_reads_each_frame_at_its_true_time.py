@@ -128,26 +128,28 @@ def _frame_number(png: str) -> int:
 
 
 @pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg not installed")
+@pytest.mark.parametrize("interval_ms", [3000, 1000])        # the gate's, and the checker's 9b
 @pytest.mark.parametrize("rate", ["24", "25", "30", "30000/1001"])
-def test_every_extracted_frame_shows_the_instant_the_gate_reads_it_at(tmp_path, rate):
+def test_every_extracted_frame_shows_the_instant_the_gate_reads_it_at(tmp_path, rate, interval_ms):
     """Run the REAL extraction on a video whose frames name themselves, and require the instant
     `_frame_time_ms` assigns to every extracted frame to fall inside that frame's own display
     interval ``[n/fps, (n+1)/fps)``. Goes red on the old ``k * 3000`` mapping at every frame."""
     gate = _load_gate()
     fps = Fraction(rate)
+    slot = Fraction(interval_ms, 1000)
     mp4 = tmp_path / "numbered.mp4"
     _numbered_video(mp4, rate, seconds=22)
-    out = gate._extract_frames(str(mp4), str(tmp_path / "frames"))
-    assert len(out) == 7, f"22 s at one frame per 3 s should give 7 frames, got {len(out)}"
+    out = gate._extract_frames(str(mp4), str(tmp_path / "frames"), interval_ms)
+    assert len(out) == {3000: 7, 1000: 22}[interval_ms], len(out)
     for k, png in enumerate(out):
         n = _frame_number(png)
         shows_from, shows_until = n / fps, (n + 1) / fps
         # PREMISE: the frame really sits mid-slot, so this case can tell the two mappings apart.
-        assert shows_from - 3 * k > 1, (
+        assert shows_from - slot * k > slot / 3, (
             f"frame {k} is source frame {n} ({float(shows_from):.4f}s) — not mid-slot, so this "
             f"case cannot discriminate the mappings"
         )
-        at = Fraction(gate._frame_time_ms(k), 1000)
+        at = Fraction(gate._frame_time_ms(k, interval_ms), 1000)
         assert shows_from <= at < shows_until, (
             f"@{rate}fps frame {k} is source frame {n}, on screen {float(shows_from):.4f}-"
             f"{float(shows_until):.4f}s, but the gate reads it at {float(at):.3f}s"
@@ -192,6 +194,19 @@ def test_the_instants_are_mid_slot():
     """The documented values, written out rather than recomputed from the formula."""
     gate = _load_gate()
     assert [gate._frame_time_ms(k) for k in (0, 1, 2, 24, 27)] == [1499, 4499, 7499, 73499, 82499]
+    assert [gate._frame_time_ms(k, 1000) for k in (0, 1, 2, 17)] == [499, 1499, 2499, 17499]
+
+
+def test_the_checker_reads_every_instant_the_gate_and_the_arm_it_replaced_read():
+    """9b's one frame per second holds every instant the gate reads (one per 3 s) and every instant
+    the bright-pixel arm it replaced read (step 9's ``fps=1/5``), so no frame either judged goes
+    unjudged. The two witnesses that arm was written for sit at 5 s slots 0 and 3."""
+    gate = _load_gate()
+    checker = {gate._frame_time_ms(j, gate.CHECKER_FRAME_INTERVAL_MS) for j in range(700)}
+    assert {gate._frame_time_ms(k) for k in range(200)} <= checker
+    assert {gate._frame_time_ms(k, 5000) for k in range(120)} <= checker
+    assert gate._frame_time_ms(3, 5000) == gate._frame_time_ms(17, 1000) == 17499    # 7171699f f_004
+    assert gate._frame_time_ms(0, 5000) == gate._frame_time_ms(2, 1000) == 2499      # 4d41320d f_001
 
 
 # ── THE WITNESS ──────────────────────────────────────────────────────────────────────────────
@@ -244,7 +259,8 @@ def test_the_coverage_says_the_witness_pass_is_a_pass_by_exemption(frames):
     gate = _load_gate()
     _, cov = gate._pixel_invariants([frames["photo"]] * 28, timeline=_witness_timeline())
     assert cov == {"sampled": 12, "checked": 0, "exempt_full_bleed": 12, "unknown": 0,
-                   "flagged": 0, "timeline": "trusted", "source": "estimated", "sidecar_bytes": 0}
+                   "flagged": 0, "timeline": "trusted", "source": "estimated", "sidecar_bytes": 0,
+                   "flagged_frames": []}
     assert "checked 0 of 12" in gate._edge_clip_note(cov)
     assert "timeline trusted, estimated)" in gate._edge_clip_note(cov)
 
@@ -261,7 +277,7 @@ def test_probe_master_reads_the_producers_sidecar_and_says_so(frames, tmp_path, 
     monkeypatch.setattr(dt, "read_sidecar", lambda doc: read_sidecar(
         doc, fetch=lambda url: body, parse=json.loads))
     gate = _load_gate()
-    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out: [frames["photo"]] * 28)
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
     doc = {"master_segment_timeline": [{"index": 0}],
            "visual": {"clips": _witness_clips(), "painted_timeline_uri": uri}}
     _, issues, cov = gate.probe_master(doc, "unused.mp4", str(tmp_path), 85033)
@@ -363,10 +379,11 @@ def test_run_gate_reports_coverage_and_a_note_when_nothing_was_checked(frames, t
 
     def fake_download(cmd, **_kw):
         pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(gate.subprocess, "run", fake_download)
     monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
-    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out: [frames["photo"]] * 28)
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
     res = gate.run_gate("f7df77bf-witness")
     assert "edge_clip" not in res
     assert res["edge_clip_coverage"]["checked"] == 0 and res["verdict"] == "PASS_DETERMINISTIC"
@@ -409,10 +426,11 @@ def _gate_with_a_stamped_job(monkeypatch, tmp_path, frames, *, stamped_generatio
         pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(body)
         pathlib.Path(cmd[cmd.index("-D") + 1]).write_text(
             f"HTTP/1.1 200 OK\r\nx-goog-generation: {fetched_generation}\r\n\r\n")
+        return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(gate.subprocess, "run", fake_get)
     monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
-    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out: [frames["photo"]] * 28)
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
     return gate.run_gate("f7df77bf-witness"), calls
 
 
@@ -421,7 +439,7 @@ def test_run_gate_holds_the_stamp_to_the_master_it_fetched(frames, tmp_path, mon
     res, calls = _gate_with_a_stamped_job(monkeypatch, tmp_path, frames,
                                           stamped_generation=1759660800123456,
                                           fetched_generation=1759660800123456)
-    assert calls[0][:2] == ["curl", "-sL"] and "-D" in calls[0]
+    assert calls[0][:2] == ["curl", "-sfL"] and "-D" in calls[0]
     cov = res["edge_clip_coverage"]
     assert (cov["source"], cov.get("stamp_rejected")) == ("stamp", None), cov
     # The master was re-assembled after the stamp was written: same length, another object.
@@ -441,3 +459,211 @@ def test_the_captioned_copy_is_not_held_to_the_masters_generation(frames, tmp_pa
                                       fetched_generation=1759661999000001, fetch_burned=True)
     cov = res["edge_clip_coverage"]
     assert (cov["source"], cov.get("stamp_rejected")) == ("stamp", None), cov
+
+
+# ── a GET that fails is a FAIL, never the last run's master re-scored ──────────────────────────
+
+def _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail):
+    """`run_gate` on the witness with an earlier run's master left at the gate's temp path, and a GET
+    that fails as ``fail`` says. Returns the result and the header files left behind."""
+    gate = _load_gate()
+    doc = {"topic": "a storm", "master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": _witness_clips(), "video_url": "https://example.invalid/m.mp4"}}
+    monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
+    monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
+    stale = tmp_path / "ag_f7df77bf-witness.mp4"
+    stale.write_bytes(b"\x00" * 4096)                         # what an earlier run downloaded
+
+    def failing_get(cmd, **_kw):
+        if fail == "exit":
+            return subprocess.CompletedProcess(cmd, 22)        # curl -f on a 404, nothing written
+        if fail == "missing":
+            raise FileNotFoundError(2, "No such file or directory", cmd[0])
+        raise subprocess.TimeoutExpired(cmd, 900)
+
+    monkeypatch.setattr(gate.subprocess, "run", failing_get)
+    monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
+    res = gate.run_gate("f7df77bf-witness")
+    return res, sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".headers")
+
+
+@pytest.mark.parametrize("fail", ["exit", "missing", "timeout"])
+def test_a_failed_get_fails_the_gate_and_leaves_no_headers(frames, tmp_path, monkeypatch, fail):
+    """Round-2 code critic #2 and #5: the master path is fixed per job, so a GET that failed used to
+    leave the PREVIOUS run's bytes to be scored as this run's, with empty headers. The old file is
+    removed first, the GET's exit status counts, and the header file goes whatever happens."""
+    res, headers = _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail)
+    assert res["verdict"] == "FAIL" and res["issues"][0]["sev"] == "BLOCKER", res
+    assert res["issues"][0]["msg"].startswith("artifact not fetchable: https://example.invalid/m.mp4")
+    assert not (tmp_path / "ag_f7df77bf-witness.mp4").exists() and headers == []
+
+
+@pytest.mark.parametrize("where", ["probe", "extract"])
+def test_a_subprocess_that_times_out_is_a_fail_not_a_hang(frames, tmp_path, monkeypatch, where):
+    """Round-1 latency #6: every gate subprocess has a timeout, and running into it FAILs the gate."""
+    gate = _load_gate()
+    doc = {"topic": "a storm", "master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": _witness_clips(), "video_url": "https://example.invalid/m.mp4"}}
+    monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
+    monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def get(cmd, **_kw):
+        pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def times_out(*_a, **_k):
+        raise subprocess.TimeoutExpired("ffmpeg", 1)
+
+    monkeypatch.setattr(gate.subprocess, "run", get)
+    monkeypatch.setattr(gate, "_probe_dims", times_out if where == "probe"
+                        else (lambda path: (1920, 1080, 85.033)))
+    monkeypatch.setattr(gate, "_extract_frames", times_out if where == "extract"
+                        else (lambda mp4, out, *_: [frames["photo"]] * 28))
+    res = gate.run_gate("f7df77bf-witness")
+    assert res["verdict"] == "FAIL" and "timed out" in res["issues"][-1]["msg"], res
+
+
+def test_every_gate_subprocess_carries_a_timeout(tmp_path, monkeypatch):
+    seen = []
+    gate = _load_gate()
+    monkeypatch.setattr(gate.subprocess, "run",
+                        lambda cmd, **kw: seen.append((cmd[0], kw.get("timeout")))
+                        or subprocess.CompletedProcess(cmd, 0, stdout=""))
+    gate._probe_dims("x.mp4")
+    gate._extract_frames("x.mp4", str(tmp_path / "f"))
+    assert seen == [("ffprobe", gate._PROBE_TIMEOUT_S), ("ffmpeg", gate._EXTRACT_TIMEOUT_S)]
+
+
+def test_frames_an_earlier_run_left_are_not_scored(tmp_path, monkeypatch):
+    """A longer earlier master leaves tail frames in the same frames dir; they are removed first."""
+    gate = _load_gate()
+    out = tmp_path / "frames"
+    out.mkdir()
+    for k in range(1, 30):
+        (out / f"f_{k:03d}.png").write_bytes(b"old")
+    (out / "notes.txt").write_text("kept")
+
+    def extract(cmd, **_kw):
+        for k in range(1, 4):
+            (out / f"f_{k:03d}.png").write_bytes(b"new")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(gate.subprocess, "run", extract)
+    got = gate._extract_frames("x.mp4", str(out))
+    assert [pathlib.Path(f).name for f in got] == ["f_001.png", "f_002.png", "f_003.png"]
+    assert (out / "notes.txt").exists()
+
+
+# ── the step-by-step checker's 9b: ANY single clipped frame of all frames FAILs ─────────────────
+
+FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
+
+#: The frames the arm 9b replaced was written for, as the gate's extraction holds them (540 px wide,
+#: gray: the rule reads luma only). Each is a SINGLE clipped frame on its master. Extracted
+#: 2026-10-08 from the delivered masters (generations 1785993296599620 and 1786009381916648, the
+#: objects of 2026-08-06): the old arm's step-9 frame and the 1/s frame at the same instant are
+#: pixel-identical at this scale (mean |diff| 0.0; the neighbouring frames differ by 33-37).
+#:   * 7171699f f_004, 17.5 s: "Summer heat pushes lattice outward" rendered "mmer heat ..." (left
+#:     margin 116 vertical steps, threshold 12);
+#:   * 4d41320d f_001, 2.5 s: the hook composite cut at the top and the bottom (977 and 395 steps).
+WITNESSES = {"7171699f_f004": 17499, "4d41320d_f001": 2499}
+
+
+def _witness(name):
+    return str(FIXTURES / f"edge_witness_{name}.png")
+
+
+def _flat(path, size):
+    PIL_Image.new("L", size, 40).save(path)
+    return str(path)
+
+
+@pytest.mark.parametrize("name", sorted(WITNESSES) + ["a9dc0a4f_331s"])
+def test_each_witness_frame_trips_the_rule_at_the_gates_scale(name):
+    """PREMISE for the pins below: the rule flags each real witness frame on its own."""
+    gate = _load_gate()
+    im = np.asarray(PIL_Image.open(_witness(name)).convert("L"), dtype=float)
+    assert im.shape[1] == 540 and gate._cut_at_edge(im)
+
+
+@pytest.mark.parametrize("name", sorted(WITNESSES))
+def test_the_checker_fails_one_clipped_frame_the_gates_sample_lets_through(name, tmp_path,
+                                                                           monkeypatch):
+    """Round-2 code critic #1: 9b had become the gate's AGGREGATE (12 sampled frames, MAJOR at 4),
+    so a master with one, two or three clipped frames PASSed it, though the arm it replaced FAILed
+    on one. Here a master is a diagram for 24 s with ONE real witness frame at its witness instant:
+    the checker FAILs and names it, and the gate's own sampled verdict raises nothing."""
+    gate = _load_gate()
+    size = PIL_Image.open(_witness(name)).size
+    flat = _flat(tmp_path / "flat.png", size)
+    at = WITNESSES[name]
+    per_second = [flat] * 24
+    per_second[at // 1000] = _witness(name)
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": [_clip(0, "diagram", duration_ms=24000, beat_index=0)]}}
+
+    def extract(mp4, out, interval_ms=3000):
+        assert interval_ms == gate.CHECKER_FRAME_INTERVAL_MS, interval_ms
+        return per_second
+
+    monkeypatch.setattr(gate, "_extract_frames", extract)
+    failed, lines = gate.every_frame_edge_step(doc, "unused.mp4", str(tmp_path), 24000)
+    assert failed and lines[0].endswith(":: FAIL"), lines
+    assert f"{pathlib.Path(per_second[at // 1000]).name}@{at / 1000:.1f}s" in lines[0], lines
+    # The gate's own verdict, on the same master at its own 3 s frames (which hold the witness only
+    # by luck of phase, so it is placed at one): 1 flagged of 8 checked, below max(2, 8 // 3).
+    gate_frames = [flat] * 8
+    gate_frames[at // 3000] = _witness(name)
+    issues, cov = gate._pixel_invariants(gate_frames, timeline=DeliveredTimeline.from_job(doc, 24000))
+    assert cov["flagged"] == 1 and not _edge_issues(issues), (cov, issues)
+
+
+def test_the_checker_passes_a_master_with_no_clipped_frame(tmp_path, monkeypatch):
+    gate = _load_gate()
+    flat = _flat(tmp_path / "flat.png", (540, 960))
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [flat] * 24)
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": [_clip(0, "diagram", duration_ms=24000, beat_index=0)]}}
+    failed, lines = gate.every_frame_edge_step(doc, "unused.mp4", str(tmp_path), 24000)
+    assert not failed and lines[0].endswith(":: PASS") and "flagged=0 []" in lines[0], lines
+
+
+def test_the_checker_says_when_the_producers_timeline_had_no_parser(tmp_path, monkeypatch):
+    """A job that names a sidecar, judged where workers' parse_v1 cannot be loaded: every frame is
+    attributed by the estimate, and the step says so in its own output."""
+    from kitesforu_qa.harness import delivered_timeline as dt
+    from kitesforu_qa.harness.painted_timeline_sidecar import SidecarRead
+
+    gate = _load_gate()
+    flat = _flat(tmp_path / "flat.png", (540, 960))
+    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [flat] * 6)
+    monkeypatch.setattr(dt, "read_sidecar", lambda doc: SidecarRead(
+        "parser_unavailable", "https://x.invalid/pt.json",
+        detail="FileNotFoundError: /r/kitesforu-workers has no origin/main:src/w.py"))
+    doc = {"master_segment_timeline": [{"index": 0}],
+           "visual": {"clips": [_clip(0, "diagram", duration_ms=6000)],
+                      "painted_timeline_uri": "https://x.invalid/pt.json"}}
+    _, lines = gate.every_frame_edge_step(doc, "unused.mp4", str(tmp_path), 6000)
+    assert any(line.strip().startswith("NOTE: NO PARSER:") for line in lines), lines
+
+
+# ── E1: a diagram whose kind says "picture" stays checked at the gate ──────────────────────────
+
+def test_a_diagram_row_with_a_picture_kind_is_checked_and_its_clipped_frame_flagged(tmp_path):
+    """The real a9dc0a4f row 56 (``modality=diagram``, ``diagram_debug.kind=scene_image``, parallax)
+    and the frame its master shows at 331.0 s: a four-step diagram whose third card the parallax
+    pushes off the right edge (258 vertical steps in the right margin). Sabotage arm E1, widening
+    ``FULL_BLEED_MODALITIES`` alone, exempts this row and hides the frame; this goes red then.
+    See ``DIAGRAM_ROWS_WITH_A_PICTURE_KIND`` in ``tests/test_delivered_timeline.py`` for the rows."""
+    gate = _load_gate()
+    row = _clip(0, "diagram", asset=".mp4", duration_ms=6294, beat_index=0,
+                diagram_debug={"kind": "scene_image"}, render_mode="parallax_2_5d",
+                modality_reasons=["rule3:diagram_spec_present", "weave:adjacent_diagram→scene",
+                                  "imagination:director_scene",
+                                  "carried_through_render_mode_upgrade:parallax_2_5d"])
+    frame = _witness("a9dc0a4f_331s")
+    issues, cov = gate._pixel_invariants([frame] * 2, timeline=DeliveredTimeline.from_clips(
+        [row], master_ms=6294))
+    assert (cov["exempt_full_bleed"], cov["checked"], cov["flagged"]) == (0, 2, 2), cov
+    assert _edge_issues(issues)

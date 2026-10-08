@@ -8,6 +8,8 @@ the file is offline and $0. Reading the golden sidecar through the real ``parse_
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 
 import pytest
 import requests
@@ -221,6 +223,119 @@ def test_a_module_that_fails_to_load_is_not_cached(tmp_path, monkeypatch):
     assert sc.load_parse_v1()[0] is not None
 
 
+def test_a_failed_load_leaves_no_module_registered(tmp_path, monkeypatch):
+    """The module is registered in ``sys.modules`` before it runs (pydantic needs it); a source that
+    raises half-way must not stay registered as if it had loaded."""
+    src = _tree(tmp_path / "src", "x = 1\nraise ValueError('half-written')\n")
+    monkeypatch.setenv("WORKERS_SRC", str(src))
+    before = {n for n in sys.modules if n.startswith("_kitesforu_qa_workers_painted_timeline_")}
+    assert sc.load_parse_v1() == (None, "ValueError: half-written")
+    after = {n for n in sys.modules if n.startswith("_kitesforu_qa_workers_painted_timeline_")}
+    assert after == before
+
+
+# ── by default: the PINNED GIT OBJECT, never a working tree ────────────────────────────────────
+
+_GIT = ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+        "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+
+
+def _git(repo, *args):
+    subprocess.run([*_GIT, "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def _parser_returning(label):
+    return f"def parse_v1(data):\n    return {label!r}\n"
+
+
+def _workers_repo(root, *, main, working_tree=None):
+    """A workers repo whose ``origin/main`` holds a ``painted_timeline.py`` returning ``main``, with a
+    checked-out local branch and, when given, an uncommitted working-tree copy that differ."""
+    root.mkdir()
+    _git(root, "init", "-q")
+    path = root / sc.PAINTED_TIMELINE_IN_REPO
+    path.parent.mkdir(parents=True)
+    path.write_text(_parser_returning(main))
+    _git(root, "add", sc.PAINTED_TIMELINE_IN_REPO)
+    _git(root, "commit", "-q", "-m", "main")
+    _git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(root, "checkout", "-q", "-b", "a-peers-branch")
+    path.write_text(_parser_returning("a peer's branch"))
+    _git(root, "commit", "-q", "-am", "branch")
+    if working_tree is not None:
+        path.write_text(_parser_returning(working_tree))
+    return root
+
+
+@pytest.fixture()
+def no_override(monkeypatch):
+    for name in ("WORKERS_SRC", "WORKERS_REPO", "WORKERS_REF"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_by_default_parse_v1_is_origin_main_not_the_checked_out_tree(tmp_path, no_override):
+    """Round-2 design BLOCK: the default used to be the sibling WORKING TREE, which sits on whatever
+    branch a peer checked out (and a qa worktree has no sibling at all), so the default read no
+    parser wherever the gate runs. The default is now ``origin/main``'s object: neither the branch
+    checked out nor an uncommitted edit can change which parser runs."""
+    repo = _workers_repo(tmp_path / "kitesforu-workers", main="origin/main",
+                         working_tree="an uncommitted edit")
+    no_override.setenv("WORKERS_REPO", str(repo))
+    parse_v1, why = sc.load_parse_v1()
+    assert why is None and parse_v1(b"{}") == "origin/main", why
+    assert sc.workers_tree() == str(repo / "src")       # the oracle's importable tree
+
+
+def test_workers_ref_names_the_object_to_read(tmp_path, no_override):
+    repo = _workers_repo(tmp_path / "kitesforu-workers", main="origin/main")
+    no_override.setenv("WORKERS_REPO", str(repo))
+    no_override.setenv("WORKERS_REF", "a-peers-branch")
+    assert sc.load_parse_v1()[0](b"{}") == "a peer's branch"
+
+
+def test_the_override_wins_over_the_git_object(tmp_path, no_override):
+    repo = _workers_repo(tmp_path / "kitesforu-workers", main="origin/main")
+    src = _tree(tmp_path / "src", _parser_returning("the override"), raising_inits=False)
+    no_override.setenv("WORKERS_REPO", str(repo))
+    no_override.setenv("WORKERS_SRC", str(src))
+    assert sc.load_parse_v1()[0](b"{}") == "the override"
+    assert sc.workers_tree() == str(src)
+
+
+def test_without_the_object_the_parser_is_unavailable_and_says_where_it_looked(tmp_path, no_override):
+    no_override.setenv("WORKERS_REPO", str(tmp_path / "not-a-repo"))
+    parse_v1, why = sc.load_parse_v1()
+    assert parse_v1 is None and why.startswith("FileNotFoundError: "), why
+    assert "origin/main:src/workers/stages/visuals/painted_timeline.py" in why and "WORKERS_SRC" in why
+
+
+def test_a_loaded_parser_is_reused_without_another_fork(tmp_path, no_override):
+    """A census builds one timeline per job; only the first load may run git."""
+    repo = _workers_repo(tmp_path / "kitesforu-workers", main="origin/main")
+    no_override.setenv("WORKERS_REPO", str(repo))
+    first, _ = sc.load_parse_v1()
+    no_override.setattr(sc.subprocess, "run", _never)
+    assert sc.load_parse_v1() == (first, None)
+
+
+def test_the_default_repo_is_the_canonical_checkouts_sibling_even_from_a_worktree(tmp_path, no_override):
+    """qa runs from linked worktrees, which have no sibling checkout of their own: the workers repo is
+    the sibling of the CANONICAL checkout, found through git's common directory."""
+    qa = tmp_path / "kitesforu-qa"
+    qa.mkdir()
+    _git(qa, "init", "-q")
+    (qa / "README").write_text("qa")
+    _git(qa, "add", "README")
+    _git(qa, "commit", "-q", "-m", "qa")
+    worktree = tmp_path / "elsewhere" / "wt-qa"
+    _git(qa, "worktree", "add", "-q", str(worktree))
+    no_override.setattr(sc, "_QA_ROOT", worktree)
+    assert sc.workers_repo().resolve() == (tmp_path / "kitesforu-workers").resolve()
+    no_override.setattr(sc, "_QA_ROOT", tmp_path / "not-a-checkout" / "qa")
+    assert sc.workers_repo() == tmp_path / "not-a-checkout" / "kitesforu-workers"
+
+
 # ── the master the reader fetched ──────────────────────────────────────────────────────────────
 
 def test_the_fetched_master_is_the_gets_generation_and_the_bytes_on_disk(tmp_path):
@@ -243,6 +358,25 @@ def test_a_get_without_a_usable_generation_is_incomplete(headers, generation, tm
     body.write_bytes(b"\x00" * 10)
     got = sc.fetched_master(headers, str(body))
     assert got == sc.FetchedMaster(generation, 10) and not got.complete
+
+
+def test_only_the_final_responses_generation_counts(tmp_path):
+    """With ``-L`` every redirect hop writes its own header block. A generation on an earlier hop
+    names some other object, so a final block without one is no generation (round-2 critic #4)."""
+    body = tmp_path / "v.mp4"
+    body.write_bytes(b"\x00" * 10)
+    headers = ("HTTP/1.1 302 Found\r\nx-goog-generation: 111\r\nLocation: https://x/v.mp4\r\n\r\n"
+               "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\r\n")
+    assert sc.fetched_master(headers, str(body)) == sc.FetchedMaster(None, 10)
+
+
+def test_an_unreadable_generation_clears_one_read_before_it(tmp_path):
+    """Within the final block the LAST ``x-goog-generation`` decides, and one that is not a number
+    is no generation, never the value read before it."""
+    body = tmp_path / "v.mp4"
+    body.write_bytes(b"\x00" * 10)
+    headers = "HTTP/1.1 200 OK\r\nx-goog-generation: 5\r\nx-goog-generation: junk\r\n\r\n"
+    assert sc.fetched_master(headers, str(body)) == sc.FetchedMaster(None, 10)
 
 
 def test_a_missing_file_has_no_size(tmp_path):
