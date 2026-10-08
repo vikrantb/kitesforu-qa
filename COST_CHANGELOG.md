@@ -2,6 +2,35 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-10-08 — the gate, the checker and frame_proof read the producer's painted-timeline sidecar ($0 per-unit; one capped public GET per read, qa #184)
+
+**Files:** `src/kitesforu_qa/harness/painted_timeline_sidecar.py` (the GET, `MAX_SIDECAR_BYTES`),
+`src/kitesforu_qa/harness/delivered_timeline.py` (`from_job` reads it), `scripts/acceptance_gate.py`,
+`scripts/full_artifact_checker.sh` (step 9b), `scripts/frame_proof.py`, `COST_CHANGELOG.md` (this entry).
+
+**$0 per-unit delta.** Nothing here creates, re-renders or re-voices a job, and no provider is called.
+What changes is operator-side GCS egress and local work:
+
+1. **A new GET, once per timeline built from a job doc** (`DeliveredTimeline.from_job`): the gate's
+   `run_gate`, the checker's 9b and `frame_proof`. A doc that names no sidecar costs nothing (the
+   read stops at `absent` before any request), and neither does a run where workers' `parse_v1`
+   cannot be loaded (the parser is loaded before the GET). **Measured on the first live sidecar**
+   (job a6fca205, 2026-10-08; `read_sidecar(doc)` → `bytes_read`): **1,365 B for 8 windows**, so
+   ~$0.00000015 a read at $0.12/GiB. n=1, so ~171 B a window is one sample: a 150-window episode
+   would be ~26 KB, ~$0.000003 (estimate). **Worst case is capped**: the body is read to
+   `MAX_SIDECAR_BYTES` + 1 = 1 MiB + 1 B, so a URI that names the master by mistake costs ~$0.00012,
+   not the master. No retry.
+2. **The 2026-09-01 entry's list of the gate's externals** ("ffprobe, ffmpeg, numpy/PIL and one
+   Firestore read") now also includes that GET, and a local `git show` of workers'
+   `origin/main:src/workers/stages/visuals/painted_timeline.py` ($0; once per process).
+3. **The checker reads Firestore once, not twice**: 9b reuses step 1's doc (`$W/doc.json`), one
+   document read (~$0.0000006) fewer per run.
+4. **9b decodes one frame per second instead of one per 3 s** (local CPU and disk only): +0.12 s
+   and +2.4 MB of PNGs on the 31 s master of 7171699f, +0.20 s and +4.7 MB on the 44 s master of
+   4d41320d (measured with `_extract_frames(mp4, dir, 1000)` against `3000`, one run each).
+
+**Pricing-page implication: none.** QA tooling; user prices unchanged.
+
 ## 2026-09-06 — the T4 estimate print learns the story-topic price; #173's owed record lands ($0 per-unit; operator-facing EST only)
 
 **Files:** `scripts/create_verification_job.sh` (EST case arm + comments), `COST_CHANGELOG.md`

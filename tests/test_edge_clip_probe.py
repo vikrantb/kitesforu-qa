@@ -76,7 +76,7 @@ def frames(tmp_path):
 def _edge_clip_issues(gate, paths):
     # The gate needs >= max(2, n//3) flagged frames to raise, so feed the same frame repeatedly:
     # this test is about the per-frame DISCRIMINATION, not the aggregation threshold.
-    issues = gate._pixel_invariants(paths * 6)
+    issues, _coverage = gate._pixel_invariants(paths * 6)
     return [i for i in issues if "EDGE-CLIP" in i["msg"]]
 
 
@@ -147,8 +147,8 @@ def test_a_photo_beat_is_exempt_from_the_diagram_edge_rule(frames):
     gate = _load_gate()
     paths = [frames["clipped"]] * 6
     # Same pixels, same rule — only the authored label differs.
-    assert gate._pixel_invariants(paths), "premise: these frames DO trip the rule unlabelled"
-    issues = [i for i in gate._pixel_invariants(paths, _clips("scene_image"))
+    assert gate._pixel_invariants(paths)[0], "premise: these frames DO trip the rule unlabelled"
+    issues = [i for i in gate._pixel_invariants(paths, _clips("scene_image"))[0]
               if "EDGE-CLIP" in i["msg"]]
     assert not issues, (
         "a scene_image beat was flagged for content at the frame edge. A photo bleeds to the edge "
@@ -161,7 +161,7 @@ def test_a_diagram_beat_is_STILL_flagged(frames):
     """The half that makes the exemption safe. If only the test above existed, deleting the rule
     entirely would satisfy it."""
     gate = _load_gate()
-    issues = [i for i in gate._pixel_invariants([frames["clipped"]] * 6, _clips("diagram"))
+    issues = [i for i in gate._pixel_invariants([frames["clipped"]] * 6, _clips("diagram"))[0]
               if "EDGE-CLIP" in i["msg"]]
     assert issues, "a diagram beat with content cut at the edge was not flagged"
 
@@ -172,7 +172,7 @@ def test_an_UNKNOWN_modality_is_still_checked(frames):
     this codebase a 30-day outage and a month of dark image budget. Absence means UNKNOWN."""
     gate = _load_gate()
     for clips in (_clips(None), None, []):
-        issues = [i for i in gate._pixel_invariants([frames["clipped"]] * 6, clips)
+        issues = [i for i in gate._pixel_invariants([frames["clipped"]] * 6, clips)[0]
                   if "EDGE-CLIP" in i["msg"]]
         assert issues, f"an unlabelled beat was silently exempted (clips={clips!r})"
 
@@ -191,7 +191,7 @@ def test_the_denominator_is_what_was_CHECKED_not_what_was_sampled(frames):
               {"start_ms": 3000, "duration_ms": 3000, "modality": "diagram"}]
              + [{"start_ms": (i + 2) * 3000, "duration_ms": 3000, "modality": "scene_image"}
                 for i in range(10)])
-    issues = [i for i in gate._pixel_invariants(paths, clips) if "EDGE-CLIP" in i["msg"]]
+    issues = [i for i in gate._pixel_invariants(paths, clips)[0] if "EDGE-CLIP" in i["msg"]]
     assert issues, (
         "2 clipped diagram frames among 10 exempt photos did not flag — the threshold is still "
         "dividing by the sampled count, so photo-heavy jobs get a weaker gate"

@@ -33,11 +33,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
 import tempfile
 from typing import Any, Optional
+
+# Reading Firestore and then forking (gsutil, ffprobe, ffmpeg, git) stalls ~62.7 s while gRPC fork
+# support is on (measured on the gate by qa #184's round-2 latency lens). No child makes a gRPC call.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, stamp_note  # noqa: E402
 
 _W, _H = 96, 171
 _N = _W * _H
@@ -46,14 +54,18 @@ _BAR = 0.5
 
 
 def _probe_duration(path: str) -> float:
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    try:
-        return float(out)
-    except ValueError:
-        return 0.0
+    """The VIDEO stream's duration, else the container's. The painted windows describe the video,
+    and a video can end short of its master (the producer's ``video_short_of_master``)."""
+    for select, entry in ((["-select_streams", "v:0"], "stream=duration"), ([], "format=duration")):
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", *select, "-show_entries", entry, "-of", "csv=p=0", path],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        try:
+            return float(out.split(",")[0])
+        except ValueError:
+            continue
+    return 0.0
 
 
 def _diffs(path: str, start: float = 0.0, length: Optional[float] = None) -> list[float]:
@@ -86,17 +98,17 @@ def _score(diffs: list[float]) -> dict[str, Any]:
     }
 
 
-def _windows(clips: list[dict], span: float) -> list[tuple[float, float, str, str]]:
-    """(start, length, render_mode, kind) from CONSECUTIVE start_ms — never duration_ms."""
-    rows = [c for c in clips if isinstance(c, dict) and c.get("start_ms") is not None]
-    rows.sort(key=lambda c: float(c["start_ms"]))
-    out: list[tuple[float, float, str, str]] = []
-    for i, c in enumerate(rows):
-        s = float(c["start_ms"]) / 1000.0
-        e = float(rows[i + 1]["start_ms"]) / 1000.0 if i + 1 < len(rows) else span
-        out.append((s, max(0.0, e - s), str(c.get("render_mode") or "?"),
-                    str((c.get("diagram_debug") or {}).get("kind") or "-")))
-    return out
+def _timeline_lines(timeline: DeliveredTimeline) -> list[str]:
+    """What this tool prints about the timeline it measured against: where it came from, why a stamp
+    the job named was not used, and whether a used stamp was held to the master OBJECT. This tool
+    compares no object, so a used stamp's identity reads "unchecked" rather than nothing."""
+    why = f"; {timeline.stamp_rejected}" if timeline.stamp_rejected else ""
+    identity = f"; master identity {timeline.master_identity}" if timeline.master_identity else ""
+    lines = [f"\n  timeline: {timeline.source} ({timeline.diagnosis}{why}{identity})"]
+    note = stamp_note(timeline.stamp_rejected)
+    if note:
+        lines.append(f"  NOTE: {note}")
+    return lines
 
 
 def main() -> int:
@@ -108,6 +120,7 @@ def main() -> int:
 
     path = args.file
     clips: list[dict] = []
+    job: dict = {}
     if not path:
         if not args.job_id:
             print("need a job_id or --file", file=sys.stderr)
@@ -153,8 +166,21 @@ def main() -> int:
         return 0
 
     by_mode: dict[str, list[float]] = {}
+    # The painted windows come from the delivered-timeline model every reader shares: the
+    # producer's sidecar when it reads, else the estimate from the persisted claims (consecutive
+    # starts, never `duration_ms`; the last window runs to the master span, as `resolve_bounds`
+    # does). The line below says which.
+    # No master object is passed: this tool does not compare the fetched master's generation and
+    # size with the stamp's, and a used stamp says so. A probe of 0 s is an unknown length, so a
+    # stamp with nothing else to tie it to this video is not used (``delivered_timeline.UNTIED``).
+    timeline = DeliveredTimeline.from_job(job, master_ms=span * 1000)
+    for line in _timeline_lines(timeline):
+        print(line)
     print(f"\n  {'start':>6} {'win':>6} {'mode':14} {'kind':20} {'median':>8}  verdict")
-    for s, d, mode, kind in _windows(clips, span):
+    for w in timeline.painted_windows():
+        s, d = w.start_ms / 1000.0, (w.end_ms - w.start_ms) / 1000.0
+        mode = str(w.fields.get("render_mode") or "?")
+        kind = str((w.fields.get("diagram_debug") or {}).get("kind") or "-")
         if d <= 0.4:
             continue
         sc = _score(_diffs(path, s, d))

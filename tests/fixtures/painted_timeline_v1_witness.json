@@ -1,0 +1,125 @@
+{
+ "version": 1,
+ "master_ms": 85033,
+ "master_generation": 1791181626794892,
+ "master_size": 17171192,
+ "windows": [
+  {
+   "clip": 0,
+   "source_clip": 0,
+   "start_ms": 0,
+   "end_ms": 6292,
+   "modality": "video_hero",
+   "render_mode": "video",
+   "motion_render": "veo",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 1,
+   "source_clip": 1,
+   "start_ms": 6292,
+   "end_ms": 12704,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 2,
+   "source_clip": 2,
+   "start_ms": 12704,
+   "end_ms": 19221,
+   "modality": "video_hero",
+   "render_mode": "video",
+   "motion_render": "veo",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 3,
+   "source_clip": 3,
+   "start_ms": 19221,
+   "end_ms": 25738,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 4,
+   "source_clip": 4,
+   "start_ms": 25738,
+   "end_ms": 32404,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 5,
+   "source_clip": 5,
+   "start_ms": 32404,
+   "end_ms": 39070,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 6,
+   "source_clip": 6,
+   "start_ms": 39070,
+   "end_ms": 44916,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 7,
+   "source_clip": 7,
+   "start_ms": 44916,
+   "end_ms": 50761,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 8,
+   "source_clip": 8,
+   "start_ms": 50761,
+   "end_ms": 57337,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 9,
+   "source_clip": 9,
+   "start_ms": 57337,
+   "end_ms": 63912,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  },
+  {
+   "clip": 10,
+   "source_clip": 10,
+   "start_ms": 63912,
+   "end_ms": 85033,
+   "modality": "scene_image",
+   "render_mode": "video",
+   "motion_render": "kenburns",
+   "asset_kind": "video"
+  }
+ ],
+ "close": {
+  "applied": true,
+  "fade_start_ms": 83533,
+  "fade_ms": 1500,
+  "reason": "after_last_word"
+ },
+ "_fixture_provenance": "built OFFLINE by kitesforu-workers 022ffae383a3 src/workers/stages/visuals/painted_timeline.py build_painted_timeline() from a clip table, not the stamp of a real render; the reader ignores this key; witness f7df77bf clip table with a 120 ms J-cut lead; master_generation and master_size added BY HAND in the shape of #3257 (merged as 2d707598c) (optional v1 fields), the witness master's own: x-goog-generation and x-goog-stored-content-length of visuals/f7df77bf-5f6e-4862-ae2e-5446270d5f1d/episode_video.mp4, read from a GCS GET on 2026-10-05"
+}

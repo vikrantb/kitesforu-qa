@@ -4,8 +4,15 @@
 # in pipeline order, printing PASS/FAIL/INFO per step. $0 (reads + local ffmpeg). Usage: <job_id>
 set -u
 J="${1:?usage: full_artifact_checker.sh <job_id>}"
+# Reading Firestore and then forking (ffprobe, curl) stalls ~62.7 s per run while gRPC fork support
+# is on (measured by qa #184's round-2 latency lens: 68 s vs 7 s for step 9b). Nothing here makes a
+# gRPC call in a child process.
+export GRPC_ENABLE_FORK_SUPPORT=0
+QA_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 cd "$(dirname "$0")/../.." || exit 2
 W=/tmp/checker_$J; mkdir -p $W
+# What an earlier run of this job left must never stand in for this run's read.
+rm -f "$W/url" "$W/doc.json"
 echo "═══ STEP-BY-STEP CHECKER — job $J ═══"
 
 python3 - "$J" "$W" <<'PY'
@@ -13,6 +20,8 @@ import sys, json, subprocess, collections
 J, W = sys.argv[1], sys.argv[2]
 from google.cloud import firestore
 d = firestore.Client(project="kitesforu-dev").collection("podcast_jobs").document(J).get().to_dict() or {}
+with open(f"{W}/doc.json", "w") as fh:   # step 9b reads this; one Firestore read per run
+    json.dump(d, fh, default=str)
 ok = lambda c: "PASS" if c else "FAIL"
 info = []
 
@@ -56,8 +65,13 @@ PY
 
 URL=$(cat $W/url 2>/dev/null)
 [ -z "$URL" ] && { echo "[7-10] SKIPPED — no video"; exit 1; }
-curl -s -o $W/v.mp4 "$URL"
-curl -s -o /dev/null -w "[7 playable]  HTTP HEAD %{http_code} :: PASS-if-200\n" -I "$URL"
+# The GET's headers name the master object fetched (x-goog-generation), for 9b. The master and the
+# headers an earlier run left are cleared first, and the GET must succeed (-f, exit status checked),
+# so a failed GET can never leave an earlier run's master to be scored as this one.
+rm -f "$W/v.mp4"
+: > "$W/v.headers"
+curl -sf --max-time 900 -D "$W/v.headers" -o "$W/v.mp4" "$URL" || { echo "[7-10] FAIL — the master could not be fetched (curl exit $?)"; exit 1; }
+curl -s --max-time 30 -o /dev/null -w "[7 playable]  HTTP HEAD %{http_code} :: PASS-if-200\n" -I "$URL"
 
 # 8. STREAMS — per-stream, never container (the trap that hid a 9s mismatch)
 ffprobe -v error -show_entries stream=codec_type,duration -of csv=p=0 $W/v.mp4 | python3 -c "
@@ -79,19 +93,6 @@ for p in ps:
     g = np.asarray(Image.open(p).convert("L"), dtype=np.float32)
     if g.mean() < 15 and float((g > 40).mean())*100 < 2 and float((g > 150).mean())*100 < 0.08:
         void.append(p.split("/")[-1])
-# 9b. EDGE-TEXT arm (acceptance_gate probe C, per-frame): bright text pixels hugging the
-# outermost columns = a label/callout clipped off-frame (witness 7171699f f_004:
-# "Summer heat pushes lattice outward" rendered "mmer heat..."). Computable — no eyes needed.
-edge = []
-for p in ps:
-    g = np.asarray(Image.open(p).convert("L"), dtype=np.float32)
-    # >=12 bright pixels in the outer 3 columns/rows = real content touching the
-    # frame edge (LEFT/RIGHT witness 7171699f f_004 = 28px; TOP/BOTTOM witness
-    # 4d41320d f_001 = 517/908px — the clipped hook composite the eye pass caught
-    # while the left/right-only arm passed it; every clean frame measures 0).
-    if (int((g[:, :3] >= 200).sum()) >= 12 or int((g[:, -3:] >= 200).sum()) >= 12
-            or int((g[:3, :] >= 200).sum()) >= 12 or int((g[-3:, :] >= 200).sum()) >= 12):
-        edge.append(p.split("/")[-1])
 # 9c. HALF-FRAME DEAD ZONE (witness 4d41320d f_007/f_008: content crammed in the
 # top 40-50%, bottom half of the 9:16 canvas empty for ~10s — the whole-frame void
 # census passes it; measured: bottom-half mean 9 on the witnesses, 31-105 clean).
@@ -103,8 +104,29 @@ for p in ps:
         halfdead.append(p.split("/")[-1])
 print(f"[9 frames]    n={n} three-arm-void={len(void)} :: {'PASS' if not void else 'EYES-REQUIRED'}")
 print(f"              bottom-half-dead={len(halfdead)} {halfdead[:4]} :: {'PASS' if len(halfdead) <= max(1, n//5) else 'WARN'}")
-print(f"              edge-text-clip={len(edge)} {edge[:4]} :: {'PASS' if not edge else 'FAIL'}")
 if void: print(f"              flagged (may be legible dark type — LOOK before concluding): {void[:6]}")
+PY
+
+# 9b. EDGE-CLIP — the acceptance gate's own probe C (scripts/acceptance_gate.py
+# `every_frame_edge_step`), never a copy of it. The copy that lived here counted bright pixels in
+# the outer 3 columns with no notion of which beat was on screen, and FAILed witness f7df77bf on 4
+# full-bleed photographs (f_004/f_005/f_009/f_010). This step reads one frame per SECOND, so it
+# judges every instant the arm it replaced read (step 9's 1/5 s frames) and every instant the gate
+# reads; it attributes each frame against the delivered timeline, exempts only full-bleed beats,
+# and FAILs on any single flagged frame. The gate's own MAJOR stays an aggregate over its 12-frame
+# sample. The single clipped frames this arm was written for, 7171699f f_004 (17.5 s) and 4d41320d
+# f_001 (2.5 s), are pinned in tests/test_the_gate_reads_each_frame_at_its_true_time.py.
+python3 - "$J" "$W" "$QA_SCRIPTS" <<'PY'
+import json, sys
+J, W, S = sys.argv[1:4]
+sys.path.insert(0, S)
+import acceptance_gate as ag
+doc = json.load(open(f"{W}/doc.json"))      # step 1's read: no second Firestore read, no fork stall
+_, _, dur = ag._probe_dims(f"{W}/v.mp4")
+master = ag.fetched_master(open(f"{W}/v.headers", encoding="latin-1").read(), f"{W}/v.mp4")
+_, lines = ag.every_frame_edge_step(doc, f"{W}/v.mp4", f"{W}/gate_frames",
+                                    dur * 1000 if dur else None, master=master)
+print("\n".join(lines))
 PY
 
 # 10. GUARD LOGS — did the instruments fire (with positive control)

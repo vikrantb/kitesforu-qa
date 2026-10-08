@@ -23,6 +23,20 @@ import sys
 import tempfile
 from typing import Any
 
+# Reading Firestore and then forking a subprocess (ffprobe, ffmpeg, curl, git) stalls ~62.7 s per run
+# while gRPC fork support is on (measured by the #184 round-2 latency lens: 68 s vs 7 s). The gate
+# makes no gRPC call in a child, so fork support is off before anything imports firestore.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+
+# The repo's OWN package first: an editable install elsewhere (e.g. the shared checkout) must never
+# answer for this checkout's attribution model.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, stamp_note  # noqa: E402
+from kitesforu_qa.harness.painted_timeline_sidecar import (  # noqa: E402
+    FetchedMaster,
+    fetched_master,
+)
+
 _EDU_KEYS = ("explain", "educat", "understand", "how ", "what is", "concept",
             "informational", "tutorial", "guide", "why do", "why does")
 
@@ -33,11 +47,17 @@ def _fetch_job(job_id: str) -> dict[str, Any]:
     return (db.collection("podcast_jobs").document(job_id).get().to_dict()) or {}
 
 
+#: Seconds for each gate subprocess: the GET, ffprobe, the frame extraction.
+_FETCH_TIMEOUT_S = 900
+_PROBE_TIMEOUT_S = 60
+_EXTRACT_TIMEOUT_S = 900
+
+
 def _probe_dims(path: str) -> tuple[int, int, float]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,duration", "-of", "csv=p=0", path],
-        capture_output=True, text=True).stdout.strip()
+        capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S).stdout.strip()
     parts = out.split(",")
     w = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
     h = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
@@ -48,38 +68,61 @@ def _probe_dims(path: str) -> tuple[int, int, float]:
     return w, h, dur
 
 
-def _extract_frames(mp4: str, out_dir: str) -> list[str]:
-    """OBSERVE: one frame every ~3s across the FULL duration (never one hero frame)."""
+#: One extracted frame per interval. The frame->time mapping (`_frame_time_ms`) depends on this
+#: AND on the fps filter's rounding mode, so the filter is BUILT from it rather than typed beside
+#: it: `fps=1000/3000` is ffmpeg's rational 1/3, and `round=near` is its default spelled out, so a
+#: changed default cannot silently move every frame. Byte-identical to the old `fps=1/3` filter:
+#: all 28 PNGs of the witness master f7df77bf compare equal with `cmp`.
+_FRAME_INTERVAL_MS = 3000
+
+#: The step-by-step checker's interval (``full_artifact_checker.sh`` 9b): one frame per SECOND.
+#: Its instants, ``k + 0.5`` s, include every instant the gate reads (``3k + 1.5`` s) and every
+#: instant the arm 9b replaced read (step 9's ``fps=1/5``: ``5k + 2.5`` s), so no frame either of
+#: them judged goes unjudged.
+CHECKER_FRAME_INTERVAL_MS = 1000
+
+
+def _fps_filter(interval_ms: int) -> str:
+    return f"fps=1000/{interval_ms}:round=near"
+
+
+_FPS_FILTER = _fps_filter(_FRAME_INTERVAL_MS)
+
+
+def _extract_frames(mp4: str, out_dir: str, interval_ms: int = _FRAME_INTERVAL_MS) -> list[str]:
+    """OBSERVE: one frame per ``interval_ms`` across the FULL duration (never one hero frame).
+
+    Frames an earlier run left in ``out_dir`` are removed first: a longer earlier master would
+    otherwise leave its tail frames to be scored as this one's."""
     os.makedirs(out_dir, exist_ok=True)
-    subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", "fps=1/3,scale=540:-1",
+    for name in os.listdir(out_dir):
+        if name.startswith("f_") and name.endswith(".png"):
+            os.remove(os.path.join(out_dir, name))
+    subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", f"{_fps_filter(interval_ms)},scale=540:-1",
                     os.path.join(out_dir, "f_%03d.png")],
-                   capture_output=True)
+                   capture_output=True, timeout=_EXTRACT_TIMEOUT_S)
     return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".png"))
 
 
-#: `_extract_frames` runs ffmpeg at `fps=1/3`, so output frame i (0-based) is the video at
-#: i*3 seconds. Named rather than inlined because the frame->clip mapping below is only as
-#: correct as this constant, and the two must be changed together.
-_FRAME_INTERVAL_MS = 3000
+def _frame_time_ms(index: int, interval_ms: int = _FRAME_INTERVAL_MS) -> int:
+    """The instant of the master that extracted frame ``index`` (0-based) actually shows, for an
+    extraction at one frame per ``interval_ms``.
 
+    NOT ``index * interval``, which is what this gate assumed until 2026-10-05. ffmpeg's ``fps``
+    filter rounds every source timestamp to the NEAREST output slot and emits, for each slot, the
+    last source frame rounded into it — so output frame k holds the last source frame BEFORE
+    ``(k + 1/2) * interval``: the MIDDLE of its 3 s slot, not the start.
 
-def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
-    """The authored modality of the clip covering ``ts_ms``, or None when unknown.
+    MEASURED on the witness master f7df77bf (30 fps): every one of its 28 extracted frames is
+    pixel-identical (mean |diff| 0.000) to source frame ``90k + 44`` = ``3k + 1.4667 s``, against
+    1.6-60.1 for the frame at ``3k``. Under the old mapping f_003 (7.47 s, a scene_image) was read
+    as 6.0 s (a video_hero) — every frame was scored as the clip on screen ~1.5 s earlier.
 
-    None is returned for BOTH "no clips supplied" and "no clip covers this timestamp", and both
-    mean the same thing to the caller: keep checking. Absence must never be read as permission
-    to skip a check — that is how a gate silently turns itself off.
+    The value is 1 ms before the slot's midpoint: the instant at which the screen shows exactly
+    that source frame, at any frame rate below 1000 fps (the midpoint itself already shows the
+    NEXT frame whenever a frame boundary falls on it — at 24, 25 and 30 fps it does).
     """
-    for c in clips or []:
-        try:
-            start = int(c.get("start_ms") or 0)
-            dur = int(c.get("duration_ms") or 0)
-        except (TypeError, ValueError):
-            continue
-        if dur > 0 and start <= ts_ms < start + dur:
-            m = c.get("modality")
-            return m if isinstance(m, str) and m else None
-    return None
+    return index * interval_ms + interval_ms // 2 - 1
 
 
 def _sample_indices(n: int, want: int = 12) -> list[int]:
@@ -114,12 +157,35 @@ def _sample_indices(n: int, want: int = 12) -> list[int]:
     return [i * (n - 1) // (want - 1) for i in range(want)]
 
 
-def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
+def _pixel_invariants(frames: list[str], clips: list[dict] | None = None, *,
+                      timeline: DeliveredTimeline | None = None, every_frame: bool = False,
+                      interval_ms: int = _FRAME_INTERVAL_MS) -> tuple[list[dict], dict[str, Any]]:
     """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
     measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
     layer would flag, without an LLM call. Rough heuristics, biased toward flagging.
 
-    ── EDGE-CLIP IS SKIPPED ON PHOTO BEATS, AND ONLY ON PHOTO BEATS ──────────────────────────
+    Returns ``(issues, edge_clip_coverage)``. The coverage says what the EDGE-CLIP rule actually
+    ran on: a pass with every frame exempt is a pass by exemption, and the caller must be able to
+    say so. ``timeline`` is the delivered timeline (``DeliveredTimeline.from_job`` in production);
+    without one it is built from ``clips`` alone, assuming real offsets.
+
+    ``every_frame`` judges every extracted frame instead of the 12 sampled ones, and
+    ``interval_ms`` is the extraction's interval (it decides the instant each frame shows). The
+    gate's MAJOR stays an aggregate over its sample; ``full_artifact_checker.sh`` extracts one frame
+    per second, judges every one, and FAILs on any single flagged frame
+    (``coverage["flagged_frames"]``), as the arm it replaced did.
+
+    ── EDGE-CLIP IS SKIPPED ON FULL-BLEED BEATS, AND ONLY ON FULL-BLEED BEATS ────────────────
+    A frame is exempt only when EVERY asset the master may show at the frame's true instant
+    (``_frame_time_ms``) bleeds by design (``DeliveredTimeline.full_bleed_at``: a scene_image, or a
+    video_hero with Veo evidence, whose still carries no drawn text — a photo statement, a relimage
+    band or a burned licence credit stays checked). Anything the timeline cannot attribute is
+    checked. On the witness
+    f7df77bf the 4 frames the old code "checked" were all full-bleed, and each fell to a different
+    cause: f_001 is a Veo frame (video_hero was not exempt), f_003 is a scene_image read 1.5 s early
+    as the Veo clip before it, and f_025/f_028 re-show the last scene past the authored timeline,
+    where the old duration lookup returned None.
+
     The gate runs on frames from the DELIVERED MASTER, which interleaves diagram beats with
     generated photography. The pipeline's OWN edge checker (`log_unsafe_bbox`) is called only
     from `diagram/render.py` — it never inspects a photo, because a photo legitimately bleeds to
@@ -146,13 +212,23 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     incomplete.
     """
     issues: list[dict] = []
+    if timeline is None:
+        timeline = DeliveredTimeline.from_clips(clips or [], real_offsets=True)
+    coverage: dict[str, Any] = {"sampled": 0, "checked": 0, "exempt_full_bleed": 0, "unknown": 0,
+                                "flagged": 0, "timeline": timeline.diagnosis,
+                                "source": timeline.source, "sidecar_bytes": timeline.sidecar_bytes,
+                                "flagged_frames": []}
+    if timeline.stamp_rejected:
+        coverage["stamp_rejected"] = timeline.stamp_rejected
+    if timeline.master_identity:
+        coverage["master_identity"] = timeline.master_identity
     try:
         import numpy as np
         from PIL import Image
     except ImportError:
-        return issues
+        return issues, coverage
     if not frames:
-        return issues
+        return issues, coverage
     # SPAN THE WHOLE VIDEO. `len(frames) // 12` FLOORS to 1 for any count in 13..23, and
     # `[::1][:12]` then takes the FIRST twelve frames — so a 22-frame video (about 66s at the
     # fps=1/3 extraction above) was scored on its first 36 seconds and the rest was never looked
@@ -174,10 +250,12 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     # spans the array.
     # Keep the ORIGINAL index alongside the path — it is the only thing that maps a frame back to
     # a timestamp, and therefore to the clip that authored it.
-    samp = [(i, frames[i]) for i in _sample_indices(len(frames))]
+    samp = [(i, frames[i]) for i in (range(len(frames)) if every_frame
+                                     else _sample_indices(len(frames)))]
     letterbox = edge_clip = 0
-    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
-    edge_skipped_photo = 0
+    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (full-bleed is skipped)
+    edge_skipped_full_bleed = 0
+    edge_unknown = 0          # checked because the timeline could not say what was on screen
     for idx, fp in samp:
         try:
             im = np.asarray(Image.open(fp).convert("L"), dtype=float)
@@ -215,36 +293,112 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
         #
         # NOTE the earlier horizontal-gradient attempt scored the clipped control 0 and was
         # discarded: a box that fills the whole margin is horizontally uniform inside it.
-        mw = max(3, int(im.shape[1] * 0.03))
-        mh = max(3, int(im.shape[0] * 0.03))
-        def _vsteps(strip):
-            return int((np.abs(np.diff(strip, axis=0)) > 28).sum())
-        def _hsteps(strip):
-            return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
-        # A photo beat legitimately bleeds to every edge — the pipeline's own checker never
-        # inspects one. Skip the rule, do not merely discount it.
-        if _clip_modality_at(clips, idx * _FRAME_INTERVAL_MS) == "scene_image":
-            edge_skipped_photo += 1
+        # A full-bleed beat legitimately bleeds to every edge — the pipeline's own checker never
+        # inspects one. Skip the rule, do not merely discount it. The frame is read at the
+        # instant it actually shows, and is exempt only if EVERY asset that may be on screen then
+        # bleeds by design; an instant the timeline cannot attribute is UNKNOWN, which is checked.
+        full_bleed = timeline.full_bleed_at(_frame_time_ms(idx, interval_ms))
+        if full_bleed is True:
+            edge_skipped_full_bleed += 1
         else:
             edge_checked += 1
-            if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
-                    or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
+            if full_bleed is None:
+                edge_unknown += 1
+            if _cut_at_edge(im):
                 edge_clip += 1
+                coverage["flagged_frames"].append(os.path.basename(fp))
     if letterbox >= max(2, len(samp) // 2):
         issues.append({"sev": "MAJOR", "msg": (
             f"LETTERBOX: {letterbox}/{len(samp)} frames show a persistent dark band — content "
             "not filling the vertical frame (authored for the wrong aspect)")})
+    coverage.update({"sampled": len(samp), "checked": edge_checked,
+                     "exempt_full_bleed": edge_skipped_full_bleed, "unknown": edge_unknown,
+                     "flagged": edge_clip})
     # THE DENOMINATOR IS WHAT WAS CHECKED, not what was sampled. Dividing by the full sample
     # after skipping photos would make a photo-heavy job progressively harder to flag — the gate
     # would quietly weaken on exactly the jobs where the skip applies, which is the opposite of
     # what the skip is for.
     if edge_checked and edge_clip >= max(2, edge_checked // 3):
-        skipped = (f" ({edge_skipped_photo} photo frame(s) exempt — a scene_image bleeds to the "
-                   "edge by design)") if edge_skipped_photo else ""
+        skipped = (f" ({edge_skipped_full_bleed} full-bleed frame(s) exempt — scene_image and "
+                   "video_hero bleed to the edge by design)") if edge_skipped_full_bleed else ""
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
             f"the frame edge — content likely cut off-frame{skipped}")})
-    return issues
+    return issues, coverage
+
+
+def _cut_at_edge(im: Any) -> bool:
+    """Invariant C on one grayscale frame: vertical (or, at top/bottom, horizontal) steps > 28 in the
+    3% margin, at least 12 of them. See the rationale inside ``_pixel_invariants``."""
+    import numpy as np
+
+    mw = max(3, int(im.shape[1] * 0.03))
+    mh = max(3, int(im.shape[0] * 0.03))
+
+    def _vsteps(strip: Any) -> int:
+        return int((np.abs(np.diff(strip, axis=0)) > 28).sum())
+
+    def _hsteps(strip: Any) -> int:
+        return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
+
+    return (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
+            or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12)
+
+
+def probe_master(doc: dict[str, Any], mp4: str, frames_dir: str, master_ms: float | None = None,
+                 master: FetchedMaster | None = None, every_frame: bool = False,
+                 interval_ms: int = _FRAME_INTERVAL_MS) -> tuple[list[str], list[dict], dict[str, Any]]:
+    """OBSERVE + PROBE B/C on one master, exactly as ``run_gate`` does: extract, attribute every
+    frame against the job's delivered timeline, score. ``full_artifact_checker.sh`` calls this
+    too, so the step-by-step checker and the gate cannot disagree about an edge clip.
+
+    The timeline is the producer's sidecar when it reads and describes this video, else qa's
+    estimate; ``coverage["source"]`` says which. ``master_ms`` is the VIDEO stream's duration
+    (``_probe_dims``), the length the sidecar's windows describe. ``master`` is the master object
+    fetched (its ``x-goog-generation`` and size); a stamp written for another one is ``stale_master``.
+    ``every_frame`` and ``interval_ms`` are :func:`_pixel_invariants`'s; the gate uses neither.
+    """
+    frames = _extract_frames(mp4, frames_dir, interval_ms)
+    timeline = DeliveredTimeline.from_job(doc, master_ms=master_ms, master=master)
+    issues, coverage = _pixel_invariants(frames, timeline=timeline, every_frame=every_frame,
+                                         interval_ms=interval_ms)
+    return frames, issues, coverage
+
+
+def every_frame_edge_step(doc: dict[str, Any], mp4: str, frames_dir: str,
+                          master_ms: float | None = None,
+                          master: FetchedMaster | None = None) -> tuple[bool, list[str]]:
+    """``full_artifact_checker.sh`` step 9b: ``(failed, lines to print)``.
+
+    One frame per second across the whole master (``CHECKER_FRAME_INTERVAL_MS``), each attributed at
+    the instant it shows and judged by probe C, and a FAIL on ANY single flagged frame: the arm 9b
+    replaced FAILed on one clipped frame, and so does this one. The gate's own MAJOR stays an
+    aggregate over its 12-frame sample. The witnesses this arm was written for, 7171699f f_004
+    (17.5 s) and 4d41320d f_001 (2.5 s), are single frames; both are pinned in
+    ``tests/test_the_gate_reads_each_frame_at_its_true_time.py``."""
+    frames, _, cov = probe_master(doc, mp4, frames_dir, master_ms, master, every_frame=True,
+                                  interval_ms=CHECKER_FRAME_INTERVAL_MS)
+    index = {os.path.basename(f): i for i, f in enumerate(frames)}
+    flagged = [f"{name}@{_frame_time_ms(index[name], CHECKER_FRAME_INTERVAL_MS) / 1000:.1f}s"
+               for name in cov["flagged_frames"]]
+    lines = [f"[9b edge]     every frame, 1/s: checked={cov['checked']}/{cov['sampled']} "
+             f"exempt_full_bleed={cov['exempt_full_bleed']} flagged={cov['flagged']} {flagged[:8]} "
+             f"timeline={cov['timeline']} source={cov['source']} "
+             f"identity={cov.get('master_identity', '-')} "
+             f"stamp_rejected={cov.get('stamp_rejected', '-')} :: {'FAIL' if flagged else 'PASS'}"]
+    lines += [f"              NOTE: {note}"
+              for note in (stamp_note(cov.get("stamp_rejected")), _edge_clip_note(cov)) if note]
+    return bool(flagged), lines
+
+
+def _edge_clip_note(coverage: dict[str, Any]) -> str | None:
+    """One line when the edge rule observed nothing, so a PASS cannot read as "edges verified"."""
+    if coverage.get("sampled") and not coverage.get("checked"):
+        return (f"EDGE-CLIP checked 0 of {coverage['sampled']} sampled frames "
+                f"({coverage.get('exempt_full_bleed', 0)} exempt as full-bleed, timeline "
+                f"{coverage.get('timeline')}, {coverage.get('source')}): this verdict carries no "
+                f"edge-clip observation")
+    return None
 
 
 def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
@@ -260,12 +414,34 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
 
     tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4")
-    subprocess.run(["gsutil", "-q", "cp", url, tmp] if url.startswith("gs://")
-                   else ["curl", "-sL", "-o", tmp, url], check=False)
-    if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
-        return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
-                "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]}
-    vw, vh, dur = _probe_dims(tmp)
+    # The master an earlier run left at this path must never be scored as this run's: it is removed
+    # before the GET, and the GET must succeed (`curl -f`, its exit status checked). The GET's own
+    # headers name the object fetched (x-goog-generation), so the producer's stamp is held to THIS
+    # master; they go to a fresh file per run, removed whatever happens.
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    hdr_fd, hdr = tempfile.mkstemp(prefix=f"ag_{job_id}_", suffix=".headers")
+    os.close(hdr_fd)
+    try:
+        got = subprocess.run(["gsutil", "-q", "cp", url, tmp] if url.startswith("gs://")
+                             else ["curl", "-sfL", "--max-time", str(_FETCH_TIMEOUT_S),
+                                   "-D", hdr, "-o", tmp, url],
+                             check=False, capture_output=True, timeout=_FETCH_TIMEOUT_S)
+        with open(hdr, encoding="latin-1") as fh:
+            headers = fh.read()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic, "issues": [
+            {"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}: {type(exc).__name__}: {exc}"}]}
+    finally:
+        os.remove(hdr)
+    if got.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic, "issues": [
+            {"sev": "BLOCKER", "msg": f"artifact not fetchable: {url} (exit {got.returncode})"}]}
+    try:
+        vw, vh, dur = _probe_dims(tmp)
+    except subprocess.TimeoutExpired:
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic, "issues": [
+            {"sev": "BLOCKER", "msg": f"ffprobe timed out after {_PROBE_TIMEOUT_S}s on {url}"}]}
     vertical = bool(vw and vh and vh > vw)
 
     # PROBE — invariant A: authored clip orientation must match the render target.
@@ -284,15 +460,24 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
             f"OFF-TOPIC RISK: {len(veo)} abstract Veo video_hero clips on EDUCATIONAL content "
             f"('{topic[:48]}') -> prefer meaningful diagrams")})
 
-    # OBSERVE: emit frames for the independent vision/adversary step.
+    # OBSERVE: emit frames for the independent vision/adversary step, then invariants B + C.
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
-    frames = _extract_frames(tmp, fdir)
-    issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
+    # Only the master itself (video_url) is the object the stamp names; the captioned copy is not.
+    fetched = fetched_master(headers, tmp) if url == vis.get("video_url") else None
+    try:
+        frames, pixel_issues, edge_coverage = probe_master(d, tmp, fdir, dur * 1000 if dur else None,
+                                                           master=fetched)
+    except subprocess.TimeoutExpired:
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic, "issues": issues + [
+            {"sev": "BLOCKER", "msg": f"frame extraction timed out after {_EXTRACT_TIMEOUT_S}s"}]}
+    issues.extend(pixel_issues)
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
+            "edge_clip_coverage": edge_coverage, "edge_clip_note": _edge_clip_note(edge_coverage),
+            "timeline_note": stamp_note(edge_coverage.get("stamp_rejected")),
             "frames_dir": fdir, "num_frames": len(frames),
             "persona": persona or None,
             "next": _adversary_brief(persona)}
@@ -400,6 +585,9 @@ def main() -> int:
         load_persona(a.persona)
     res = run_gate(a.job_id, a.frames_dir, a.persona or None)
     print(json.dumps(res, indent=2))
+    for key in ("timeline_note", "edge_clip_note"):
+        if res.get(key):
+            print(f"NOTE: {res[key]}", file=sys.stderr)
     return 0 if res["verdict"] in ("PASS_DETERMINISTIC", "REVIEW") else 1
 
 
