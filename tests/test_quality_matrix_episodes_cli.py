@@ -76,38 +76,66 @@ def test_resolve_audio_local_existing_path_passthrough(qm, tmp_path) -> None:
     assert qm.resolve_audio(doc, str(tmp_path)) == str(local)
 
 
-def test_resolve_audio_local_missing_path_returns_none(qm, tmp_path) -> None:
+def test_resolve_audio_local_missing_path_raises(qm, tmp_path) -> None:
+    """A doc that names a file that is not there is a broken input, not a job without audio."""
+    from kitesforu_qa.integrations.download import DownloadError
+
     doc = {"outputs": {"audio_url": str(tmp_path / "does-not-exist.mp3")}}
-    assert qm.resolve_audio(doc, str(tmp_path)) is None
+    with pytest.raises(DownloadError, match="not an https:// or gs:// URI"):
+        qm.resolve_audio(doc, str(tmp_path))
 
 
-def test_resolve_audio_gs_uri_downloads_via_gsutil(qm, tmp_path, monkeypatch) -> None:
-    calls = []
+def _fake_download(calls):
+    from kitesforu_qa.integrations.download import Downloaded
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        Path(kwargs.get("cwd", str(tmp_path)))  # no-op, just to touch kwargs
-        # Simulate gsutil actually writing the destination file.
-        dest = cmd[-1]
-        Path(dest).write_bytes(b"downloaded")
-        return subprocess.CompletedProcess(cmd, 0)
+    def fake(uri, local_path, **_kw):
+        calls.append((uri, local_path))
+        Path(local_path).write_bytes(b"downloaded")
+        return Downloaded(uri, local_path, 10, None, "audio/mpeg")
+    return fake
 
-    monkeypatch.setattr(qm.subprocess, "run", fake_run)
-    doc = {"outputs": {"audio_url": "gs://bucket/ep.mp3"}}
+
+@pytest.mark.parametrize("url", [
+    "https://storage.googleapis.com/kitesforu-dev-podcasts/audio/ep1/final.mp3",
+    "gs://bucket/ep.mp3",
+])
+def test_resolve_audio_downloads_https_and_gs_alike(qm, tmp_path, monkeypatch, url) -> None:
+    """https is the form 3,154 of the 3,162 completed jobs carry; this returned None for it."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(qm, "download", _fake_download(calls))
+    doc = {"job_id": "ep1", "outputs": {"audio_url": url}}
     result = qm.resolve_audio(doc, str(tmp_path))
-    assert result is not None
-    assert Path(result).exists()
-    assert calls and calls[0][0] == "gsutil"
+    assert calls == [(url, result)] and Path(result).exists()
+    assert Path(result).name.startswith("ep1_")
 
 
-def test_resolve_audio_gs_uri_failure_degrades_to_none(qm, tmp_path, monkeypatch, capsys) -> None:
-    def failing_run(cmd, **kwargs):
-        raise RuntimeError("simulated gsutil auth failure")
+def test_resolve_audio_reads_the_one_accessor(qm, tmp_path, monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(qm, "download", _fake_download(calls))
+    url = "https://storage.googleapis.com/b/audio/ep1/final.mp3"
+    qm.resolve_audio({"stages": {"job-audio": {"result": {"audio_url": url}}}}, str(tmp_path))
+    assert [c[0] for c in calls] == [url]
 
-    monkeypatch.setattr(qm.subprocess, "run", failing_run)
-    doc = {"outputs": {"audio_url": "gs://bucket/ep.mp3"}}
-    assert qm.resolve_audio(doc, str(tmp_path)) is None
-    assert "warning" in capsys.readouterr().err
+
+def test_resolve_audio_failure_raises_and_the_cell_names_it(qm, tmp_path, monkeypatch) -> None:
+    """A failed download makes the job an unscored cell that names the cause. It used to be a
+    warning, a None, and an audio battery that skipped and passed."""
+    from kitesforu_qa.integrations.download import DownloadError
+
+    def failing(uri, local_path, **_kw):
+        raise DownloadError(f"{uri}: Forbidden: 403", uri=uri)
+
+    monkeypatch.setattr(qm, "download", failing)
+    doc = _episode_doc("ep1")
+    doc["outputs"] = {"audio_url": "gs://bucket/ep.mp3"}
+    with pytest.raises(DownloadError, match="403"):
+        qm.resolve_audio(doc, str(tmp_path))
+    cells = qm.score_all_episodes_courses(
+        [doc], project="kitesforu-dev", download_video=False, download_audio=True,
+        fetch_job_doc=lambda project, jid: {}, resolve_video=lambda *a, **k: None,
+        resolve_audio=qm.resolve_audio,
+    )
+    assert cells[0]["_scored"] is False and "DownloadError" in cells[0]["_error"]
 
 
 # ── score_all_episodes_courses ───────────────────────────────────────────────────

@@ -308,6 +308,44 @@ def test_extract_frame_raises_when_nothing_available(monkeypatch) -> None:
         vlm.extract_frame({"beat_index": 0}, None)
 
 
+# ── the asset fetch goes through the shared downloader ──────────────────────────────────────────
+
+def test_download_asset_passes_a_local_file_and_skips_a_non_uri(tmp_path) -> None:
+    local = tmp_path / "a.png"
+    local.write_bytes(b"x")
+    assert vlm._download_asset(str(local), str(tmp_path)) == str(local)
+    assert vlm._download_asset("visuals/j/a.png", str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("uri", ["https://storage.googleapis.com/b/visuals/j/beat_3.png?sig=1",
+                                 "gs://b/visuals/j/beat_3.png"])
+def test_download_asset_fetches_https_and_gs(tmp_path, monkeypatch, uri) -> None:
+    from kitesforu_qa.integrations import download as dl
+
+    seen = []
+
+    def fake(u, local_path, **_kw):
+        seen.append((u, local_path))
+        return dl.Downloaded(u, local_path, 1, None, "image/png")
+
+    monkeypatch.setattr(dl, "download", fake)
+    assert vlm._download_asset(uri, str(tmp_path)) == str(tmp_path / "beat_3.png")
+    assert seen == [(uri, str(tmp_path / "beat_3.png"))]
+
+
+def test_a_failed_asset_download_is_the_beats_reason(monkeypatch) -> None:
+    """The old None surfaced as "no frame source available" and lost the cause."""
+    from kitesforu_qa.integrations import download as dl
+
+    def failing(u, local_path, **_kw):
+        raise dl.DownloadError(f"{u}: SSLError: CERTIFICATE_VERIFY_FAILED", uri=u)
+
+    monkeypatch.setattr(dl, "download", failing)
+    verdict = vlm.judge_one_beat({"beat_index": 3, "asset_uri": "https://storage.googleapis.com/b/a.png"},
+                                 None)
+    assert verdict.verdict is None and "CERTIFICATE_VERIFY_FAILED" in verdict.reason
+
+
 def test_is_image_path() -> None:
     assert vlm._is_image_path("/tmp/x.PNG") is True
     assert vlm._is_image_path("/tmp/x.jpg") is True

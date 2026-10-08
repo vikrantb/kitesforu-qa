@@ -39,7 +39,6 @@ import argparse
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -50,7 +49,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
-from kitesforu_qa.integrations.download import download  # noqa: E402
 from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
     CONTENT_CLASS_COURSE,
     CONTENT_CLASS_EPISODE,
@@ -75,6 +73,7 @@ from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
     score_episode_or_course,
     upsert_markdown_section,
 )
+from kitesforu_qa.integrations.download import download  # noqa: E402
 from kitesforu_qa.scorecard import ScorecardConfig, score_short  # noqa: E402
 from kitesforu_qa.scorecard import signals as _signals  # noqa: E402
 

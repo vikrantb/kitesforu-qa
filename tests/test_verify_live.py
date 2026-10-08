@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from kitesforu_qa.integrations.download import Downloaded, DownloadError
 from kitesforu_qa.verify_live import (
     JobAudioContext,
     LiveVerifyResult,
@@ -224,15 +225,19 @@ class TestVerifyJobLiveOrchestration:
             audio_gcs_uri="gs://b/audio.mp3",
             speech_only_gcs_uri="gs://b/speech.mp3",
         )
+        def failing(uri: str, dest_path: str, **_kw):
+            raise DownloadError(f"{uri}: Forbidden: 403 storage.objects.get denied", uri=uri)
+
         with patch(
             "kitesforu_qa.verify_live.load_job_context", return_value=ctx,
         ), patch(
-            "kitesforu_qa.verify_live._gcs_download", return_value=False,
+            "kitesforu_qa.verify_live.download", side_effect=failing,
         ):
             result = verify_job_live("j")
             assert result.report is None
             assert result.error is not None
             assert "could not download" in result.error
+            assert "403" in result.error          # the cause, not a list of guesses
 
     def test_speech_only_optional_legacy_job(self, tmp_path) -> None:
         """A pre-PR-737 job without speech_only.mp3 should still grade
@@ -244,8 +249,8 @@ class TestVerifyJobLiveOrchestration:
             speech_only_gcs_uri="gs://b/speech.mp3",
         )
 
-        def fake_download(uri: str, dest_path: str) -> bool:
-            # First call (audio) succeeds; second (speech) misses.
+        def fake_download(uri: str, dest_path: str, **_kw):
+            # First call (audio) succeeds; second (speech) is reported missing.
             if "audio" in uri:
                 # Drop a 1-byte placeholder so verify_audio_quality
                 # advances past the existence check. The actual
@@ -255,13 +260,13 @@ class TestVerifyJobLiveOrchestration:
                 # report's exact verdict.
                 Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
                 Path(dest_path).write_bytes(b"x")
-                return True
-            return False
+                return Downloaded(uri, dest_path, 1, None, "audio/mpeg")
+            raise DownloadError(f"{uri}: no such object", uri=uri, not_found=True)
 
         with patch(
             "kitesforu_qa.verify_live.load_job_context", return_value=ctx,
         ), patch(
-            "kitesforu_qa.verify_live._gcs_download",
+            "kitesforu_qa.verify_live.download",
             side_effect=fake_download,
         ):
             result = verify_job_live("legacy")
@@ -275,6 +280,35 @@ class TestVerifyJobLiveOrchestration:
                 "speech_only.mp3 not in GCS" in n
                 for n in result.context.notes
             )
+
+    def test_an_unreadable_speech_only_file_is_not_a_legacy_job(self, tmp_path) -> None:
+        """A 403, an expired credential or a dropped connection on speech_only.mp3 used to be read as
+        a legacy job, and four axes were dropped under that label. Only a source that says the
+        object does not exist (not_found) is an absence."""
+        ctx = JobAudioContext(
+            job_id="j", user_id="u", genre="horror",
+            expected_duration_s=10.0,
+            audio_gcs_uri="gs://b/audio.mp3",
+            speech_only_gcs_uri="gs://b/speech.mp3",
+        )
+
+        def fake_download(uri: str, dest_path: str, **_kw):
+            if "audio" in uri:
+                Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(dest_path).write_bytes(b"x")
+                return Downloaded(uri, dest_path, 1, None, "audio/mpeg")
+            raise DownloadError(f"{uri}: Forbidden: 403", uri=uri)
+
+        with patch(
+            "kitesforu_qa.verify_live.load_job_context", return_value=ctx,
+        ), patch(
+            "kitesforu_qa.verify_live.download", side_effect=fake_download,
+        ):
+            result = verify_job_live("j")
+            assert result.report is None
+            assert "speech.mp3" in result.error and "403" in result.error
+            assert "not read as a legacy job" in result.error
+            assert not any("speech_only.mp3 not in GCS" in n for n in result.context.notes)
 
 
 # ---------------------------------------------------------------------------

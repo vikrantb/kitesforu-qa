@@ -1,139 +1,156 @@
-"""A job asset that cannot be downloaded RAISES. It is never a silent ``None``.
+"""Where the audio lives is read in ONE place, and a grade never proceeds on audio it could not fetch.
 
-``Artifact.load`` downloads the episode audio, and every audio check reads ``art.audio_path``. With no
-file, each check calls ``skip()`` ("no audio file on artifact"), exactly as for a job that has no audio,
-and a scorecard of skips passes. ``_download`` fetched HTTPS through ``urllib``, which fails every
-storage.googleapis.com GET with CERTIFICATE_VERIFY_FAILED on a stock macOS python, and swallowed every
-exception into ``None``. So on such a machine every graded episode was graded on nothing.
-
-The GET is stubbed at ``requests.get``: offline and $0.
+``Artifact.audio_url`` is the one reader of where a job's master audio lives. ``Artifact.load`` gets the
+URL there, or from the API's ``/audio-url`` (the status snapshot carries none), and fetches it with the
+shared downloader: it raises ``DownloadError`` rather than handing the checks an artifact with no audio,
+which every audio check would skip as N/A. The GET is stubbed at ``requests.get``: offline and $0.
 """
 from __future__ import annotations
 
 import pytest
 import requests
 
-from kitesforu_qa.harness import artifact as artifact_mod
-from kitesforu_qa.harness.artifact import Artifact, ArtifactDownloadError
+from kitesforu_qa.harness.artifact import Artifact
+from kitesforu_qa.integrations import download as dl
+from kitesforu_qa.integrations.download import Downloaded, DownloadError
+from kitesforu_qa.integrations.kitesforu_api import KitesForUClient
+from kitesforu_qa.utils import audio as audio_utils
 
-URL = "https://storage.googleapis.com/kitesforu-dev-podcasts/audio/job/final.mp3"
-
-
-class _Response:
-    def __init__(self, chunks=(b"ID3", b"\x00" * 64), *, status_error=None, fail_after=None):
-        self._chunks, self._error, self._fail_after = list(chunks), status_error, fail_after
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def raise_for_status(self):
-        if self._error:
-            raise self._error
-
-    def iter_content(self, chunk_size):
-        for i, chunk in enumerate(self._chunks):
-            if self._fail_after is not None and i == self._fail_after:
-                raise requests.exceptions.ChunkedEncodingError("connection broken mid-body")
-            yield chunk
+HTTPS = "https://storage.googleapis.com/kitesforu-dev-podcasts/audio/job/final.mp3"
+SIGNED = "https://storage.googleapis.com/kitesforu-podcasts/u/job/audio.mp3?X-Goog-Signature=abc"
 
 
-def _get_returning(resp, seen=None):
-    def get(url, timeout, stream):
-        if seen is not None:
-            seen.append((url, timeout, stream))
-        return resp
-    return get
+# ── one reader of where the audio lives ───────────────────────────────────────────────────────
 
-
-def _get_raising(exc):
-    def get(url, timeout, stream):
-        raise exc
-    return get
-
-
-def test_a_good_download_lands_whole_at_the_path(tmp_path, monkeypatch):
-    seen: list[tuple] = []
-    monkeypatch.setattr(requests, "get", _get_returning(_Response(), seen))
-    dest = tmp_path / "job.audio"
-    assert artifact_mod._download(URL, str(dest)) == str(dest)
-    assert dest.read_bytes() == b"ID3" + b"\x00" * 64
-    assert seen == [(URL, artifact_mod._DOWNLOAD_TIMEOUT_S, True)]
-    assert not (tmp_path / "job.audio.part").exists()
-
-
-@pytest.mark.parametrize("get, cause", [
-    (_get_raising(requests.exceptions.SSLError(
-        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate")),
-     "CERTIFICATE_VERIFY_FAILED"),
-    (_get_raising(requests.ConnectionError("Name or service not known")), "ConnectionError"),
-    (_get_returning(_Response(status_error=requests.HTTPError("403 Client Error: Forbidden"))), "403"),
-    (_get_returning(_Response(chunks=())), "empty"),
-    (_get_returning(_Response(fail_after=1)), "ChunkedEncodingError"),
+@pytest.mark.parametrize("doc, url", [
+    ({"outputs": {"audio_url": HTTPS}, "audio_url": "gs://b/legacy.mp3"}, HTTPS),
+    ({"audio_url": "gs://b/legacy.mp3"}, "gs://b/legacy.mp3"),
+    ({"stages": {"job-audio": {"result": {"audio_url": HTTPS}}}}, HTTPS),
+    ({"outputs": {"audio_url": HTTPS}, "stages": {"job-audio": {"result": {"audio_url": "gs://x"}}}},
+     HTTPS),
+    ({"audio_path": HTTPS, "audio_gcs_uri": "gs://b/a.mp3", "audio": {"mp3_url": HTTPS}}, None),
+    ({}, None),
 ])
-def test_a_failed_download_raises_and_leaves_no_file(get, cause, tmp_path, monkeypatch):
-    """Each way an HTTPS download fails raises, names its cause, and leaves nothing at the path,
-    not even part of the body: a truncated file would be graded as a truncated episode."""
-    monkeypatch.setattr(requests, "get", get)
-    dest = tmp_path / "job.audio"
-    with pytest.raises(ArtifactDownloadError, match=cause):
-        artifact_mod._download(URL, str(dest))
-    assert sorted(p.name for p in tmp_path.iterdir()) == []
+def test_the_audio_url_has_one_reader(doc, url):
+    """``outputs.audio_url`` on 3,159 of the 3,162 completed jobs, a legacy top-level ``audio_url`` on
+    the other 3, and the audio stage's own result as the last resort. ``audio_path``,
+    ``audio_gcs_uri`` and ``audio.mp3_url``, which other readers looked for, are on none."""
+    assert Artifact.from_doc(doc).audio_url == url
 
 
-def test_a_failed_gcs_download_raises_too(tmp_path, monkeypatch):
-    from kitesforu_qa.integrations import gcs
-
-    def fail(gcs_uri, local_dir=None):
-        raise RuntimeError("Failed to download from GCS: 403 Forbidden")
-
-    monkeypatch.setattr(gcs, "download_from_gcs", fail)
-    with pytest.raises(ArtifactDownloadError, match="403 Forbidden"):
-        artifact_mod._download("gs://kitesforu-dev-podcasts/audio/job/final.mp3",
-                               str(tmp_path / "job.audio"))
-
+# ── Artifact.load: the URL, then the downloader ───────────────────────────────────────────────
 
 class _Client:
-    """The kqa client's two calls ``Artifact.load`` may make, for a job whose audio is at ``URL``."""
+    """``KitesForUClient``'s two calls ``load`` makes. Its ``get_job`` returns the status snapshot,
+    which carries no audio URL; ``get_job_audio`` answers ``/audio-url``."""
 
-    def __init__(self, doc):
-        self.doc = doc
+    def __init__(self, snapshot=None, audio_url=SIGNED):
+        self.snapshot = snapshot if snapshot is not None else {"job_id": "job", "status": "completed"}
+        self.audio_url, self.asked = audio_url, []
 
     def get_job(self, job_id):
-        return dict(self.doc)
+        return dict(self.snapshot)
 
     def get_job_audio(self, job_id):
-        raise requests.ConnectionError("the API is unreachable")
+        self.asked.append(job_id)
+        return self.audio_url
 
 
-def test_load_never_returns_an_artifact_whose_audio_silently_failed(tmp_path, monkeypatch):
-    """The grade cannot go ahead on nothing: ``load`` raises, and only ``download=False`` gives an
-    artifact without its audio, because the caller asked for one."""
-    monkeypatch.setattr(requests, "get", _get_raising(requests.exceptions.SSLError(
-        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")))
-    client = _Client({"job_id": "job", "audio_url": URL})
-    with pytest.raises(ArtifactDownloadError, match="CERTIFICATE_VERIFY_FAILED"):
-        Artifact.load("job", client, temp_dir=str(tmp_path))
-    assert Artifact.load("job", client, download=False, temp_dir=str(tmp_path)).audio_path is None
+def _fetched(seen):
+    def fetch(uri, local_path, **_kw):
+        seen.append(uri)
+        with open(local_path, "wb") as fh:
+            fh.write(b"ID3audio")
+        return Downloaded(uri, local_path, 8, None, "audio/mpeg")
+    return fetch
 
 
-@pytest.mark.parametrize("doc", [
-    {"job_id": "job", "audio_url": URL},
-    {"job_id": "job", "audio_path": URL},
-    {"job_id": "job", "outputs": {"audio_url": URL}},
-])
-def test_load_takes_the_audio_url_from_the_doc_it_already_has(doc, tmp_path, monkeypatch):
-    """``client.get_job_audio`` re-fetches the same doc for the same fields. Its failure was
-    swallowed into "no audio", so a doc whose URL sat at the top level graded on nothing."""
-    monkeypatch.setattr(requests, "get", _get_returning(_Response()))
-    art = Artifact.load("job", _Client(doc), temp_dir=str(tmp_path))
+def test_load_asks_audio_url_when_the_snapshot_has_none(tmp_path, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(dl, "download", _fetched(seen))
+    client = _Client()
+    art = Artifact.load("job", client, temp_dir=str(tmp_path))
+    assert client.asked == ["job"] and seen == [SIGNED]
     assert art.audio_path == str(tmp_path / "job.audio")
-    assert (tmp_path / "job.audio").read_bytes().startswith(b"ID3")
 
 
-def test_a_job_with_no_audio_url_still_loads_without_audio(tmp_path, monkeypatch):
-    """No URL means no audio to fetch, which is not a failure."""
-    monkeypatch.setattr(requests, "get", _get_raising(AssertionError("nothing to download")))
-    assert Artifact.load("job", _Client({"job_id": "job"}), temp_dir=str(tmp_path)).audio_path is None
+def test_load_uses_the_docs_own_url_first(tmp_path, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(dl, "download", _fetched(seen))
+    client = _Client(snapshot={"job_id": "job", "outputs": {"audio_url": HTTPS}})
+    Artifact.load("job", client, temp_dir=str(tmp_path))
+    assert seen == [HTTPS] and client.asked == []
+
+
+def test_load_raises_when_no_audio_url_can_be_found(tmp_path, monkeypatch):
+    """A completed job with no URL in the snapshot and none from /audio-url is not "a job with no
+    audio": with download=True it raises."""
+    monkeypatch.setattr(dl, "download", lambda *a, **k: pytest.fail("nothing to download"))
+    with pytest.raises(DownloadError, match="no audio URL"):
+        Artifact.load("job", _Client(audio_url=None), temp_dir=str(tmp_path))
+    art = Artifact.load("job", _Client(audio_url=None), download=False, temp_dir=str(tmp_path))
+    assert art.audio_path is None
+
+
+def test_load_raises_when_the_download_fails(tmp_path, monkeypatch):
+    def fail(uri, local_path, **_kw):
+        raise DownloadError(f"{uri}: SSLError: CERTIFICATE_VERIFY_FAILED", uri=uri)
+
+    monkeypatch.setattr(dl, "download", fail)
+    with pytest.raises(DownloadError, match="CERTIFICATE_VERIFY_FAILED"):
+        Artifact.load("job", _Client(), temp_dir=str(tmp_path))
+
+
+# ── the API's /audio-url ──────────────────────────────────────────────────────────────────────
+
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Server Error")
+
+
+@pytest.mark.parametrize("status, body, want", [
+    (200, {"audio_url": SIGNED, "expires_at": "x", "ttl_minutes": 60, "gcs_path": "u/job/audio.mp3"},
+     SIGNED),
+    (404, {"detail": "Job has no signable master audio"}, None),
+])
+def test_get_job_audio_asks_the_audio_url_route(monkeypatch, status, body, want):
+    calls = []
+
+    def get(url, headers, timeout):
+        calls.append(url)
+        return _Resp(status, body)
+
+    monkeypatch.setattr(requests, "get", get)
+    client = KitesForUClient(base_url="https://api.example.invalid", api_key="k")
+    assert client.get_job_audio("job") == want
+    assert calls == ["https://api.example.invalid/v1/podcasts/job/audio-url"]
+
+
+def test_get_job_audio_raises_on_a_server_error(monkeypatch):
+    monkeypatch.setattr(requests, "get", lambda url, headers, timeout: _Resp(503, {}))
+    with pytest.raises(requests.HTTPError):
+        KitesForUClient(base_url="https://api.example.invalid", api_key="k").get_job_audio("job")
+
+
+# ── the kqa pipeline's audio input ────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("uri", [SIGNED, "gs://kitesforu-dev-podcasts/audio/job/final.mp3"])
+def test_normalize_audio_path_fetches_https_and_gs(tmp_path, monkeypatch, uri):
+    """An https URL (the API's signed /audio-url) was handed on as if it were a file."""
+    seen: list[str] = []
+    monkeypatch.setattr(dl, "download", _fetched(seen))
+    path = audio_utils.normalize_audio_path(uri, str(tmp_path))
+    assert seen == [uri] and path.startswith(str(tmp_path)) and "?" not in path
+
+
+def test_normalize_audio_path_leaves_a_local_file_alone(tmp_path):
+    local = tmp_path / "ep.mp3"
+    local.write_bytes(b"x")
+    assert audio_utils.normalize_audio_path(str(local), str(tmp_path)) == str(local)

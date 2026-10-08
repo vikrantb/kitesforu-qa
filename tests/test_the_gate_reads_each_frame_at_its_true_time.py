@@ -28,6 +28,7 @@ from fractions import Fraction
 import pytest
 
 from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline
+from kitesforu_qa.integrations.download import Downloaded, DownloadError
 
 np = pytest.importorskip("numpy")
 PIL_Image = pytest.importorskip("PIL.Image")
@@ -377,11 +378,11 @@ def test_run_gate_reports_coverage_and_a_note_when_nothing_was_checked(frames, t
     monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
     monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
 
-    def fake_download(cmd, **_kw):
-        pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(b"mp4")
-        return subprocess.CompletedProcess(cmd, 0)
+    def fake_download(uri, local_path, **_kw):
+        pathlib.Path(local_path).write_bytes(b"mp4")
+        return Downloaded(uri, local_path, 3, None, "video/mp4")
 
-    monkeypatch.setattr(gate.subprocess, "run", fake_download)
+    monkeypatch.setattr(gate, "download", fake_download)
     monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
     monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
     res = gate.run_gate("f7df77bf-witness")
@@ -421,25 +422,25 @@ def _gate_with_a_stamped_job(monkeypatch, tmp_path, frames, *, stamped_generatio
     monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
     calls = []
 
-    def fake_get(cmd, **_kw):
-        calls.append(cmd)
-        pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(body)
-        pathlib.Path(cmd[cmd.index("-D") + 1]).write_text(
-            f"HTTP/1.1 200 OK\r\nx-goog-generation: {fetched_generation}\r\n\r\n")
-        return subprocess.CompletedProcess(cmd, 0)
+    def fake_download(uri, local_path, **_kw):
+        calls.append((uri, local_path))
+        pathlib.Path(local_path).write_bytes(body)
+        return Downloaded(uri, local_path, len(body), fetched_generation, "video/mp4")
 
-    monkeypatch.setattr(gate.subprocess, "run", fake_get)
+    monkeypatch.setattr(gate, "download", fake_download)
     monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
     monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
     return gate.run_gate("f7df77bf-witness"), calls
 
 
 def test_run_gate_holds_the_stamp_to_the_master_it_fetched(frames, tmp_path, monkeypatch):
-    """The GET's own `x-goog-generation` and the bytes on disk are the master the stamp must name."""
+    """The shared downloader reports the object it fetched (its GCS generation and the bytes on
+    disk), and that is the master the stamp must name."""
     res, calls = _gate_with_a_stamped_job(monkeypatch, tmp_path, frames,
                                           stamped_generation=1759660800123456,
                                           fetched_generation=1759660800123456)
-    assert calls[0][:2] == ["curl", "-sfL"] and "-D" in calls[0]
+    assert calls == [("https://storage.googleapis.com/b/visuals/w/episode_video.mp4",
+                      str(tmp_path / "ag_f7df77bf-witness.mp4"))]
     cov = res["edge_clip_coverage"]
     assert (cov["source"], cov.get("stamp_rejected")) == ("stamp", None), cov
     # The master was re-assembled after the stamp was written: same length, another object.
@@ -448,7 +449,23 @@ def test_run_gate_holds_the_stamp_to_the_master_it_fetched(frames, tmp_path, mon
                                       fetched_generation=1759661999000001)
     cov = res["edge_clip_coverage"]
     assert (cov["source"], cov["stamp_rejected"]) == ("estimated", "stale_master"), cov
-    assert sorted(p.suffix for p in tmp_path.iterdir() if p.suffix == ".headers") == []
+
+
+def test_an_unfetchable_master_fails_the_gate_with_its_cause(tmp_path, monkeypatch):
+    """curl and gsutil had no timeout, and an empty file was the only failure the gate could see."""
+    gate = _load_gate()
+    doc = {"topic": "a storm", "visual": {"video_url": "https://storage.googleapis.com/b/m.mp4"}}
+    monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
+    monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def failing(uri, local_path, **_kw):
+        raise DownloadError(f"{uri}: the download outran its deadline", uri=uri)
+
+    monkeypatch.setattr(gate, "download", failing)
+    res = gate.run_gate("j")
+    assert res["verdict"] == "FAIL"
+    assert "artifact not fetchable" in res["issues"][0]["msg"]
+    assert "outran its deadline" in res["issues"][0]["msg"]
 
 
 def test_the_captioned_copy_is_not_held_to_the_masters_generation(frames, tmp_path, monkeypatch):
@@ -461,48 +478,38 @@ def test_the_captioned_copy_is_not_held_to_the_masters_generation(frames, tmp_pa
     assert (cov["source"], cov.get("stamp_rejected")) == ("stamp", None), cov
 
 
-# ── a GET that fails is a FAIL, never the last run's master re-scored ──────────────────────────
+# ── a fetch that fails is a FAIL, never the last run's master re-scored ────────────────────────
 
-def _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail):
-    """`run_gate` on the witness with an earlier run's master left at the gate's temp path, and a GET
-    that fails as ``fail`` says. Returns the result and the header files left behind."""
+def _never(*_a, **_k):
+    raise AssertionError("must not be called")
+
+
+@pytest.mark.parametrize("error", [
+    DownloadError("https://example.invalid/m.mp4: HTTP 404", uri="u", not_found=True),
+    DownloadError("https://example.invalid/m.mp4: truncated, 100 of 4096 bytes", uri="u",
+                  transient=True),
+])
+def test_a_failed_fetch_never_scores_the_master_an_earlier_run_left(frames, tmp_path, monkeypatch,
+                                                                     error):
+    """Round-2 code critic #2: the master path is fixed per job, so a GET that failed used to leave
+    the PREVIOUS run's bytes to be scored as this run's. The downloader raises instead, and the gate
+    stops there: nothing probes or extracts the file an earlier run left."""
     gate = _load_gate()
     doc = {"topic": "a storm", "master_segment_timeline": [{"index": 0}],
            "visual": {"clips": _witness_clips(), "video_url": "https://example.invalid/m.mp4"}}
     monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
     monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
-    stale = tmp_path / "ag_f7df77bf-witness.mp4"
-    stale.write_bytes(b"\x00" * 4096)                         # what an earlier run downloaded
+    (tmp_path / "ag_f7df77bf-witness.mp4").write_bytes(b"\x00" * 4096)   # an earlier run's master
 
-    def failing_get(cmd, **_kw):
-        if fail == "exit":
-            return subprocess.CompletedProcess(cmd, 22)        # curl -f on a 404, nothing written
-        if fail == "partial":                                   # the connection dropped mid-body
-            pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(b"\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 18)
-        if fail == "missing":
-            raise FileNotFoundError(2, "No such file or directory", cmd[0])
-        raise subprocess.TimeoutExpired(cmd, 900)
+    def failing(uri, local_path, **_kw):
+        raise error
 
-    monkeypatch.setattr(gate.subprocess, "run", failing_get)
-    monkeypatch.setattr(gate, "_probe_dims", lambda path: (1920, 1080, 85.033))
-    monkeypatch.setattr(gate, "_extract_frames", lambda mp4, out, *_: [frames["photo"]] * 28)
+    monkeypatch.setattr(gate, "download", failing)
+    monkeypatch.setattr(gate, "_probe_dims", _never)
+    monkeypatch.setattr(gate, "_extract_frames", _never)
     res = gate.run_gate("f7df77bf-witness")
-    return res, sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".headers")
-
-
-@pytest.mark.parametrize("fail", ["exit", "partial", "missing", "timeout"])
-def test_a_failed_get_fails_the_gate_and_leaves_no_headers(frames, tmp_path, monkeypatch, fail):
-    """Round-2 code critic #2 and #5: the master path is fixed per job, so a GET that failed used to
-    leave the PREVIOUS run's bytes to be scored as this run's, with empty headers. The old file is
-    removed first, the GET's exit status counts (a body cut short is on disk, and curl says so), and
-    the header file goes whatever happens."""
-    res, headers = _gate_on_a_failing_get(monkeypatch, tmp_path, frames, fail)
     assert res["verdict"] == "FAIL" and res["issues"][0]["sev"] == "BLOCKER", res
     assert res["issues"][0]["msg"].startswith("artifact not fetchable: https://example.invalid/m.mp4")
-    if fail != "partial":
-        assert not (tmp_path / "ag_f7df77bf-witness.mp4").exists()
-    assert headers == []
 
 
 @pytest.mark.parametrize("where", ["probe", "extract"])
@@ -514,14 +521,14 @@ def test_a_subprocess_that_times_out_is_a_fail_not_a_hang(frames, tmp_path, monk
     monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
     monkeypatch.setattr(gate.tempfile, "gettempdir", lambda: str(tmp_path))
 
-    def get(cmd, **_kw):
-        pathlib.Path(cmd[cmd.index("-o") + 1]).write_bytes(b"mp4")
-        return subprocess.CompletedProcess(cmd, 0)
+    def get(uri, local_path, **_kw):
+        pathlib.Path(local_path).write_bytes(b"mp4")
+        return Downloaded(uri, local_path, 3, None, "video/mp4")
 
     def times_out(*_a, **_k):
         raise subprocess.TimeoutExpired("ffmpeg", 1)
 
-    monkeypatch.setattr(gate.subprocess, "run", get)
+    monkeypatch.setattr(gate, "download", get)
     monkeypatch.setattr(gate, "_probe_dims", times_out if where == "probe"
                         else (lambda path: (1920, 1080, 85.033)))
     monkeypatch.setattr(gate, "_extract_frames", times_out if where == "extract"

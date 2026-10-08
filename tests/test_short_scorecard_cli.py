@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -52,32 +51,46 @@ def test_resolve_video_returns_existing_local_path(sc, tmp_path) -> None:
     assert sc.resolve_video(str(video), {}, str(tmp_path)) == str(video)
 
 
-def test_resolve_video_missing_local_path_returns_none(sc, tmp_path) -> None:
-    assert sc.resolve_video(str(tmp_path / "nope.mp4"), {}, str(tmp_path)) is None
+def test_resolve_video_missing_local_path_raises(sc, tmp_path) -> None:
+    from kitesforu_qa.integrations.download import DownloadError
+
+    with pytest.raises(DownloadError, match="not an https:// or gs:// URI"):
+        sc.resolve_video(str(tmp_path / "nope.mp4"), {}, str(tmp_path))
 
 
-def test_resolve_video_falls_back_to_doc_video_burned_url(sc, tmp_path, monkeypatch) -> None:
-    calls = []
+def _fake_download(calls):
+    from kitesforu_qa.integrations.download import Downloaded
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        Path(cmd[-1]).write_bytes(b"fake")
-        return subprocess.CompletedProcess(cmd, 0)
+    def fake(uri, local_path, **_kw):
+        calls.append((uri, local_path))
+        Path(local_path).write_bytes(b"fake")
+        return Downloaded(uri, local_path, 4, None, "video/mp4")
+    return fake
 
-    monkeypatch.setattr(sc.subprocess, "run", fake_run)
-    doc = {"visual": {"video_burned_url": "gs://bucket/path/episode_video_captioned.mp4"}}
+
+@pytest.mark.parametrize("url", [
+    "gs://bucket/path/episode_video_captioned.mp4",
+    "https://storage.googleapis.com/bucket/path/episode_video_captioned.mp4",
+])
+def test_resolve_video_falls_back_to_doc_video_burned_url(sc, tmp_path, monkeypatch, url) -> None:
+    """https is the form the pipeline persists; this returned None for it."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(sc, "download", _fake_download(calls))
+    doc = {"job_id": "j1", "visual": {"video_burned_url": url}}
     result = sc.resolve_video(None, doc, str(tmp_path))
-    assert result == str(tmp_path / "episode_video_captioned.mp4")
-    assert calls and calls[0][0] == "gsutil"
+    assert result == str(tmp_path / "j1_episode_video_captioned.mp4")
+    assert calls == [(url, result)]
 
 
-def test_resolve_video_gsutil_failure_returns_none_not_raise(sc, tmp_path, monkeypatch) -> None:
-    def failing_run(cmd, **kwargs):
-        raise subprocess.CalledProcessError(1, cmd)
+def test_resolve_video_download_failure_raises(sc, tmp_path, monkeypatch) -> None:
+    from kitesforu_qa.integrations.download import DownloadError
 
-    monkeypatch.setattr(sc.subprocess, "run", failing_run)
-    result = sc.resolve_video("gs://bucket/path/video.mp4", {}, str(tmp_path))
-    assert result is None
+    def failing(uri, local_path, **_kw):
+        raise DownloadError(f"{uri}: HTTP 404", uri=uri, not_found=True)
+
+    monkeypatch.setattr(sc, "download", failing)
+    with pytest.raises(DownloadError, match="404"):
+        sc.resolve_video("gs://bucket/path/video.mp4", {}, str(tmp_path))
 
 
 def test_resolve_video_returns_none_when_nothing_to_resolve(sc, tmp_path) -> None:
