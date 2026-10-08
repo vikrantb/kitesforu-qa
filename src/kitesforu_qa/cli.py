@@ -10,6 +10,7 @@ import click
 from .config import QAConfig, set_config
 from .integrations.gcs import download_from_gcs
 from .integrations.kitesforu_api import KitesForUClient
+from .job_status import FINISHED_RENDERING
 from .models.language import Language
 from .pipeline import QAPipeline
 from .utils.reporting import format_results, generate_report
@@ -131,7 +132,7 @@ def run(
 
 @cli.command()
 @click.option('--topic', required=True, help='Podcast topic')
-@click.option('--duration', default=0.167, type=float, help='Duration in minutes (default 0.167 = 10s, the cheap T3 verification size; see .claude/rules/test-cost-ladder.md)')
+@click.option('--duration', default=0.167, type=float, help='Duration in minutes (default 0.167 = 10s, the cheap T3 verification size; see .claude/rules/03-money.md)')
 @click.option('--style', default='Explainer', help='Podcast style (Explainer, Storytelling, Interview, Motivational)')
 @click.option('--language', default='en-US', help='BCP 47 language code (e.g., en-US, hi-IN, es-ES)')
 @click.option('--api-url', envvar='KITESFORU_API_URL', default='https://api.kitesforu.com', help='API URL')
@@ -206,11 +207,16 @@ def e2e(
         sys.exit(1)
 
     status = completed_job.get('status', '').lower()
-    if status not in ('completed', 'complete', 'done'):
+    # A QA hold (needs_review / failed_qa) is a FINISHED episode with its audio persisted, not a
+    # failed job: grade it and say it is held (kitesforu_qa.job_status).
+    if status not in FINISHED_RENDERING:
         click.echo(f"  ❌ Job failed: {completed_job.get('error', 'Unknown error')}")
         sys.exit(1)
 
-    click.echo(f"  ✓ Job completed!")
+    if status == "completed":
+        click.echo(f"  ✓ Job completed!")
+    else:
+        click.echo(f"  ⚠️  Job finished but is held: {status}. Grading its audio anyway.")
 
     # Get audio and script
     audio_url = client.get_job_audio(job_id)

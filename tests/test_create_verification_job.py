@@ -86,8 +86,9 @@ class Harness:
         self.ack = root / "FOUNDER_SPEND_ACK"
         self.copy = root / "scripts"
         self.copy.mkdir()
-        for name in ("verification_job.py", "job_status.py"):
-            shutil.copy2(SCRIPTS / name, self.copy / name)
+        shutil.copy2(SCRIPTS / "verification_job.py", self.copy / "verification_job.py")
+        (root / "src" / "kitesforu_qa").mkdir(parents=True)
+        shutil.copy2(QA / "src" / "kitesforu_qa" / "job_status.py", root / "src" / "kitesforu_qa" / "job_status.py")
         original = SCRIPT.read_text()
         rewritten = re.sub(r'^ACK_FILE=".*"$', f'ACK_FILE="{self.ack}"', original, flags=re.M)
         changed = [a for a, b in zip(original.splitlines(), rewritten.splitlines()) if a != b]
@@ -390,6 +391,35 @@ def test_stills_are_priced_from_enabled_unretired_image_rows_only(harness, worke
     r3 = harness.run("--dry-run", "--motion-clips", "1", env={"WORKERS_SRC": live})
     assert r3.returncode == 0, r3.stderr
     assert _still_rows(r3.stderr)[1] == 0.70, "the control row never reached the pricer, so this test proves nothing"
+
+
+def test_the_still_quote_drops_disabled_and_retired_rows_itself():
+    """The producer's loader serves rows through the routing cache, whose floor already drops disabled
+    and retired rows, so the end-to-end test above cannot tell whether this module filters too. It
+    must: when that cache fails, ``iter_model_rows`` falls back to the RAW CSV with every row in it
+    (workers ``common/pricing.py``). These rows are that fallback's shape. The helpers mirror the
+    producer's ``_truthy`` and ``is_past_eol``; the real ones run in the end-to-end test."""
+    rows = {
+        "flux-schnell": {"model_id": "flux-schnell", "task_types": "IMAGE", "enabled": "true",
+                         "cost_per_unit": 0.003, "unit_description": "per image", "eol_date": ""},
+        "pro-image": {"model_id": "pro-image", "task_types": "IMAGE", "enabled": "true",
+                      "cost_per_unit": 0.134, "unit_description": "per image", "eol_date": "2099-01-01"},
+        "disabled-dear": {"model_id": "disabled-dear", "task_types": "IMAGE", "enabled": "false",
+                          "cost_per_unit": 0.90, "unit_description": "per image", "eol_date": ""},
+        "retired-dear": {"model_id": "retired-dear", "task_types": "IMAGE", "enabled": "true",
+                         "cost_per_unit": 0.80, "unit_description": "per image", "eol_date": "2020-01-01"},
+        "megapixel-dear": {"model_id": "megapixel-dear", "task_types": "IMAGE", "enabled": "true",
+                           "cost_per_unit": 0.70, "unit_description": "per megapixel", "eol_date": ""},
+        "an-llm": {"model_id": "an-llm", "task_types": "LLM", "enabled": "true",
+                   "cost_per_unit": 5.0, "unit_description": "per 1M tokens", "eol_date": ""},
+    }
+    w = {"iter_model_rows": lambda: rows,
+         "truthy": lambda v: str(v).strip().lower() in {"true", "1", "yes"},
+         "is_past_eol": lambda row: bool(row.get("eol_date")) and row["eol_date"] <= "2026-10-08"}
+    quote = verification_job.quote_paid_stills(w)
+    assert quote.cheapest == ("flux-schnell", 0.003)
+    assert quote.dearest == ("pro-image", 0.134), "a disabled, retired or non-per-image row priced a still"
+    assert quote.high == pytest.approx(0.268)
 
 
 def test_a_purchase_it_cannot_price_is_refused_before_anything_is_sent(harness, tmp_path):

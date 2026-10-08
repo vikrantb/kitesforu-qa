@@ -5,9 +5,10 @@ Per Tenet 7 (cost transparency): every change affecting per-unit cost is documen
 ## 2026-10-08 — the verification job buys paid clips and stills on a QA identity, and its estimate is computed from the body it sends (opt-in `--motion-clips` only: ~$0.39-2.11 per `--tier low --motion-clips 2` run; $0 change on every other run)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py` (new),
-`scripts/job_status.py` (new), `scripts/canary_loop.py`, `scripts/narration_sync_audit.py`,
+`src/kitesforu_qa/job_status.py` (new), `scripts/canary_loop.py`, `scripts/narration_sync_audit.py`,
+`src/kitesforu_qa/integrations/kitesforu_api.py`, `src/kitesforu_qa/cli.py`,
 `tests/test_create_verification_job.py`, `tests/test_one_terminal_status_list.py`, this entry.
-PR #175, all four rounds.
+PR #175, all four rounds. The terminal-status files change WHEN a poller stops, never what a job buys.
 
 **This is the record #175 owed since round 2.** Round 1 added `--motion-clips N`
 (`visual_options.motion_clips`). Round 2 (`212ee49`) also began sending `real_images: true,

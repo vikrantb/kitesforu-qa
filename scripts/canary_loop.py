@@ -34,8 +34,8 @@ import requests
 from google.cloud import firestore
 from playwright.sync_api import sync_playwright
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from job_status import FINISHED_RENDERING, TERMINAL  # noqa: E402  (one list for every qa poller)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.job_status import FINISHED_RENDERING, TERMINAL  # noqa: E402  (one list, every qa poller)
 
 # ---------------------------------------------------------------------------
 # Config

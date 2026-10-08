@@ -388,8 +388,8 @@ if [[ "$WAIT" == "true" ]]; then
   # pass_deadline.py) + margin. A long paid episode can still run out; that is exit 4, not success.
   # While waiting on visuals, poll once a minute: each /status read of a completed job runs the
   # refund check (a Firestore transaction).
-  TERMINAL_STATUSES=$(python3 "$HERE/job_status.py" terminal)
-  GRADEABLE_STATUSES=$(python3 "$HERE/job_status.py" gradeable)
+  TERMINAL_STATUSES=$(python3 "$HERE/../src/kitesforu_qa/job_status.py" terminal)
+  GRADEABLE_STATUSES=$(python3 "$HERE/../src/kitesforu_qa/job_status.py" gradeable)
   in_list() { [[ -n "$1" && " $2 " == *" $1 "* ]]; }
   AUDIO_BUDGET_S=1800
   VISUALS_BUDGET_S=5400

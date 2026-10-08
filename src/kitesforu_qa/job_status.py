@@ -2,14 +2,20 @@
 """Which job statuses a qa poller may stop on: ONE definition for every poller in this repo.
 
 WHY THIS FILE EXISTS. The terminal set was hand-typed at each poller and each copy drifted:
-* ``create_verification_job.sh`` enumerated ``completed|failed|failed_qa`` twice, so a finished,
-  shareable ``needs_review`` episode burned every poll and then exited 4 saying it was "still
-  running" (kitesforu-qa #175 round-2 code critic D1, design D1);
-* ``canary_loop.py`` stopped on ``completed|failed|cancelled``, so a ``needs_review`` or
+* ``scripts/create_verification_job.sh`` enumerated ``completed|failed|failed_qa`` twice, so a
+  finished, shareable ``needs_review`` episode burned every poll and then exited 4 saying it was
+  "still running" (kitesforu-qa #175 round-2 code critic D1, design D1);
+* ``scripts/canary_loop.py`` stopped on ``completed|failed|cancelled``, so a ``needs_review`` or
   ``failed_qa`` canary polled to its 10-minute limit and paged Slack with a STALL diagnosis for an
   episode that had finished (#175 round-3 design NIT-4);
-* ``narration_sync_audit.py`` scored only ``completed|failed_qa|failed``, so its census silently
-  dropped every finished ``needs_review`` episode, the held ones (#175 round-2 design D1).
+* ``scripts/narration_sync_audit.py`` scored only ``completed|failed_qa|failed``, so its census
+  silently dropped every finished ``needs_review`` episode, the held ones (#175 round-2 design D1);
+* ``integrations.kitesforu_api.KitesForUClient.wait_for_completion`` (``kqa e2e``) stopped on
+  ``completed|complete|done|failed|error|cancelled``, so a held episode polled to its timeout and
+  raised, and ``kqa e2e`` called anything but ``completed`` a failed job.
+
+It lives in the package, not in ``scripts/``, because that client is package code. The scripts put
+``src`` on their path, and the shell script runs this file directly.
 
 THE SOURCE OF TRUTH is ``kitesforu_schemas.enums.JobStatus``. Its comments say which members are
 terminal: ``NEEDS_REVIEW`` / ``FAILED_QA`` "are TERMINAL like completed/failed: the episode
@@ -21,8 +27,8 @@ not classified here. A new status cannot silently fall through to "still running
 
 Offline and $0: no imports beyond the standard library, so a shell script can read it.
 
-    python3 job_status.py terminal      # space-separated, for the shell
-    python3 job_status.py gradeable
+    python3 src/kitesforu_qa/job_status.py terminal      # space-separated, for the shell
+    python3 src/kitesforu_qa/job_status.py gradeable
 """
 from __future__ import annotations
 

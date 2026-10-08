@@ -31,10 +31,9 @@ from statistics import median
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from job_status import TERMINAL  # noqa: E402  (one list for every qa poller)
 from kitesforu_qa.harness.checks.video_sync import _parse_vtt_cues  # noqa: E402
+from kitesforu_qa.job_status import TERMINAL  # noqa: E402  (one list for every qa poller)
 from kitesforu_qa.harness.narration_alignment import (  # noqa: E402
     Cue,
     boundary_alignment,
