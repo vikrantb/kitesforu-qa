@@ -351,8 +351,9 @@ def test_the_defaults_bound_every_wait():
 class _Meta:
     """The metadata ``download`` reads from a ``google.cloud.storage`` blob."""
 
-    def __init__(self, *, generation=GEN, size=len(BODY), content_type="audio/mpeg"):
-        self.generation, self.size, self.content_type = generation, size, content_type
+    def __init__(self, *, generation=GEN, size=None, content_type="audio/mpeg"):
+        self.generation, self.content_type = generation, content_type
+        self.size = len(BODY) if size is None else size
 
 
 def _named(name):
