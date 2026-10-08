@@ -188,6 +188,23 @@ def test_frames_vs_captions_fetches_through_the_downloader(fvc, tmp_path, monkey
         fvc._download(URL, tmp_path / "master.mp4")
 
 
+def test_frames_vs_captions_never_reuses_a_master_an_earlier_run_left(tmp_path, monkeypatch):
+    """Found in round 2: the master was fetched only ``if not local.exists()``, and every ``--url`` run
+    shares the label "url", so a second URL's frames came from the FIRST URL's master."""
+    fvc = _load("frames_vs_captions")
+    vtt = tmp_path / "c.vtt"
+    vtt.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nhello\n")
+    seen = []
+    monkeypatch.setattr(fvc, "download", _writes(b"mp4", seen=seen))
+    monkeypatch.setattr(fvc, "_duration_ms", lambda path: 5000)
+    monkeypatch.setattr(fvc.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0))
+    for url in ("https://x.invalid/a.mp4", "https://x.invalid/b.mp4"):
+        monkeypatch.setattr(sys, "argv", ["frames_vs_captions.py", "--url", url, "--vtt-file", str(vtt),
+                                          "--out-dir", str(tmp_path), "--frames", "1"])
+        assert fvc.main() == 0
+    assert [u for u, _ in seen] == ["https://x.invalid/a.mp4", "https://x.invalid/b.mp4"]
+
+
 # ── frame_proof: it fetches through the downloader, and gains the master tie ──────────────────
 
 class _Firestore:

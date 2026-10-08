@@ -149,9 +149,11 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     local = out_dir / "master.mp4"
-    if not local.exists():
-        print(f"fetching {url[:96]} ...")
-        _download(url, local)
+    # Fetched on every run. A master an earlier run left here may be another render's (a
+    # re-assembly keeps its URL) or, with --url, another URL's (every --url run shares the label
+    # "url"), and its frames would be compared with this run's captions.
+    print(f"fetching {url[:96]} ...")
+    _download(url, local)
 
     total = _duration_ms(str(local))
     # Interior samples only: t=0 is a title card and t=end an outro on most artifacts, and
