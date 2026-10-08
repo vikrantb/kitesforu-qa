@@ -147,7 +147,11 @@ def extract_frame(beat: dict[str, Any], video_path: str | None) -> tuple[str, Ca
 
     asset_uri = beat.get("asset_uri")
     if asset_uri:
-        local_asset = _download_asset(str(asset_uri), tmp_dir)
+        try:
+            local_asset = _download_asset(str(asset_uri), tmp_dir)
+        except Exception:
+            _cleanup()          # the caller has no cleanup for a frame that was never returned
+            raise
         if local_asset:
             at_s = 0.0 if _is_image_path(local_asset) else 0.5
             if _ffmpeg_frame(local_asset, at_s, out_path):

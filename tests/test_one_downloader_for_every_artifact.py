@@ -1,11 +1,13 @@
 """The shared downloader (``kitesforu_qa.integrations.download``): a file, or a typed error.
 
 Every guarantee here is exercised over a real socket: a local HTTP server on 127.0.0.1 that stalls,
-trickles, truncates, fails transiently, refuses, or serves HTML. ``gs://`` runs through a fake blob
-in place of ``google.cloud.storage``. Offline and $0.
+trickles, truncates, fails transiently, refuses, encodes, redirects, or serves a page. ``gs://`` reads
+its metadata from a fake blob in place of ``google.cloud.storage``, and streams its media from the same
+local server, through the same read loop as https. Offline and $0.
 """
 from __future__ import annotations
 
+import gzip
 import inspect
 import math
 import threading
@@ -17,7 +19,7 @@ import requests
 
 from kitesforu_qa.integrations import download as dl
 from kitesforu_qa.integrations import gcs
-from kitesforu_qa.integrations.download import DownloadError, download
+from kitesforu_qa.integrations.download import DownloadError, FetchBudget, download, fetch_bytes
 
 GEN = 1759660800123456
 BODY = b"ID3" + bytes(range(256)) * 16          # 4,099 bytes of "audio"
@@ -48,6 +50,37 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(BODY)
         elif path == "/redirect.mp3":
             self._head(302, ctype="text/html", length=0, extra={"Location": "/ok.mp3"})
+        elif path == "/hop.mp3":   # an earlier hop that names a generation, then a final one that does not
+            self._head(302, ctype="text/html", length=0,
+                       extra={"Location": "/nogen.mp3", "x-goog-generation": "111"})
+        elif path == "/nogen.mp3":
+            self._head(200, length=len(BODY))
+            self.wfile.write(BODY)
+        elif path == "/gzip.mp3":
+            packed = gzip.compress(BODY)
+            self._head(200, length=len(packed), extra={"Content-Encoding": "gzip"})
+            self.wfile.write(packed)
+        elif path in ("/error.json", "/error.xml", "/note.txt"):
+            ctype = {"/error.json": "application/json", "/error.xml": "application/xml",
+                     "/note.txt": "text/plain; charset=utf-8"}[path]
+            self._head(200, ctype=ctype, length=len(b"{}"))
+            self.wfile.write(b"{}")
+        elif path == "/precondition.mp3":
+            if hits[path] == 1:
+                self._head(412, ctype="application/json", length=2)
+                self.wfile.write(b"{}")
+            else:
+                self._head(200, length=len(BODY))
+                self.wfile.write(BODY)
+        elif path == "/trickle8k.mp3":   # 8 KiB of body takes ~25 s: one byte every 3 ms
+            self._head(200, length=100_000)
+            for _ in range(10_000):
+                try:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.003)
         elif path in ("/missing.mp3", "/gone.mp3", "/forbidden.mp3", "/always503.mp3"):
             code = {"/missing.mp3": 404, "/gone.mp3": 410, "/forbidden.mp3": 403,
                     "/always503.mp3": 503}[path]
@@ -125,7 +158,7 @@ def test_a_redirect_reports_the_object_it_ended_on(server, tmp_path):
     ("/missing.mp3", True, False, "HTTP 404"),
     ("/gone.mp3", True, False, "HTTP 410"),
     ("/forbidden.mp3", False, False, "403"),
-    ("/login", False, False, "an HTML page"),
+    ("/login", False, False, "text/html; charset=utf-8 body, not media"),
     ("/empty.mp3", False, False, "empty"),
     ("/always503.mp3", False, True, "HTTP 503"),
     ("/short.mp3", False, True, "IncompleteRead|truncated, 500 of 1000 bytes"),
@@ -192,18 +225,13 @@ class _Read1Raw:
         return self._left.pop(0) if self._left else b""
 
 
-@pytest.mark.parametrize("raw", [object(), "read1"], ids=["urllib3-1.x-no-read1", "read1-no-enforcement"])
-def test_the_declared_size_is_checked_without_urllib3s_help(tmp_path, monkeypatch, raw):
-    """urllib3 1.x does not enforce Content-Length. A body short of it is refused here anyway, on
-    both read paths."""
-    calls = []
-
+def _short_response(raw):
     class Short:
         status_code = 200
         headers = {"Content-Type": "audio/mpeg", "Content-Length": "1000"}
 
         def __init__(self):
-            self.raw = _Read1Raw() if raw == "read1" else raw
+            self.raw = raw
 
         def __enter__(self):
             return self
@@ -214,12 +242,29 @@ def test_the_declared_size_is_checked_without_urllib3s_help(tmp_path, monkeypatc
         def raise_for_status(self):
             pass
 
-        def iter_content(self, chunk_size):
-            yield b"x" * 500
+    return Short()
+
+
+def test_without_read1_every_download_raises_and_names_urllib3(tmp_path, monkeypatch):
+    """urllib3 before 2.2 has no ``read1``, and a block read lets a trickle outrun the deadline (the
+    round-2 critic forced that path and the trickle test went red). ``pyproject.toml`` requires 2.2;
+    a machine that has an older one gets an error naming it, never a silent fallback."""
+    calls = []
+    monkeypatch.setattr(requests, "get", lambda url, timeout, stream: calls.append(url)
+                        or _short_response(object()))
+    with pytest.raises(DownloadError, match="has no read1.*urllib3>=2.2") as err:
+        download("https://storage.googleapis.com/b/ep.mp3", str(tmp_path / "ep.mp3"), **FAST)
+    assert len(calls) == 1 and not err.value.transient and _left(tmp_path) == []
+
+
+@pytest.mark.parametrize("raw", ["read1"], ids=["read1-no-enforcement"])
+def test_the_declared_size_is_checked_without_urllib3s_help(tmp_path, monkeypatch, raw):
+    """urllib3 does not always enforce Content-Length. A body short of it is refused here anyway."""
+    calls = []
 
     def get(url, timeout, stream):
         calls.append(url)
-        return Short()
+        return _short_response(_Read1Raw())
 
     monkeypatch.setattr(requests, "get", get)
     with pytest.raises(DownloadError, match="truncated, 500 of 1000 bytes"):
@@ -240,6 +285,52 @@ def test_a_certificate_failure_is_not_retried(tmp_path, monkeypatch):
     assert len(calls) == 1 and not err.value.transient
 
 
+def test_only_the_final_responses_generation_names_the_object(server, tmp_path):
+    """A generation on an earlier redirect hop names some other object (#184's rule, kept now that
+    the downloader replaces curl's headers)."""
+    srv, base = server
+    got = download(f"{base}/hop.mp3", str(tmp_path / "ep.mp3"))
+    assert (got.size, got.generation) == (len(BODY), None) and srv.hits["/nogen.mp3"] == 1
+
+
+def test_an_encoded_body_is_decoded_and_not_held_to_its_encoded_length(server, tmp_path):
+    """``Content-Length`` counts the gzip bytes on the wire; the file holds the decoded ones."""
+    srv, base = server
+    got = download(f"{base}/gzip.mp3", str(tmp_path / "ep.mp3"))
+    assert got.size == len(BODY) and (tmp_path / "ep.mp3").read_bytes() == BODY
+
+
+@pytest.mark.parametrize("path", ["/error.json", "/error.xml", "/note.txt"])
+def test_a_page_is_not_media(server, tmp_path, path):
+    """Round 2: ``media=True`` refused only HTML; an API error body graded as an episode is the
+    same defect."""
+    srv, base = server
+    with pytest.raises(DownloadError, match="not media"):
+        download(f"{base}{path}", str(tmp_path / "ep.mp3"), **FAST)
+    assert srv.hits[path] == 1 and _left(tmp_path) == []
+    assert fetch_bytes(f"{base}{path}", cap=100) == b"{}"      # a page is fine where one is asked for
+
+
+@pytest.mark.timeout(20)
+def test_no_backoff_sleeps_past_the_deadline(server, tmp_path):
+    srv, base = server
+    t0 = time.monotonic()
+    with pytest.raises(DownloadError, match="HTTP 503"):
+        download(f"{base}/always503.mp3", str(tmp_path / "ep.mp3"), deadline_s=1.0, attempts=3,
+                 backoff_s=(5.0, 5.0))
+    assert time.monotonic() - t0 < 2.0 and srv.hits["/always503.mp3"] == 1
+
+
+def test_fetch_bytes_has_the_same_guarantees_in_memory(server, tmp_path):
+    srv, base = server
+    assert fetch_bytes(f"{base}/ok.mp3", cap=len(BODY)) == BODY
+    with pytest.raises(DownloadError, match="exceeds 100 bytes"):
+        fetch_bytes(f"{base}/ok.mp3", cap=100)
+    with pytest.raises(DownloadError, match="HTTP 404") as err:
+        fetch_bytes(f"{base}/missing.mp3", cap=100)
+    assert err.value.not_found and srv.hits["/ok.mp3"] == 2
+
+
 @pytest.mark.parametrize("uri", ["", "ftp://b/ep.mp3", "/tmp/not-a-uri.mp3", "visuals/j/ep.mp3"])
 def test_anything_but_https_or_gs_raises(uri, tmp_path):
     with pytest.raises(DownloadError, match="not an https:// or gs:// URI"):
@@ -257,95 +348,179 @@ def test_the_defaults_bound_every_wait():
 
 # ── gs:// ─────────────────────────────────────────────────────────────────────────────────────
 
-class _Blob:
-    """What ``download`` asks of a ``google.cloud.storage`` blob."""
+class _Meta:
+    """The metadata ``download`` reads from a ``google.cloud.storage`` blob."""
 
-    def __init__(self, data=BODY, *, generation=GEN, content_type="audio/mpeg", size=None,
-                 fail=None, chunks=1, pause=0.0):
-        self.data, self.generation, self.content_type = data, generation, content_type
-        self.size = len(data) if size is None else size
-        self.fail, self.chunks, self.pause, self.calls = list(fail or []), chunks, pause, []
-
-    def download_to_file(self, fh, timeout, if_generation_match):
-        self.calls.append((timeout, if_generation_match))
-        if self.fail:
-            raise self.fail.pop(0)
-        step = max(1, math.ceil(len(self.data) / self.chunks))
-        for i in range(0, len(self.data), step):
-            fh.write(self.data[i:i + step])
-            time.sleep(self.pause)
+    def __init__(self, *, generation=GEN, size=len(BODY), content_type="audio/mpeg"):
+        self.generation, self.size, self.content_type = generation, size, content_type
 
 
 def _named(name):
     return type(name, (Exception,), {})
 
 
-def _gcs(monkeypatch, blob):
-    looked = []
+def _gs(monkeypatch, base, path, meta=None, *, raises=()):
+    """gs:// wired to the local server: ``get_blob`` answers ``meta`` (or raises ``raises`` in turn),
+    the media URL is ``<base><path>``, and the session is a plain one. Returns the calls seen."""
+    seen = {"get_blob": [], "media_url": []}
+    raising = list(raises)
 
-    def get_blob(uri, *, timeout=None):
-        looked.append(uri)
-        return blob
+    def get_blob(uri, *, timeout=None, retry=gcs.LIBRARY_RETRY):
+        seen["get_blob"].append((uri, timeout, retry))
+        if raising:
+            raise raising.pop(0)
+        return meta
+
+    def media_url(uri, *, if_generation_match=None):
+        seen["media_url"].append((uri, if_generation_match))
+        return f"{base}{path}"
 
     monkeypatch.setattr(gcs, "get_blob", get_blob)
-    return looked
+    monkeypatch.setattr(gcs, "media_url", media_url)
+    monkeypatch.setattr(gcs, "authorized_session", requests.Session)
+    return seen
 
 
-def test_a_gs_download_lands_at_the_file_path_pinned_to_its_generation(tmp_path, monkeypatch):
+def test_a_gs_download_lands_at_the_file_path_pinned_to_its_generation(server, tmp_path, monkeypatch):
     """The old gs:// path treated the file path as a directory and wrote ``<path>/<object>``."""
-    blob = _Blob()
-    _gcs(monkeypatch, blob)
+    srv, base = server
+    seen = _gs(monkeypatch, base, "/ok.mp3", _Meta())
     got = download("gs://kitesforu-dev-podcasts/audio/job/final.mp3", str(tmp_path / "job.audio"))
-    assert (tmp_path / "job.audio").is_file() and (tmp_path / "job.audio").read_bytes() == BODY
+    assert (tmp_path / "job.audio").read_bytes() == BODY and _left(tmp_path) == ["job.audio"]
     assert (got.size, got.generation, got.content_type) == (len(BODY), GEN, "audio/mpeg")
-    assert blob.calls == [((10.0, 60.0), GEN)]
-    assert _left(tmp_path) == ["job.audio"]
+    assert seen["get_blob"] == [("gs://kitesforu-dev-podcasts/audio/job/final.mp3", (10.0, 60.0), None)]
+    assert seen["media_url"] == [("gs://kitesforu-dev-podcasts/audio/job/final.mp3", GEN)]
 
 
-@pytest.mark.parametrize("blob, cause, not_found", [
-    (None, "no such object", True),
-    (_Blob(b""), "empty", False),
-    (_Blob(b"<html>sign in</html>", content_type="text/html"), "an HTML page", False),
+@pytest.mark.parametrize("path, meta, cause, not_found", [
+    ("/ok.mp3", None, "no such object", True),
+    ("/missing.mp3", _Meta(), "HTTP 404", True),           # deleted between the metadata and the GET
+    ("/empty.mp3", _Meta(size=0), "empty", False),
+    ("/ok.mp3", _Meta(content_type="text/html"), "not media", False),
 ])
-def test_a_gs_download_that_fails_raises(tmp_path, monkeypatch, blob, cause, not_found):
-    _gcs(monkeypatch, blob)
+def test_a_gs_download_that_fails_raises(server, tmp_path, monkeypatch, path, meta, cause, not_found):
+    srv, base = server
+    _gs(monkeypatch, base, path, meta)
     with pytest.raises(DownloadError, match=cause) as err:
         download("gs://b/audio/job/final.mp3", str(tmp_path / "job.audio"), **FAST)
     assert err.value.not_found is not_found and _left(tmp_path) == []
 
 
-def test_a_short_gs_body_is_truncated_and_retried(tmp_path, monkeypatch):
-    blob = _Blob(b"x" * 500, size=1000)
-    _gcs(monkeypatch, blob)
-    with pytest.raises(DownloadError, match="truncated, 500 of 1000 bytes"):
+def test_a_short_gs_body_is_truncated_and_retried(server, tmp_path, monkeypatch):
+    srv, base = server
+    _gs(monkeypatch, base, "/ok.mp3", _Meta(size=len(BODY) + 1))
+    with pytest.raises(DownloadError, match=f"truncated, {len(BODY)} of {len(BODY) + 1} bytes"):
         download("gs://b/audio/job/final.mp3", str(tmp_path / "job.audio"), **FAST)
-    assert len(blob.calls) == 3 and _left(tmp_path) == []
+    assert srv.hits["/ok.mp3"] == 3 and _left(tmp_path) == []
 
 
-def test_a_transient_gs_failure_is_retried_and_a_permanent_one_is_not(tmp_path, monkeypatch):
-    blob = _Blob(fail=[_named("ServiceUnavailable")("503")])
-    _gcs(monkeypatch, blob)
+def test_an_object_rewritten_mid_download_is_retried(server, tmp_path, monkeypatch):
+    """``ifGenerationMatch``: GCS answers 412 once the object is another generation."""
+    srv, base = server
+    _gs(monkeypatch, base, "/precondition.mp3", _Meta())
     assert download("gs://b/a.mp3", str(tmp_path / "a.mp3"), **FAST).size == len(BODY)
-    assert len(blob.calls) == 2
-    blob = _Blob(fail=[_named("Forbidden")("403 storage.objects.get denied")])
-    _gcs(monkeypatch, blob)
-    with pytest.raises(DownloadError, match="403"):
-        download("gs://b/b.mp3", str(tmp_path / "b.mp3"), **FAST)
-    assert len(blob.calls) == 1
+    assert srv.hits["/precondition.mp3"] == 2
+
+
+@pytest.mark.parametrize("raised, attempts, not_found", [
+    (_named("ServiceUnavailable")("503"), 2, False),          # retried, then fetched
+    (_named("Forbidden")("403 storage.objects.get denied"), 1, False),
+    (_named("NotFound")("404 bucket kitesforu-gone"), 1, True),
+])
+def test_a_metadata_failure_is_classified(server, tmp_path, monkeypatch, raised, attempts, not_found):
+    srv, base = server
+    seen = _gs(monkeypatch, base, "/ok.mp3", _Meta(), raises=[raised])
+    if attempts == 2:
+        assert download("gs://b/a.mp3", str(tmp_path / "a.mp3"), **FAST).size == len(BODY)
+    else:
+        with pytest.raises(DownloadError, match=str(raised)) as err:
+            download("gs://b/a.mp3", str(tmp_path / "a.mp3"), **FAST)
+        assert err.value.not_found is not_found
+    assert len(seen["get_blob"]) == attempts
 
 
 @pytest.mark.timeout(20)
-def test_a_gs_trickle_ends_at_the_deadline(tmp_path, monkeypatch):
-    _gcs(monkeypatch, _Blob(b"x" * 100, chunks=100, pause=0.05))
+def test_a_gs_trickle_ends_at_the_deadline(server, tmp_path, monkeypatch):
+    """Round-2 critic: the GCS client read 8 KiB per write, so a byte every 59 s held one chunk for
+    days; measured 24.8 s against a 1 s deadline. The media is streamed through ``read1`` now, from a
+    REAL socket that sends a byte every 3 ms: 8 KiB of it takes ~25 s, so a block read of that size
+    cannot pass this test."""
+    srv, base = server
+    _gs(monkeypatch, base, "/trickle8k.mp3", _Meta(size=100_000))
+    t0 = time.monotonic()
     with pytest.raises(DownloadError, match="deadline"):
-        download("gs://b/a.mp3", str(tmp_path / "a.mp3"), deadline_s=0.5, attempts=1)
-    assert _left(tmp_path) == []
+        download("gs://b/a.mp3", str(tmp_path / "a.mp3"), timeout=(1.0, 1.0), deadline_s=1.0,
+                 attempts=1)
+    assert time.monotonic() - t0 < 4.0 and _left(tmp_path) == []
 
 
-def test_download_from_gcs_keeps_its_directory_contract(tmp_path, monkeypatch):
-    _gcs(monkeypatch, _Blob())
+def test_the_media_url_is_the_json_api_pinned_to_the_generation():
+    assert gcs.media_url("gs://kitesforu-dev-podcasts/visuals/j/a b.mp4", if_generation_match=GEN) == (
+        "https://storage.googleapis.com/download/storage/v1/b/kitesforu-dev-podcasts/o/"
+        f"visuals%2Fj%2Fa%20b.mp4?alt=media&ifGenerationMatch={GEN}")
+
+
+def test_download_from_gcs_keeps_its_directory_contract(server, tmp_path, monkeypatch):
+    srv, base = server
+    _gs(monkeypatch, base, "/ok.mp3", _Meta())
     path = gcs.download_from_gcs("gs://b/audio/job/final.mp3", str(tmp_path))
     assert path == str(tmp_path / "final.mp3") and (tmp_path / "final.mp3").is_file()
-    _gcs(monkeypatch, None)
+    _gs(monkeypatch, base, "/ok.mp3", None)
     with pytest.raises(DownloadError):
         gcs.download_from_gcs("gs://b/audio/job/other.mp3", str(tmp_path))
+
+
+# ── a run's budget ────────────────────────────────────────────────────────────────────────────
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_the_breaker_opens_after_consecutive_failures_and_a_missing_object_resets_it(
+        server, tmp_path):
+    """Round-2 latency L1: a degraded link makes every job run to its own deadline, one after another.
+    After ``max_consecutive`` failures in a row the run stops downloading, at once, and says why. A
+    404 is the source answering, so it resets the streak."""
+    srv, base = server
+    budget = FetchBudget(3600, max_consecutive=2)
+    for path in ("/always503.mp3", "/missing.mp3", "/always503.mp3"):
+        with pytest.raises(DownloadError):
+            budget.download(f"{base}{path}", str(tmp_path / "ep.mp3"), **FAST)
+    assert budget.spent is None                              # the 404 reset the streak to 0, then 1
+    with pytest.raises(DownloadError):
+        budget.download(f"{base}/always503.mp3", str(tmp_path / "ep.mp3"), **FAST)
+    assert budget.spent and "2 downloads failed in a row" in budget.spent
+    hits = dict(srv.hits)
+    with pytest.raises(DownloadError, match="not fetched: 2 downloads failed in a row"):
+        budget.download(f"{base}/ok.mp3", str(tmp_path / "ep.mp3"))
+    assert srv.hits == hits                                  # no request once the breaker is open
+
+
+def test_a_success_resets_the_streak(server, tmp_path):
+    srv, base = server
+    budget = FetchBudget(3600, max_consecutive=2)
+    for path in ("/always503.mp3", "/ok.mp3", "/always503.mp3", "/ok.mp3"):
+        try:
+            budget.download(f"{base}{path}", str(tmp_path / "ep.mp3"), **FAST)
+        except DownloadError:
+            pass
+    assert budget.spent is None
+
+
+def test_the_wall_budget_ends_downloading_and_bounds_each_deadline(server, tmp_path, monkeypatch):
+    srv, base = server
+    clock = _Clock()
+    budget = FetchBudget(100, clock=clock)
+    asked = []
+    monkeypatch.setattr(dl, "download", lambda uri, path, **kw: asked.append(kw["deadline_s"]) or "ok")
+    clock.now = 40.0
+    assert budget.download(f"{base}/ok.mp3", str(tmp_path / "ep.mp3")) == "ok"
+    assert asked == [60.0]                                   # min(DEADLINE_S, what is left of the run)
+    clock.now = 100.0
+    with pytest.raises(DownloadError, match="budget of 100 s is spent"):
+        budget.download(f"{base}/ok.mp3", str(tmp_path / "ep.mp3"))
+    assert len(asked) == 1

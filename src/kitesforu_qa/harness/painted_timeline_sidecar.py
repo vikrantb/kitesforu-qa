@@ -68,7 +68,9 @@ SIDECAR_URI_KEY = "painted_timeline_uri"
 #: A v1 window is about 200 bytes of JSON, so this allows several thousand windows. The cap exists
 #: so a URI that points at the master by mistake costs a megabyte, not the whole video.
 MAX_SIDECAR_BYTES = 1 << 20
+#: Seconds to connect and per read, and for the whole read, retries included.
 FETCH_TIMEOUT_S = 15
+FETCH_DEADLINE_S = 60
 
 READ = "read"
 ABSENT = "absent"
@@ -231,19 +233,15 @@ class FetchedMaster:
         return self.generation is not None and self.size is not None
 
 
-def _https_get(url: str) -> bytes:
-    """The body, capped at ``MAX_SIDECAR_BYTES``. Uses ``requests`` (a declared dependency), which
-    carries its own CA bundle: ``urllib`` on a python.org framework python whose ``Install
-    Certificates.command`` was never run (here ``/usr/local/bin/python3`` 3.12.3) fails every
-    storage.googleapis.com GET with CERTIFICATE_VERIFY_FAILED."""
-    import requests
+def _get(url: str) -> bytes:
+    """The body, through the shared downloader (``integrations.download.fetch_bytes``): capped at
+    ``MAX_SIDECAR_BYTES``, a timeout on every socket operation, ``FETCH_DEADLINE_S`` for the whole
+    read, and a bounded retry of a transient failure. Like the master, a blip is retried rather than
+    read as "no sidecar"."""
+    from ..integrations.download import fetch_bytes
 
-    with requests.get(url, timeout=FETCH_TIMEOUT_S, stream=True) as resp:
-        resp.raise_for_status()
-        body = resp.raw.read(MAX_SIDECAR_BYTES + 1, decode_content=True)
-    if len(body) > MAX_SIDECAR_BYTES:
-        raise ValueError(f"body exceeds {MAX_SIDECAR_BYTES} bytes, so it is not a painted timeline")
-    return body
+    return fetch_bytes(url, cap=MAX_SIDECAR_BYTES, timeout=(FETCH_TIMEOUT_S, FETCH_TIMEOUT_S),
+                       deadline_s=FETCH_DEADLINE_S)
 
 
 def read_sidecar(doc: Mapping[str, Any] | None, *,
@@ -262,7 +260,7 @@ def read_sidecar(doc: Mapping[str, Any] | None, *,
     if url is None:
         return SidecarRead(URI_UNRESOLVABLE, uri, detail=uri)
     try:
-        body = (fetch or _https_get)(url)
+        body = (fetch or _get)(url)
     except Exception as exc:  # the read failed; the reader falls back and reports why
         return SidecarRead(FETCH_FAILED, uri, detail=f"{type(exc).__name__}: {exc}")
     try:

@@ -346,13 +346,17 @@ def ffprobe_duration(mp3_url: str) -> tuple[float | None, int | None]:
 
     A fetch that fails RAISES ``DownloadError``: ``run_one`` logs it as an unfetchable mp3, not as a
     completed episode whose mp3 is "off". ``(None, size)`` when ffprobe cannot read a file that did
-    download."""
+    download, and when ffprobe itself times out or is missing: a probe failure on a completed job must
+    never escape as an intake failure (``TRIGGER_ERR``, with a Slack hypothesis about token mint)."""
     with tempfile.TemporaryDirectory() as tmp:
         got = download(mp3_url, os.path.join(tmp, "probe.mp3"))
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", got.path],
-            capture_output=True, text=True, timeout=60,
-        )
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", got.path],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None, got.size
         try:
             return (float(out.stdout.strip()) if out.returncode == 0 else None), got.size
         except ValueError:

@@ -125,7 +125,10 @@ def test_resolve_audio_failure_raises_and_the_cell_names_it(qm, tmp_path, monkey
     def failing(uri, local_path, **_kw):
         raise DownloadError(f"{uri}: Forbidden: 403", uri=uri)
 
+    from kitesforu_qa.integrations import download as dl
+
     monkeypatch.setattr(qm, "download", failing)
+    monkeypatch.setattr(dl, "download", failing)      # the run's FetchBudget calls the module's
     doc = _episode_doc("ep1")
     doc["outputs"] = {"audio_url": "gs://bucket/ep.mp3"}
     with pytest.raises(DownloadError, match="403"):
@@ -139,6 +142,55 @@ def test_resolve_audio_failure_raises_and_the_cell_names_it(qm, tmp_path, monkey
 
 
 # ── score_all_episodes_courses ───────────────────────────────────────────────────
+
+
+def test_a_short_is_classified_from_its_doc_before_anything_is_downloaded(qm) -> None:
+    """Round-2 cost lens: the video and audio of every short were downloaded and then thrown away
+    (118 of 146 recent completed jobs are shorts; ~6 GB, ~$0.70 a 400-job sweep, estimated)."""
+    fetched: list[str] = []
+
+    def spy(*args, **_kw):
+        fetched.append(args[-2]["job_id"])          # (video, doc, work_dir) or (doc, work_dir)
+        return None
+
+    cells = qm.score_all_episodes_courses(
+        [_short_doc("sh1"), _episode_doc("ep1")], project="kitesforu-dev", download_video=True,
+        download_audio=True, fetch_job_doc=lambda project, jid: {}, resolve_video=spy,
+        resolve_audio=spy,
+    )
+    assert fetched == ["ep1", "ep1"] and [c["job_id"] for c in cells] == ["ep1"]
+
+
+def test_each_jobs_downloads_are_removed_once_it_is_scored(qm) -> None:
+    """Round-2 cost/latency: the work directory was never deleted (~1 GB a 60-short sweep, est.)."""
+    dirs: list[str] = []
+
+    def writes(doc, work_dir, **_kw):
+        dirs.append(work_dir)
+        target = Path(work_dir) / f"{doc['job_id']}.mp3"
+        target.write_bytes(b"x")
+        return str(target)
+
+    qm.score_all_episodes_courses(
+        [_episode_doc("ep1"), _episode_doc("ep2")], project="kitesforu-dev", download_video=False,
+        download_audio=True, fetch_job_doc=lambda project, jid: {}, resolve_video=lambda *a, **k: None,
+        resolve_audio=writes,
+    )
+    assert len(set(dirs)) == 2 and not any(Path(d).exists() for d in dirs)
+
+
+def test_a_run_whose_download_budget_is_spent_reports_each_job_unscored_with_why(qm) -> None:
+    """Round-2 latency L1: the run-level bound. A spent budget refuses at once, without a request."""
+    from kitesforu_qa.integrations.download import FetchBudget
+
+    doc = _episode_doc("ep1", outputs={"audio_url": "https://storage.googleapis.com/b/ep1.mp3"})
+    cells = qm.score_all_episodes_courses(
+        [doc], project="kitesforu-dev", download_video=False, download_audio=True,
+        fetch_job_doc=lambda project, jid: {}, resolve_video=lambda *a, **k: None,
+        resolve_audio=qm.resolve_audio, budget=FetchBudget(0),
+    )
+    assert cells[0]["_scored"] is False
+    assert "not fetched: the run's download budget of 0 s is spent" in cells[0]["_error"]
 
 
 def test_score_all_episodes_courses_scores_episode_and_course(qm) -> None:
@@ -171,7 +223,7 @@ def test_score_all_episodes_courses_excludes_shorts_entirely(qm) -> None:
 def test_score_all_episodes_courses_fail_open_on_exception(qm) -> None:
     docs = [_episode_doc("ep-good"), _episode_doc("ep-bad")]
 
-    def flaky_resolve_audio(doc, work_dir):
+    def flaky_resolve_audio(doc, work_dir, **_kw):
         if doc.get("job_id") == "ep-bad":
             raise RuntimeError("simulated failure")
         return None

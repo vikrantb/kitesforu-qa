@@ -121,32 +121,31 @@ def main() -> int:
     ap.add_argument("--project", default="kitesforu-dev")
     args = ap.parse_args()
 
-    path = args.file
-    clips: list[dict] = []
-    job: dict = {}
-    fetched: FetchedMaster | None = None
-    if not path:
-        if not args.job_id:
-            print("need a job_id or --file", file=sys.stderr)
-            return 2
-        from google.cloud import firestore  # noqa: PLC0415 — optional dep, only this path needs it
+    if args.file:
+        return _prove(args.file, clips=[], job={}, fetched=None)
+    if not args.job_id:
+        print("need a job_id or --file", file=sys.stderr)
+        return 2
+    from google.cloud import firestore  # noqa: PLC0415 — optional dep, only this path needs it
 
-        doc = (firestore.Client(project=args.project)
-               .collection("podcast_jobs").document(args.job_id).get())
-        job = doc.to_dict() or {}
-        vis = job.get("visual") or {}
-        url = str(vis.get("video_url") or "").strip()
-        # `video_url` is surfaced as a PUBLIC https URL on the delivered path, and as `gs://` on
-        # some internal ones — accept both. (My first version only took `gs://` and rejected a
-        # perfectly good master with "no visual.video_url", printing the URL it had just refused.)
-        # An EMPTY value is the real defect shape — "rendered but not surfaced".
-        if not url:
-            print(f"job {args.job_id}: visual.video_url is EMPTY — rendered but not surfaced "
-                  f"(video_status={vis.get('video_status')!r}, "
-                  f"skip_reason={vis.get('video_skip_reason')!r})", file=sys.stderr)
-            return 1
-        clips = [c for c in (vis.get("clips") or []) if isinstance(c, dict)]
-        path = f"{tempfile.mkdtemp()}/master.mp4"
+    doc = (firestore.Client(project=args.project)
+           .collection("podcast_jobs").document(args.job_id).get())
+    job = doc.to_dict() or {}
+    vis = job.get("visual") or {}
+    url = str(vis.get("video_url") or "").strip()
+    # `video_url` is surfaced as a PUBLIC https URL on the delivered path, and as `gs://` on
+    # some internal ones — accept both. (My first version only took `gs://` and rejected a
+    # perfectly good master with "no visual.video_url", printing the URL it had just refused.)
+    # An EMPTY value is the real defect shape — "rendered but not surfaced".
+    if not url:
+        print(f"job {args.job_id}: visual.video_url is EMPTY — rendered but not surfaced "
+              f"(video_status={vis.get('video_status')!r}, "
+              f"skip_reason={vis.get('video_skip_reason')!r})", file=sys.stderr)
+        return 1
+    clips = [c for c in (vis.get("clips") or []) if isinstance(c, dict)]
+    # The master lives only while it is measured: a directory nobody deletes keeps every master.
+    with tempfile.TemporaryDirectory(prefix="kqa_frame_proof_") as tmp:
+        path = f"{tmp}/master.mp4"
         # The shared downloader, https and gs:// alike. It reports the object it fetched (its GCS
         # generation and the bytes on disk), so a producer's painted timeline is held to THIS master
         # (``stale_master``); gsutil reported nothing, and this script had the length check only.
@@ -155,8 +154,11 @@ def main() -> int:
         except DownloadError as exc:
             print(f"job {args.job_id}: could not fetch {url}: {exc}", file=sys.stderr)
             return 1
-        fetched = FetchedMaster(got.generation, got.size)
+        return _prove(path, clips=clips, job=job, fetched=FetchedMaster(got.generation, got.size))
 
+
+def _prove(path: str, *, clips: list[dict], job: dict, fetched: FetchedMaster | None) -> int:
+    """Measure the master at ``path``: the whole file, then each painted window by render mode."""
     span = _probe_duration(path)
     whole = _score(_diffs(path))
     print(f"master: {path}  duration={span:.2f}s")

@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
 from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 CUTOVER = datetime(2026, 7, 1, tzinfo=timezone.utc)   # masters exist only after this
@@ -38,8 +39,8 @@ def _pairs(limit: int, scan: int = 2000):
     out = []
     for d in db.collection("podcast_jobs").limit(scan).stream():
         j = d.to_dict() or {}
-        m = (j.get("outputs") or {}).get("audio_url")
-        s = (j.get("audio") or {}).get("speech_only_url")
+        art = Artifact.from_doc(j)                  # the one reader of where each audio lives
+        m, s = art.audio_url, art.speech_only_url
         ts = j.get("created_at")
         if not (m and s) or not isinstance(ts, datetime):
             continue

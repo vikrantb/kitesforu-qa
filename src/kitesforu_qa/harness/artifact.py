@@ -304,12 +304,27 @@ class Artifact:
 
         Measured over all 3,162 completed ``podcast_jobs`` on 2026-10-05: ``outputs.audio_url`` on
         3,159 (3,154 https, 5 gs://), a legacy top-level ``audio_url`` on the other 3 (all gs://),
-        and the audio stage's ``stages.job-audio.result.audio_url`` on 3,160 (the same value as
-        ``outputs.audio_url`` on 3,157). ``audio_path``, ``audio_gcs_uri`` and ``audio.mp3_url``,
-        which other readers looked for, are on none. The API's status snapshot carries no audio URL
-        at all: ``KitesForUClient.get_job_audio`` asks ``/v1/podcasts/{id}/audio-url``."""
+        and the audio stage's ``stages.job-audio.result.audio_url`` on 3,160, equal to
+        ``outputs.audio_url`` on all 3,157 jobs that carry both. ``audio_path``, ``audio_gcs_uri`` and
+        ``audio.mp3_url``, which other readers looked for, are on none. The API's status snapshot
+        carries no audio URL at all: ``KitesForUClient.get_job_audio`` asks
+        ``/v1/podcasts/{id}/audio-url``."""
         url = (_g(self.doc, "outputs", "audio_url") or _g(self.doc, "audio_url")
                or _g(self.doc, "stages", "job-audio", "result", "audio_url"))
+        return str(url) if url else None
+
+    @property
+    def speech_only_url(self) -> str | None:
+        """Where the episode's speech-only audio (the speech bed before music and SFX, PR #737)
+        lives, or None when the job names none. The ONE reader of that fact.
+
+        Measured over all 3,163 completed ``podcast_jobs`` on 2026-10-08: ``audio.speech_only_url``
+        on 1,305, all https, every one of them on a job that also has ``outputs.audio_url``.
+        ``stages.job-audio.result.speech_only_url``, ``outputs.speech_only_url``,
+        ``audio.speech_only_gcs_uri`` and a top-level ``speech_only_url`` are on none (the same
+        projection finds ``stages.job-audio.result.audio_url`` on 3,161 and ``outputs.audio_url`` on
+        3,160)."""
+        url = _g(self.doc, "audio", "speech_only_url")
         return str(url) if url else None
 
     # ── visuals (nested under doc['visual'] on real jobs) ──

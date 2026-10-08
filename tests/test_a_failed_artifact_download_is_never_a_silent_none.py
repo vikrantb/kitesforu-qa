@@ -133,10 +133,33 @@ def test_get_job_audio_asks_the_audio_url_route(monkeypatch, status, body, want)
     assert calls == ["https://api.example.invalid/v1/podcasts/job/audio-url"]
 
 
-def test_get_job_audio_raises_on_a_server_error(monkeypatch):
-    monkeypatch.setattr(requests, "get", lambda url, headers, timeout: _Resp(503, {}))
-    with pytest.raises(requests.HTTPError):
-        KitesForUClient(base_url="https://api.example.invalid", api_key="k").get_job_audio("job")
+@pytest.mark.parametrize("answer, transient", [
+    (_Resp(503, {}), True),
+    (_Resp(401, {}), False),
+    (requests.ConnectionError("connection refused"), True),
+])
+def test_get_job_audio_raises_the_error_load_documents(monkeypatch, tmp_path, answer, transient):
+    """Round-2 critic #4: ``Artifact.load`` documents ``DownloadError``, but a 401, a 5xx or a network
+    failure on ``/audio-url`` raised ``requests`` errors that a caller catching it would not see."""
+    def get(url, headers, timeout):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(requests, "get", get)
+    client = KitesForUClient(base_url="https://api.example.invalid", api_key="k")
+    with pytest.raises(DownloadError, match="v1/podcasts/job/audio-url") as err:
+        client.get_job_audio("job")
+    assert err.value.transient is transient
+
+    class Live:
+        def get_job(self, job_id):
+            return {"status": "completed"}               # the API snapshot: no audio URL
+
+        get_job_audio = client.get_job_audio
+
+    with pytest.raises(DownloadError):
+        Artifact.load("job", Live(), temp_dir=str(tmp_path))
 
 
 # ── the kqa pipeline's audio input ────────────────────────────────────────────────────────────

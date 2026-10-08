@@ -145,16 +145,23 @@ class KitesForUClient:
 
         Returns:
             The signed audio URL, or None when the API says the job has no signable master audio
-            (404). Any other failure raises ``requests.HTTPError``.
+            (404). Any other failure, an HTTP error or the request itself, raises
+            ``integrations.download.DownloadError``, the error ``Artifact.load`` documents; a 5xx or
+            a network failure is ``transient``.
         """
-        response = requests.get(
-            f"{self.base_url}/v1/podcasts/{job_id}/audio-url",
-            headers=self.headers,
-            timeout=30,
-        )
+        from .download import DownloadError
+
+        url = f"{self.base_url}/v1/podcasts/{job_id}/audio-url"
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+        except requests.RequestException as exc:
+            raise DownloadError(f"{url}: {type(exc).__name__}: {exc}", uri=url,
+                                transient=True) from exc
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise DownloadError(f"{url}: HTTP {response.status_code}", uri=url,
+                                transient=response.status_code >= 500)
         return (response.json() or {}).get("audio_url") or None
 
     def get_job_script(self, job_id: str) -> Optional[str]:

@@ -770,32 +770,33 @@ def run_ladder(
     # Rung 3 — schema fields landed
     verdict.rungs.append(rung_3_schema_fields(post, pr_kind))
 
-    # Rung 4 + 5 — need local audio for full fidelity
+    # Rung 4 + 5 — need local audio for full fidelity. The downloads live only as long as the two
+    # rungs that read them: a directory nobody deletes grows with every run.
     post_audio_path: Optional[str] = None
     baseline_audio_path: Optional[str] = None
-    if not skip_audio_download:
-        tmpdir = tempfile.mkdtemp(prefix="kqa_verify_")
-        post_audio_path, post_error = _try_download_audio(post, os.path.join(tmpdir, "post.mp3"))
-        baseline_audio_path, baseline_error = _try_download_audio(
-            baseline, os.path.join(tmpdir, "baseline.mp3"))
-    else:
-        post_error = baseline_error = None
+    with tempfile.TemporaryDirectory(prefix="kqa_verify_") as tmpdir:
+        if not skip_audio_download:
+            post_audio_path, post_error = _try_download_audio(post, os.path.join(tmpdir, "post.mp3"))
+            baseline_audio_path, baseline_error = _try_download_audio(
+                baseline, os.path.join(tmpdir, "baseline.mp3"))
+        else:
+            post_error = baseline_error = None
 
-    # Rung 4 — audio measurements
-    rung_4 = rung_4_audio_measurements(post, post_audio_path)
-    _note_download_errors(rung_4, post=post_error)
-    verdict.rungs.append(rung_4)
+        # Rung 4 — audio measurements
+        rung_4 = rung_4_audio_measurements(post, post_audio_path)
+        _note_download_errors(rung_4, post=post_error)
+        verdict.rungs.append(rung_4)
 
-    # Rung 5 — A/B
-    if not baseline:
-        verdict.rungs.append(RungResult(
-            rung=5, name="ab_improvement", verdict=Verdict.SKIP,
-            detail=f"baseline job {baseline_job_id!r} not found",
-        ))
-    else:
-        verdict.rungs.append(_note_download_errors(rung_5_ab_improvement(
-            baseline, post, pr_kind, baseline_audio_path, post_audio_path,
-        ), post=post_error, baseline=baseline_error))
+        # Rung 5 — A/B
+        if not baseline:
+            verdict.rungs.append(RungResult(
+                rung=5, name="ab_improvement", verdict=Verdict.SKIP,
+                detail=f"baseline job {baseline_job_id!r} not found",
+            ))
+        else:
+            verdict.rungs.append(_note_download_errors(rung_5_ab_improvement(
+                baseline, post, pr_kind, baseline_audio_path, post_audio_path,
+            ), post=post_error, baseline=baseline_error))
 
     return verdict
 
