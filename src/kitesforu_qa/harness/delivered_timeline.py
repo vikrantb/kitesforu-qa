@@ -384,7 +384,8 @@ class DeliveredTimeline:
         stamp written for a different render, and to end the last best-estimate window. ``sidecar``
         is the doc's sidecar, already read; by default it is read here (a few KB over HTTPS, and
         nothing at all when the doc names none). ``master`` is the master object actually fetched
-        (``painted_timeline_sidecar.fetched_master``); a stamp that names another one is stale.
+        (``FetchedMaster``, from what ``integrations.download`` reports); a stamp that names
+        another one is stale.
         """
         doc = doc or {}
         visual = doc.get("visual") or {}

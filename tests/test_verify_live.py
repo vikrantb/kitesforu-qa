@@ -2,8 +2,10 @@
 
 These mock Firestore + GCS — no real network calls. The contracts pinned:
 
-  - load_job_context() returns None gracefully when the doc / user_id
-    is missing (a cron rollout shouldn't crash on a half-built job).
+  - load_job_context() reads podcast_jobs, takes the audio URLs from the
+    Artifact accessors (the doc names them), and returns None gracefully
+    when the doc is missing (a cron rollout shouldn't crash on a
+    half-built job).
   - JobAudioContext.to_dict round-trips all fields the operator /
     Slack-post helper reads.
   - verify_job_live() composes load + download + verify and surfaces
@@ -22,38 +24,16 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from kitesforu_qa.integrations.download import Downloaded, DownloadError
 from kitesforu_qa.verify_live import (
     JobAudioContext,
     LiveVerifyResult,
-    _resolve_job_gcs_prefix,
     load_job_context,
     verify_job_live,
 )
 
-
-# ---------------------------------------------------------------------------
-# GCS path resolution
-# ---------------------------------------------------------------------------
-
-
-class TestPathResolution:
-    def test_default_bucket_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KFU_PUBLIC_BUCKET", "test-bucket")
-        prefix = _resolve_job_gcs_prefix(user_id="u123", job_id="j456")
-        assert prefix == "gs://test-bucket/v1/podcasts/u123/j456/"
-
-    def test_custom_bucket_arg_overrides_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("KFU_PUBLIC_BUCKET", "env-bucket")
-        prefix = _resolve_job_gcs_prefix(
-            user_id="u", job_id="j", bucket="arg-bucket",
-        )
-        assert prefix == "gs://arg-bucket/v1/podcasts/u/j/"
-
-    def test_public_prefix_trims_trailing_slash(self) -> None:
-        prefix = _resolve_job_gcs_prefix(
-            user_id="u", job_id="j", bucket="b", public_prefix="prod/",
-        )
-        assert "prod/podcasts" in prefix
+AUDIO = "https://storage.googleapis.com/kitesforu-podcasts/public/podcasts/u/j/audio.mp3"
+SPEECH = "https://storage.googleapis.com/kitesforu-podcasts/public/podcasts/u/j/speech_only.mp3"
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +62,23 @@ class TestLoadJobContext:
             )
             assert load_job_context("nope") is None
 
-    def test_returns_none_when_user_id_missing(self) -> None:
+    def test_reads_the_podcast_jobs_collection(self) -> None:
+        """It read ``jobs``, which holds 17 stub docs and no job (2026-10-08: ``a6fca205`` exists in
+        ``podcast_jobs`` and not in ``jobs``), so every current job came back "could not load"."""
+        with patch("google.cloud.firestore.Client") as mock_cls:
+            client = self._make_mock_client(doc_data={"user_id": "u1"})
+            mock_cls.return_value = client
+            assert load_job_context("j1") is not None
+            client.collection.assert_called_once_with("podcast_jobs")
+
+    def test_a_doc_without_user_id_still_loads(self) -> None:
+        """The URLs come from the doc now, so a missing ``user_id`` no longer blocks a path."""
         with patch("google.cloud.firestore.Client") as mock_cls:
             mock_cls.return_value = self._make_mock_client(
-                doc_data={"genre": "horror"},
+                doc_data={"genre": "horror", "outputs": {"audio_url": AUDIO}},
             )
-            assert load_job_context("j1") is None
+            ctx = load_job_context("j1")
+            assert ctx is not None and ctx.audio_url == AUDIO and ctx.user_id == ""
 
     def test_prefers_blueprint_genre_module(self) -> None:
         with patch("google.cloud.firestore.Client") as mock_cls:
@@ -154,19 +145,20 @@ class TestLoadJobContext:
             assert ctx is not None
             assert ctx.expected_duration_s == 180.0
 
-    def test_audio_uri_built_from_user_and_job(self) -> None:
+    def test_the_audio_urls_are_the_ones_the_doc_names(self) -> None:
+        """Round-2 design BLOCK: the URIs were built as ``gs://kitesforu-public/v1/podcasts/<u>/<j>/``,
+        which matched 0 of 40 sampled current jobs. They are ``Artifact.audio_url`` and
+        ``Artifact.speech_only_url`` now."""
         with patch("google.cloud.firestore.Client") as mock_cls:
             mock_cls.return_value = self._make_mock_client(doc_data={
-                "user_id": "u-abc",
+                "user_id": "u", "outputs": {"audio_url": AUDIO},
+                "audio": {"speech_only_url": SPEECH},
             })
-            ctx = load_job_context("job-xyz")
-            assert ctx is not None
-            assert "podcasts/u-abc/job-xyz/audio.mp3" in (
-                ctx.audio_gcs_uri or ""
-            )
-            assert "podcasts/u-abc/job-xyz/speech_only.mp3" in (
-                ctx.speech_only_gcs_uri or ""
-            )
+            ctx = load_job_context("j")
+            assert ctx is not None and (ctx.audio_url, ctx.speech_only_url) == (AUDIO, SPEECH)
+            mock_cls.return_value = self._make_mock_client(doc_data={"user_id": "u"})
+            ctx = load_job_context("j")
+            assert ctx is not None and (ctx.audio_url, ctx.speech_only_url) == (None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +171,8 @@ class TestDataclassShape:
         ctx = JobAudioContext(
             job_id="j", user_id="u", genre="horror",
             expected_duration_s=300.0,
-            audio_gcs_uri="gs://b/audio.mp3",
-            speech_only_gcs_uri="gs://b/speech.mp3",
+            audio_url=AUDIO,
+            speech_only_url=SPEECH,
             notes=["note"],
         )
         d = ctx.to_dict()
@@ -188,7 +180,7 @@ class TestDataclassShape:
         assert d["user_id"] == "u"
         assert d["genre"] == "horror"
         assert d["expected_duration_s"] == 300.0
-        assert d["audio_gcs_uri"] == "gs://b/audio.mp3"
+        assert (d["audio_url"], d["speech_only_url"]) == (AUDIO, SPEECH)
         assert d["notes"] == ["note"]
 
     def test_live_result_to_dict_handles_no_report(self) -> None:
@@ -221,32 +213,36 @@ class TestVerifyJobLiveOrchestration:
         ctx = JobAudioContext(
             job_id="j", user_id="u", genre="horror",
             expected_duration_s=300.0,
-            audio_gcs_uri="gs://b/audio.mp3",
-            speech_only_gcs_uri="gs://b/speech.mp3",
+            audio_url=AUDIO,
+            speech_only_url=SPEECH,
         )
+        def failing(uri: str, dest_path: str, **_kw):
+            raise DownloadError(f"{uri}: Forbidden: 403 storage.objects.get denied", uri=uri)
+
         with patch(
             "kitesforu_qa.verify_live.load_job_context", return_value=ctx,
         ), patch(
-            "kitesforu_qa.verify_live._gcs_download", return_value=False,
+            "kitesforu_qa.verify_live.download", side_effect=failing,
         ):
             result = verify_job_live("j")
             assert result.report is None
             assert result.error is not None
             assert "could not download" in result.error
+            assert "403" in result.error          # the cause, not a list of guesses
 
-    def test_speech_only_optional_legacy_job(self, tmp_path) -> None:
-        """A pre-PR-737 job without speech_only.mp3 should still grade
-        (loudness + duration axes; STOI/SMR/music_presence skipped)."""
+    def test_speech_only_named_but_not_in_storage_still_grades(self, tmp_path) -> None:
+        """A job that names speech-only audio that storage says does not exist still grades
+        (loudness + duration axes; STOI/SMR/music_presence skipped), and the note says which."""
         ctx = JobAudioContext(
             job_id="legacy", user_id="u", genre="horror",
             expected_duration_s=10.0,
-            audio_gcs_uri="gs://b/audio.mp3",
-            speech_only_gcs_uri="gs://b/speech.mp3",
+            audio_url=AUDIO,
+            speech_only_url=SPEECH,
         )
 
-        def fake_download(uri: str, dest_path: str) -> bool:
-            # First call (audio) succeeds; second (speech) misses.
-            if "audio" in uri:
+        def fake_download(uri: str, dest_path: str, **_kw):
+            # First call (audio) succeeds; second (speech) is reported missing.
+            if uri == AUDIO:
                 # Drop a 1-byte placeholder so verify_audio_quality
                 # advances past the existence check. The actual
                 # ListenTestReport will return FAIL on "decode failed"
@@ -255,13 +251,13 @@ class TestVerifyJobLiveOrchestration:
                 # report's exact verdict.
                 Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
                 Path(dest_path).write_bytes(b"x")
-                return True
-            return False
+                return Downloaded(uri, dest_path, 1, None, "audio/mpeg")
+            raise DownloadError(f"{uri}: no such object", uri=uri, not_found=True)
 
         with patch(
             "kitesforu_qa.verify_live.load_job_context", return_value=ctx,
         ), patch(
-            "kitesforu_qa.verify_live._gcs_download",
+            "kitesforu_qa.verify_live.download",
             side_effect=fake_download,
         ):
             result = verify_job_live("legacy")
@@ -272,9 +268,57 @@ class TestVerifyJobLiveOrchestration:
             assert result.report.verdict in {"PASS", "WARN", "FAIL"}
             # Speech-only-missing note bubbled up to context.notes
             assert any(
-                "speech_only.mp3 not in GCS" in n
+                "storage says it does not exist" in n
                 for n in result.context.notes
             )
+
+    def test_a_job_that_names_no_speech_only_audio_grades_and_says_so(self, tmp_path) -> None:
+        """1,858 of the 3,163 completed jobs name no speech-only audio (2026-10-08). That is what the
+        note says, not "legacy"."""
+        ctx = JobAudioContext(job_id="j", user_id="u", genre="horror", expected_duration_s=10.0,
+                              audio_url=AUDIO, speech_only_url=None)
+        seen = []
+
+        def fake_download(uri: str, dest_path: str, **_kw):
+            seen.append(uri)
+            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest_path).write_bytes(b"x")
+            return Downloaded(uri, dest_path, 1, None, "audio/mpeg")
+
+        with patch("kitesforu_qa.verify_live.load_job_context", return_value=ctx), patch(
+                "kitesforu_qa.verify_live.download", side_effect=fake_download):
+            result = verify_job_live("j")
+        assert result.error is None and seen == [AUDIO]
+        assert any("names no speech-only audio" in n for n in result.context.notes)
+
+    def test_an_unreadable_speech_only_file_is_not_a_legacy_job(self, tmp_path) -> None:
+        """A 403, an expired credential or a dropped connection on speech_only.mp3 used to be read as
+        a legacy job, and four axes were dropped under that label. Only a source that says the
+        object does not exist (not_found) is an absence."""
+        ctx = JobAudioContext(
+            job_id="j", user_id="u", genre="horror",
+            expected_duration_s=10.0,
+            audio_url=AUDIO,
+            speech_only_url=SPEECH,
+        )
+
+        def fake_download(uri: str, dest_path: str, **_kw):
+            if uri == AUDIO:
+                Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(dest_path).write_bytes(b"x")
+                return Downloaded(uri, dest_path, 1, None, "audio/mpeg")
+            raise DownloadError(f"{uri}: Forbidden: 403", uri=uri)
+
+        with patch(
+            "kitesforu_qa.verify_live.load_job_context", return_value=ctx,
+        ), patch(
+            "kitesforu_qa.verify_live.download", side_effect=fake_download,
+        ):
+            result = verify_job_live("j")
+            assert result.report is None
+            assert "speech_only.mp3" in result.error and "403" in result.error
+            assert "not reported missing" in result.error
+            assert not any("does not exist" in n for n in result.context.notes)
 
 
 # ---------------------------------------------------------------------------

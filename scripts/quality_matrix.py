@@ -39,7 +39,6 @@ import argparse
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -74,6 +73,7 @@ from kitesforu_qa.harness.quality_matrix import (  # noqa: E402
     score_episode_or_course,
     upsert_markdown_section,
 )
+from kitesforu_qa.integrations.download import FetchBudget, download  # noqa: E402
 from kitesforu_qa.scorecard import ScorecardConfig, score_short  # noqa: E402
 from kitesforu_qa.scorecard import signals as _signals  # noqa: E402
 
@@ -150,6 +150,13 @@ def load_docs_dir(path: str) -> list[dict[str, Any]]:
 # ── per-cell scoring (SHORT — unchanged) ────────────────────────────────────────
 
 
+#: A run's wall-clock budget for downloading (``FetchBudget``), and the failures in a row after which
+#: it stops downloading. Each object has its own 900 s deadline; without a run-level bound a degraded
+#: link makes every job run to its own (400 jobs x ~970 s is days).
+RUN_FETCH_BUDGET_S = 2 * 3600
+RUN_FETCH_MAX_CONSECUTIVE = 3
+
+
 def score_all(
     job_specs: list[Any],
     *,
@@ -158,6 +165,7 @@ def score_all(
     download_video: bool,
     fetch_job_doc: Any,
     resolve_video: Any,
+    budget: FetchBudget | None = None,
 ) -> list[dict[str, Any]]:
     """Score every job spec into a "cell": the ``score_short()`` dict + ``genre``/``format``/
     ``quality_tier`` routing keys + ``_scored``. A job spec is either a bare job_id (str, needs a
@@ -165,17 +173,21 @@ def score_all(
 
     Bounded (a single pass over a finite list) + fail-open: ANY failure (fetch, video resolve, Artifact
     build, or score_short itself raising) degrades that ONE cell to ``_scored=False`` + ``_error`` —
-    it never aborts the run for the other cells."""
-    work_dir = tempfile.mkdtemp(prefix="kqa_quality_matrix_")
+    it never aborts the run for the other cells. Downloads go through ``budget`` (a run-level wall
+    budget and breaker; a failure it refuses is such a cell, with its cause), into a directory that
+    lives only while its job is scored."""
+    budget = budget or FetchBudget(RUN_FETCH_BUDGET_S, max_consecutive=RUN_FETCH_MAX_CONSECUTIVE)
     cells: list[dict[str, Any]] = []
     for spec in job_specs:
         is_bare_id = isinstance(spec, str)
         job_id = spec if is_bare_id else str(spec.get("job_id") or spec.get("id") or "unknown")
         try:
             doc = fetch_job_doc(project, spec) if is_bare_id else spec
-            video_path = resolve_video(None, doc, work_dir) if download_video else None
-            art = Artifact.from_doc(doc, video_path=video_path)
-            result = score_short(art, cfg)
+            with tempfile.TemporaryDirectory(prefix="kqa_quality_matrix_") as work_dir:
+                video_path = (resolve_video(None, doc, work_dir, fetch=budget.download)
+                              if download_video else None)
+                art = Artifact.from_doc(doc, video_path=video_path)
+                result = score_short(art, cfg)
             result["genre"] = art.genre
             result["format"] = "short" if _signals.is_short(art) else "episode"
             result["quality_tier"] = _signals.job_quality_tier(art)
@@ -198,31 +210,30 @@ def score_all(
 # ── per-cell scoring (EPISODES + COURSES) ───────────────────────────────────────
 
 
-def resolve_audio(doc: dict[str, Any], work_dir: str) -> str | None:
-    """Local audio path for an EPISODE/COURSE job — downloads ``outputs.audio_url`` via ``gsutil``
-    when it's a ``gs://`` URI (the SAME technique ``resolve_video`` uses; duplicated here rather than
-    imported since ``short_scorecard.py`` has no audio resolver of its own — its ``--audio`` flag only
-    accepts an already-local path). Returns ``None`` (never raises) when unresolvable — the
-    audio-mix/music-sfx dimensions then degrade to an honest skip rather than crash the whole run.
+def resolve_audio(doc: dict[str, Any], work_dir: str, *, fetch: Any = None) -> str | None:
+    """Local audio path for an EPISODE/COURSE job: the doc's audio URL (``Artifact.audio_url``, the
+    one reader of where it lives), fetched by ``fetch`` (the shared downloader, or a run's
+    ``FetchBudget.download``), https and gs:// alike.
+
+    ``None`` only when the doc names no audio at all (0 of the 3,162 completed jobs on 2026-10-05).
+    A download that fails RAISES ``DownloadError``; ``score_all_episodes_courses`` then records the
+    job as unscored, with the cause. Before, this function fetched only ``gs://`` and returned
+    ``None`` for anything else, so the 3,154 completed jobs with an https ``outputs.audio_url`` had
+    their audio-mix battery skip ("no audio file on artifact"), which would let it pass on nothing.
+    That is inferred from this code path; ``quality_matrix`` was not re-run over that population.
 
     Most EPISODE jobs are audio-only (no rendered video) — without this, the audio-mix dimension
     (the largest deterministic battery besides content: clipping/loudness/silence/truncation/channel
     balance) would silently skip on every pure-audio podcast, which is exactly the "right measurement
     for episodes" this extension exists to restore."""
-    outputs = doc.get("outputs")
-    uri = outputs.get("audio_url") if isinstance(outputs, dict) else None
-    if not uri:
+    url = Artifact.from_doc(doc).audio_url
+    if not url:
         return None
-    uri = str(uri)
-    if not uri.startswith("gs://"):
-        return uri if os.path.exists(uri) else None
-    dest = os.path.join(work_dir, os.path.basename(uri) or "episode_audio.mp3")
-    try:
-        subprocess.run(["gsutil", "-q", "cp", uri, dest], check=True, timeout=180)
-        return dest
-    except Exception as exc:  # noqa: BLE001 — degrade, don't crash the whole run
-        print(f"warning: gsutil cp failed for audio {uri}: {exc}", file=sys.stderr)
-        return None
+    if os.path.exists(url):
+        return url  # --docs-dir: a doc that already points at a local file
+    job_id = str(doc.get("job_id") or doc.get("id") or "job")
+    name = os.path.basename(url.split("?", 1)[0]) or "episode_audio.mp3"
+    return (fetch or download)(url, os.path.join(work_dir, f"{job_id}_{name}")).path
 
 
 def score_all_episodes_courses(
@@ -234,27 +245,33 @@ def score_all_episodes_courses(
     fetch_job_doc: Any,
     resolve_video: Any,
     resolve_audio: Any,
+    budget: FetchBudget | None = None,
 ) -> list[dict[str, Any]]:
     """Score every job spec into an EPISODE/COURSE "cell" via ``score_episode_or_course`` (the
     harness's general $0 battery) — the sibling of ``score_all`` for the non-short content classes.
 
     SHORT-classified jobs in the input set are EXCLUDED from the result entirely (not scored, not
     counted as unscored) — this mode only ever produces episode/course cells; the short engine above
-    owns shorts. Bounded + fail-open exactly like ``score_all``: one bad job degrades to
-    ``_scored=False`` and never aborts the run for the rest."""
-    work_dir = tempfile.mkdtemp(prefix="kqa_quality_matrix_ec_")
+    owns shorts. The class is read from the doc BEFORE anything is downloaded: a short's video and
+    audio were fetched and thrown away (round-2 cost lens: 118 of 146 recent completed jobs are
+    shorts). Bounded + fail-open exactly like ``score_all``, with the same ``budget``: one bad job
+    degrades to ``_scored=False`` and never aborts the run for the rest."""
+    budget = budget or FetchBudget(RUN_FETCH_BUDGET_S, max_consecutive=RUN_FETCH_MAX_CONSECUTIVE)
     cells: list[dict[str, Any]] = []
     for spec in job_specs:
         is_bare_id = isinstance(spec, str)
         job_id = spec if is_bare_id else str(spec.get("job_id") or spec.get("id") or "unknown")
         try:
             doc = fetch_job_doc(project, spec) if is_bare_id else spec
-            video_path = resolve_video(None, doc, work_dir) if download_video else None
-            audio_path = resolve_audio(doc, work_dir) if download_audio else None
-            art = Artifact.from_doc(doc, audio_path=audio_path, video_path=video_path)
-            if detect_content_class(art) == CONTENT_CLASS_SHORT:
+            if detect_content_class(Artifact.from_doc(doc)) == CONTENT_CLASS_SHORT:
                 continue  # out of scope for this mode — the short engine above owns shorts
-            cells.append(score_episode_or_course(art))
+            with tempfile.TemporaryDirectory(prefix="kqa_quality_matrix_ec_") as work_dir:
+                video_path = (resolve_video(None, doc, work_dir, fetch=budget.download)
+                              if download_video else None)
+                audio_path = (resolve_audio(doc, work_dir, fetch=budget.download)
+                              if download_audio else None)
+                art = Artifact.from_doc(doc, audio_path=audio_path, video_path=video_path)
+                cells.append(score_episode_or_course(art))
         except (Exception, SystemExit) as exc:  # noqa: BLE001 — one bad job must never crash the run
             cells.append(
                 {
@@ -290,7 +307,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--project", default=os.environ.get("GCP_PROJECT", "kitesforu-dev"))
     p.add_argument("--limit", type=int, default=60, help="max jobs to score in query mode (bounded; default 60)")
-    p.add_argument("--no-video", action="store_true", help="skip gs:// video download (faster; video-dependent axes/checks degrade honestly)")
+    p.add_argument("--no-video", action="store_true", help="skip the video download (faster; video-dependent axes/checks degrade honestly)")
+    p.add_argument("--fetch-budget-min", type=float, default=RUN_FETCH_BUDGET_S / 60,
+                   help=f"wall-clock minutes the run may spend downloading (default {RUN_FETCH_BUDGET_S // 60}); "
+                        f"downloading also stops after {RUN_FETCH_MAX_CONSECUTIVE} failures in a row. "
+                        "Jobs not fetched are reported unscored, with the cause")
     p.add_argument(
         "--no-audio", action="store_true",
         help="episodes mode only: skip outputs.audio_url download (audio-mix/music-sfx checks degrade honestly)",
@@ -324,6 +345,10 @@ def _resolve_job_specs(args: argparse.Namespace) -> tuple[list[Any], str]:
     return load_docs_dir(args.docs_dir), "docs-dir"
 
 
+def _budget(args: argparse.Namespace) -> FetchBudget:
+    return FetchBudget(args.fetch_budget_min * 60, max_consecutive=RUN_FETCH_MAX_CONSECUTIVE)
+
+
 def _run_short(args: argparse.Namespace) -> int:
     """The ORIGINAL (unchanged) 9:16 SHORT SCORECARD path."""
     job_specs, mode = _resolve_job_specs(args)
@@ -343,6 +368,7 @@ def _run_short(args: argparse.Namespace) -> int:
         download_video=not args.no_video,
         fetch_job_doc=sc_lib.fetch_job_doc,
         resolve_video=sc_lib.resolve_video,
+        budget=_budget(args),
     )
 
     agg_by_axis = aggregate_all_axes(cells)
@@ -417,6 +443,7 @@ def _run_episodes_courses(args: argparse.Namespace) -> int:
         fetch_job_doc=sc_lib.fetch_job_doc,
         resolve_video=sc_lib.resolve_video,
         resolve_audio=resolve_audio,
+        budget=_budget(args),
     )
 
     n_scored = sum(1 for c in cells if c.get("_scored"))

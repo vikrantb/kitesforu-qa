@@ -25,7 +25,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +32,10 @@ from typing import Any
 import requests
 from google.cloud import firestore
 from playwright.sync_api import sync_playwright
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -339,23 +342,25 @@ def watch_job(db: firestore.Client, job_id: str) -> dict[str, Any]:
 
 
 def ffprobe_duration(mp3_url: str) -> tuple[float | None, int | None]:
-    """Returns (duration_sec, file_size_bytes), or (None,None) on failure."""
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
-        urllib.request.urlretrieve(mp3_url, tmp_path)
-        size = os.path.getsize(tmp_path)
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", tmp_path],
-            capture_output=True, text=True, timeout=60,
-        )
-        os.unlink(tmp_path)
-        if out.returncode != 0:
-            return None, size
-        return float(out.stdout.strip()), size
-    except Exception as e:  # noqa: BLE001
-        print(f"  ffprobe failed: {e}", flush=True)
-        return None, None
+    """Returns (duration_sec, file_size_bytes) of the mp3, fetched by the shared downloader.
+
+    A fetch that fails RAISES ``DownloadError``: ``run_one`` logs it as an unfetchable mp3, not as a
+    completed episode whose mp3 is "off". ``(None, size)`` when ffprobe cannot read a file that did
+    download, and when ffprobe itself times out or is missing: a probe failure on a completed job must
+    never escape as an intake failure (``TRIGGER_ERR``, with a Slack hypothesis about token mint)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        got = download(mp3_url, os.path.join(tmp, "probe.mp3"))
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", got.path],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None, got.size
+        try:
+            return (float(out.stdout.strip()) if out.returncode == 0 else None), got.size
+        except ValueError:
+            return None, got.size
 
 
 def append_log(line: str) -> None:
@@ -383,12 +388,10 @@ def diagnose_terminal(doc: dict[str, Any], job_id: str) -> dict[str, Any]:
     """Extract verdict + diagnostic fields from the final firestore doc."""
     status = doc.get("status")
     is_timeout = bool(doc.get("_timeout"))
-    audio = doc.get("audio") or {}
-    mp3_url = audio.get("mp3_url")
+    # The one reader of where the audio lives. This read `audio.mp3_url` first, which none of the
+    # 3,162 completed jobs carries (census, 2026-10-05), then the audio stage's own result.
+    mp3_url = Artifact.from_doc(doc).audio_url
     stage_audio = (doc.get("stages") or {}).get("job-audio") or {}
-    result = stage_audio.get("result") or {}
-    if not mp3_url:
-        mp3_url = result.get("audio_url")
     phase_timing = stage_audio.get("phase_timing") or {}
     heartbeat_phase = stage_audio.get("heartbeat_phase")
     failure_reason = doc.get("failure_reason") or stage_audio.get("failure_reason")
@@ -434,13 +437,19 @@ def run_one(db: firestore.Client, iteration: int) -> dict[str, Any]:
 
         if diag["status"] == "completed" and not diag["is_timeout"]:
             duration_sec, mp3_size = (None, None)
+            fetch_error = None
             if diag["mp3_url"]:
-                duration_sec, mp3_size = ffprobe_duration(diag["mp3_url"])
+                try:
+                    duration_sec, mp3_size = ffprobe_duration(diag["mp3_url"])
+                except DownloadError as exc:
+                    fetch_error = str(exc)
             # Prefer wall-clock from script-start (most honest).
             wall_sec = time.time() - started_at
             note = "clean"
             ok = bool(mp3_size and mp3_size > 100_000 and duration_sec and 40 <= duration_sec <= 90)
-            if not ok:
+            if fetch_error:
+                note = f"mp3_unfetchable ({fetch_error[:160]})"
+            elif not ok:
                 note = f"completed_but_mp3_off (size={mp3_size}, dur={duration_sec})"
             append_log(
                 f"| {utcnow_iso()} | {iteration} | {'PASS' if ok else 'WARN'} | {job_id} | "

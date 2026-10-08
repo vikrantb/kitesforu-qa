@@ -30,6 +30,46 @@ What changes is operator-side GCS egress and local work:
    4d41320d (measured with `_extract_frames(mp4, dir, 1000)` against `3000`, one run each).
 
 **Pricing-page implication: none.** QA tooling; user prices unchanged.
+## 2026-10-08 — graders download the audio and video they grade ($0 per unit; operator egress, and one opt-in paid axis now reachable)
+
+**Files:** `src/kitesforu_qa/integrations/download.py` and every site that adopts it (qa #185):
+`quality_matrix`, `short_scorecard`, `acceptance_gate`, `frame_proof`, `frames_vs_captions`,
+`full_artifact_checker.sh`, `music_bed_presence`, `measure_delivered_clips`, `perclip_lit_census`,
+`canary_loop`, `verify_pr_against_live`, `verify_live`, `scorecard/vlm.py`, `harness/artifact.py`,
+`utils/audio.py`, and the painted-timeline sidecar GET (`fetch_bytes`).
+
+**$0 per-unit delta.** No job's cost changes: no LLM, TTS or infra call is added to any job.
+What changes is operator egress, and one opt-in paid axis:
+
+1. **Egress, now that the graders actually download.** `quality_matrix.resolve_audio` never
+   downloaded an https `outputs.audio_url` (3,154 of 3,162 completed jobs), `short_scorecard`
+   returned no video for an https `video_url`, and the `urllib` fetches downloaded nothing on a
+   python.org framework python without its CA bundle. Each now downloads the whole object once per
+   graded job, plus up to two retries of a transfer that fails transiently. Sizes, as measured:
+   * **audio:** ~1.08 MB per minute of speech (HEAD `Content-Length` over the speech timeline of the
+     12 newest completed jobs, 2026-10-07): **~$0.00012 a minute** at the GCS internet egress list
+     price of ~$0.12/GiB;
+   * **video:** **~9.6 MB per minute** of video, median of the 12 newest completed jobs that surface
+     a `visual.video_url` (13 scanned; range 6.8-13.5; HEAD `Content-Length` over
+     `visual.video_runtime_ms`, 2026-10-08; all 17-111 s long, so longer episodes are not sampled):
+     **~$0.0011 a minute, about 9x the audio.** Video is fetched by `short_scorecard`, both
+     `quality_matrix` modes (unless `--no-video`), `acceptance_gate`, `frame_proof`,
+     `frames_vs_captions`, `full_artifact_checker.sh`, `measure_delivered_clips` (per clip) and the
+     VLM per-beat fallback.
+   * **What it is not:** `--content-class episodes` reads each job's class from its doc BEFORE
+     downloading. It used to download every short's video and audio and then discard them (118 of
+     146 recent completed jobs are shorts; ~6 GB, ~$0.70 per 400-job sweep, estimated by the round-2
+     cost lens).
+   * **A run is bounded:** each object has a 900 s deadline, and a `quality_matrix` run has a 2 h
+     download budget and stops downloading after 3 failures in a row (`FetchBudget`).
+2. **`--vlm` beats are now judged.** With `--vlm` (opt-in, T2), a beat that used to end "no frame
+   source available" (its video was not downloaded, or `urlretrieve` failed TLS) now reaches the
+   photo-vs-illustration VLM: **~$0.001 a beat**, the axis's documented price. Without `--vlm` (the
+   default) no paid call is reachable from these downloads.
+3. **The sidecar GET** (`harness/painted_timeline_sidecar`) now retries a transient failure, up to
+   3 GETs of at most 1 MiB + 1 byte each (the 2026-10-08 sidecar entry above prices one).
+
+**Pricing-page implication: none.** QA tooling; user prices unchanged.
 
 ## 2026-09-06 — the T4 estimate print learns the story-topic price; #173's owed record lands ($0 per-unit; operator-facing EST only)
 

@@ -21,10 +21,14 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 from collections import defaultdict
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 LIT_STEP = 16
 W, H = 128, 72
@@ -67,10 +71,9 @@ def main() -> None:
     job_id = sys.argv[1]
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else 200
 
-    from google.cloud import firestore, storage
+    from google.cloud import firestore
 
     db = firestore.Client()
-    gcs = storage.Client()
     snap = db.collection("podcast_jobs").document(job_id).get()
     if not snap.exists and len(job_id) >= 8 and "-" not in job_id:
         # Resolve a short prefix (canary ids are quoted 8-hex everywhere). A missing doc
@@ -88,27 +91,30 @@ def main() -> None:
     doc = snap.to_dict() or {}
     clips = (doc.get("visual") or {}).get("clips") or []
     rows, by_engine = [], defaultdict(list)
-    measured = skipped = 0
+    measured = 0
+    # Each skip has its own count: a fetch failure folded into "skipped" read like an asset that was
+    # legitimately absent, and ``measured=0`` could not say which had happened.
+    not_gs = fetch_failed = no_frame = 0
     for c in clips[:limit]:
         if not isinstance(c, dict):
             continue
         uri = c.get("asset_uri")
         if not isinstance(uri, str) or not uri.startswith("gs://"):
-            skipped += 1
+            not_gs += 1
             continue
         is_video = uri.lower().endswith((".mp4", ".webm", ".mov"))
-        bucket_name, _, blob = uri[5:].partition("/")
         suffix = ".mp4" if is_video else ".png"
-        with tempfile.NamedTemporaryFile(suffix=suffix) as tf:
+        with tempfile.TemporaryDirectory(prefix="kqa_lit_") as tmp:
+            local = os.path.join(tmp, f"asset{suffix}")
             try:
-                gcs.bucket(bucket_name).blob(blob).download_to_filename(tf.name)
-            except Exception as exc:  # noqa: BLE001 — one bad asset must not kill the census
-                print(f"  fetch-fail {uri[-30:]}: {str(exc)[:50]}")
-                skipped += 1
+                download(uri, local)
+            except DownloadError as exc:  # one bad asset must not kill the census; it is counted
+                print(f"  fetch-fail {uri[-30:]}: {str(exc)[:80]}")
+                fetch_failed += 1
                 continue
-            frame = _gray_frame(tf.name, is_video)
+            frame = _gray_frame(local, is_video)
         if not frame:
-            skipped += 1
+            no_frame += 1
             continue
         lit = _lit_fraction(frame)
         dbg = c.get("diagram_debug") or {}
@@ -118,7 +124,12 @@ def main() -> None:
         measured += 1
 
     rows.sort()
-    print(f"job {job_id}: measured={measured} skipped={skipped} (definition: p10+{LIT_STEP}, {W}x{H})")
+    skipped = not_gs + fetch_failed + no_frame
+    print(f"job {job_id}: measured={measured} skipped={skipped} (not gs:// {not_gs}, fetch failed "
+          f"{fetch_failed}, no frame {no_frame}) (definition: p10+{LIT_STEP}, {W}x{H})")
+    if fetch_failed and not measured:
+        raise SystemExit(f"FETCH FAILED on all {fetch_failed} fetched assets of {job_id}: this is not "
+                         f"a measurement")
     for lit, engine, tail in rows[:5]:
         print(f"  darkest {lit:5.1%}  {engine:<28} {tail}")
     if rows:

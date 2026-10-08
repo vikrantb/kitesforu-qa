@@ -37,6 +37,9 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
+
 #: Per-frame mean-abs delta at or below this counts the frame as unchanged. Sits above a dead
 #: clip's 0.00008 and an order of magnitude below animating content.
 STATIC_FRAME_EPS = 0.0002
@@ -137,10 +140,9 @@ def main() -> int:
             os.path.join(os.path.dirname(__file__), "..", "..", "kitesforu-workers", "src")
         ),
     )
-    from google.cloud import firestore, storage
+    from google.cloud import firestore
 
     db = firestore.Client(project=args.project)
-    sc = storage.Client(project=args.project)
     doc = db.collection("podcast_jobs").document(args.job_id).get().to_dict() or {}
     visual = doc.get("visual") or {}
     clips = [c for c in (visual.get("clips") or []) if isinstance(c, dict)]
@@ -153,29 +155,41 @@ def main() -> int:
               f"{'p90d':>10}{'dead':>6}{'span':>14}{'ink':>8}")
     print(header)
     rows: List[Tuple[str, Dict[str, Any]]] = []
-    for clip in clips[: args.limit]:
-        uri = str(clip.get("asset_uri") or "")
-        if not uri.endswith(".mp4"):
-            continue
-        kind = "motion" if uri.endswith(("_motion.mp4", "_stage.mp4")) else "still"
-        bucket, _, blob = uri.replace("gs://", "").partition("/")
-        local = os.path.join(tempfile.gettempdir(), os.path.basename(blob))
-        try:
-            sc.bucket(bucket).blob(blob).download_to_filename(local)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  {os.path.basename(blob)[:28]:<30}download failed: {str(exc)[:40]}")
-            continue
-        row = measure_clip(local)
-        rows.append((kind, row))
-        span = (f"{row['span_w']:.2f}x{row['span_h']:.2f}"
-                if row["span_w"] is not None else "—")
-        dead = row["dead_frames"] if row["dead_frames"] is not None else "—"
-        print(f"{os.path.basename(blob)[:28]:<30}{kind:<9}{row['frames']:>7}"
-              f"{_fmt(row['static_frac'], '.2f'):>8}{_fmt(row['p90_delta'], '.5f'):>10}"
-              f"{dead:>6}{span:>14}{_fmt(row['ink'], '.3f'):>8}")
-        os.remove(local)
+    mp4s = 0
+    failed: list[str] = []           # counted and printed: a clip that never downloads is not an absence
+    with tempfile.TemporaryDirectory(prefix="kqa_delivered_clips_") as tmp:
+        for i, clip in enumerate(clips[: args.limit]):
+            uri = str(clip.get("asset_uri") or "")
+            if not uri.endswith(".mp4"):
+                continue
+            mp4s += 1
+            kind = "motion" if uri.endswith(("_motion.mp4", "_stage.mp4")) else "still"
+            name = os.path.basename(uri.split("?", 1)[0])
+            local = os.path.join(tmp, f"{i:03d}_{name}")
+            try:
+                download(uri, local)
+            except DownloadError as exc:
+                failed.append(str(exc))
+                print(f"  {name[:28]:<30}download failed: {str(exc)[:80]}")
+                continue
+            row = measure_clip(local)
+            rows.append((kind, row))
+            span = (f"{row['span_w']:.2f}x{row['span_h']:.2f}"
+                    if row["span_w"] is not None else "—")
+            dead = row["dead_frames"] if row["dead_frames"] is not None else "—"
+            print(f"{name[:28]:<30}{kind:<9}{row['frames']:>7}"
+                  f"{_fmt(row['static_frac'], '.2f'):>8}{_fmt(row['p90_delta'], '.5f'):>10}"
+                  f"{dead:>6}{span:>14}{_fmt(row['ink'], '.3f'):>8}")
+            os.remove(local)
 
+    if failed:
+        print(f"\nNOT MEASURED: {len(failed)} of {mp4s} .mp4 clips failed to download "
+              f"(first: {failed[0][:160]})")
     if not rows:
+        if failed:
+            print("no clip was measured: every .mp4 clip failed to download — this is a fetch "
+                  "failure, not an absence of clips")
+            return 2
         print("no .mp4 clips found")
         return 1
 

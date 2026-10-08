@@ -65,12 +65,24 @@ PY
 
 URL=$(cat $W/url 2>/dev/null)
 [ -z "$URL" ] && { echo "[7-10] SKIPPED — no video"; exit 1; }
-# The GET's headers name the master object fetched (x-goog-generation), for 9b. The master and the
-# headers an earlier run left are cleared first, and the GET must succeed (-f, exit status checked),
-# so a failed GET can never leave an earlier run's master to be scored as this one.
-rm -f "$W/v.mp4"
-: > "$W/v.headers"
-curl -sf --max-time 900 -D "$W/v.headers" -o "$W/v.mp4" "$URL" || { echo "[7-10] FAIL — the master could not be fetched (curl exit $?)"; exit 1; }
+# 7. FETCH — the shared downloader (qa src/kitesforu_qa/integrations/download.py): a deadline, a
+# bounded retry, an empty or HTML body refused, and a typed failure. It records the master object it
+# fetched (GCS generation + bytes on disk) for 9b's stale-master check. A failure stops the checker:
+# every step below reads this file.
+python3 - "$URL" "$W" "$QA_SCRIPTS" <<'PY' || { echo "[7-10] FAIL — the master could not be fetched"; exit 1; }
+import json, os, sys
+url, W, S = sys.argv[1:4]
+sys.path.insert(0, os.path.join(S, "..", "src"))
+from kitesforu_qa.integrations.download import DownloadError, download
+try:
+    got = download(url, f"{W}/v.mp4")
+except DownloadError as exc:
+    print(f"[7 fetch]     {exc}")
+    sys.exit(1)
+with open(f"{W}/v.meta.json", "w") as fh:
+    json.dump({"generation": got.generation, "size": got.size}, fh)
+print(f"[7 fetch]     {got.size} bytes, generation {got.generation} :: PASS")
+PY
 curl -s --max-time 30 -o /dev/null -w "[7 playable]  HTTP HEAD %{http_code} :: PASS-if-200\n" -I "$URL"
 
 # 8. STREAMS — per-stream, never container (the trap that hid a 9s mismatch)
@@ -123,7 +135,8 @@ sys.path.insert(0, S)
 import acceptance_gate as ag
 doc = json.load(open(f"{W}/doc.json"))      # step 1's read: no second Firestore read, no fork stall
 _, _, dur = ag._probe_dims(f"{W}/v.mp4")
-master = ag.fetched_master(open(f"{W}/v.headers", encoding="latin-1").read(), f"{W}/v.mp4")
+meta = json.load(open(f"{W}/v.meta.json"))   # step 7's record of the master object it fetched
+master = ag.FetchedMaster(meta.get("generation"), meta.get("size"))
 _, lines = ag.every_frame_edge_step(doc, f"{W}/v.mp4", f"{W}/gate_frames",
                                     dur * 1000 if dur else None, master=master)
 print("\n".join(lines))

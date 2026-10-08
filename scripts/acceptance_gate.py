@@ -32,10 +32,8 @@ os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
 # answer for this checkout's attribution model.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from kitesforu_qa.harness.delivered_timeline import DeliveredTimeline, stamp_note  # noqa: E402
-from kitesforu_qa.harness.painted_timeline_sidecar import (  # noqa: E402
-    FetchedMaster,
-    fetched_master,
-)
+from kitesforu_qa.harness.painted_timeline_sidecar import FetchedMaster  # noqa: E402
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 _EDU_KEYS = ("explain", "educat", "understand", "how ", "what is", "concept",
             "informational", "tutorial", "guide", "why do", "why does")
@@ -47,8 +45,8 @@ def _fetch_job(job_id: str) -> dict[str, Any]:
     return (db.collection("podcast_jobs").document(job_id).get().to_dict()) or {}
 
 
-#: Seconds for each gate subprocess: the GET, ffprobe, the frame extraction.
-_FETCH_TIMEOUT_S = 900
+#: Seconds for each gate subprocess: ffprobe and the frame extraction. The GET is the shared
+#: downloader's, with its own deadline.
 _PROBE_TIMEOUT_S = 60
 _EXTRACT_TIMEOUT_S = 900
 
@@ -414,29 +412,15 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
 
     tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4")
-    # The master an earlier run left at this path must never be scored as this run's: it is removed
-    # before the GET, and the GET must succeed (`curl -f`, its exit status checked). The GET's own
-    # headers name the object fetched (x-goog-generation), so the producer's stamp is held to THIS
-    # master; they go to a fresh file per run, removed whatever happens.
-    if os.path.exists(tmp):
-        os.remove(tmp)
-    hdr_fd, hdr = tempfile.mkstemp(prefix=f"ag_{job_id}_", suffix=".headers")
-    os.close(hdr_fd)
+    # The shared downloader: https and gs:// alike, with a deadline and a bounded retry, and it
+    # reports the object it fetched, so the producer's stamp is held to THIS master (its GCS
+    # generation and the bytes on disk). A failed fetch raises and leaves nothing at ``tmp`` of its
+    # own, so a master an earlier run left there is never scored as this run's.
     try:
-        got = subprocess.run(["gsutil", "-q", "cp", url, tmp] if url.startswith("gs://")
-                             else ["curl", "-sfL", "--max-time", str(_FETCH_TIMEOUT_S),
-                                   "-D", hdr, "-o", tmp, url],
-                             check=False, capture_output=True, timeout=_FETCH_TIMEOUT_S)
-        with open(hdr, encoding="latin-1") as fh:
-            headers = fh.read()
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"job_id": job_id, "verdict": "FAIL", "topic": topic, "issues": [
-            {"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}: {type(exc).__name__}: {exc}"}]}
-    finally:
-        os.remove(hdr)
-    if got.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
-        return {"job_id": job_id, "verdict": "FAIL", "topic": topic, "issues": [
-            {"sev": "BLOCKER", "msg": f"artifact not fetchable: {url} (exit {got.returncode})"}]}
+        got = download(url, tmp)
+    except DownloadError as exc:
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
+                "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}: {exc}"}]}
     try:
         vw, vh, dur = _probe_dims(tmp)
     except subprocess.TimeoutExpired:
@@ -463,7 +447,7 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
     # OBSERVE: emit frames for the independent vision/adversary step, then invariants B + C.
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     # Only the master itself (video_url) is the object the stamp names; the captioned copy is not.
-    fetched = fetched_master(headers, tmp) if url == vis.get("video_url") else None
+    fetched = FetchedMaster(got.generation, got.size) if url == vis.get("video_url") else None
     try:
         frames, pixel_issues, edge_coverage = probe_master(d, tmp, fdir, dur * 1000 if dur else None,
                                                            master=fetched)

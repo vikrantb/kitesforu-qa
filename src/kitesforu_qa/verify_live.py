@@ -1,6 +1,6 @@
 """D21 L5.4 — live kqa pin: download a job's final mp3 + speech_only.mp3
-from GCS and run the listen-test verifier against the genre profile
-the renderer actually targeted.
+and run the listen-test verifier against the genre profile the renderer
+actually targeted.
 
 This is the operational bridge between the L5.2 verifier module + the
 L5.3 per-genre profile table and the real production audio. Without
@@ -9,19 +9,20 @@ it, an operator (or a Cloud-Scheduler cron) can post-deploy any audio
 change and immediately see whether the rendered mp3 hits the bands
 the renderer was supposed to.
 
-Per-Firestore-job paths
------------------------
-The audio worker uploads each job's artifacts to a deterministic
-public GCS prefix:
+Where the audio is
+------------------
+The job doc names it, and ``harness.artifact.Artifact`` is the one reader
+of those fields: ``Artifact.audio_url`` (the final mastered mix, THE
+user-facing file) and ``Artifact.speech_only_url`` (the speech bed before
+music/SFX, PR #737). This module used to build
+``gs://{bucket}/v1/podcasts/{user_id}/{job_id}/audio.mp3`` from a path
+convention; that matched 0 of 40 sampled current jobs (qa #185 round-2
+design lens), and it read the ``jobs`` collection, which holds no job.
 
-  gs://{public_bucket}/{public_prefix}podcasts/{user_id}/{job_id}/
-    audio.mp3              -- final mastered mix (THE user-facing file)
-    speech_only.mp3        -- speech bed before music/SFX (PR #737)
-    blueprint_final.json   -- the architect's blueprint (for genre lookup)
-
-When ``speech_only.mp3`` is missing (legacy jobs pre-PR #737) the
-verifier still grades loudness + duration; STOI/SMR/music_presence/
-SFX-transient axes degrade gracefully to ``None`` + a note.
+When the job names no speech-only audio, or names one that is not in
+storage, the verifier still grades loudness + duration; STOI/SMR/
+music_presence/SFX-transient axes degrade gracefully to ``None`` + a
+note that says which.
 
 Why a dedicated module rather than inline in cli.py
 ---------------------------------------------------
@@ -43,33 +44,14 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .harness.artifact import Artifact
+from .integrations.download import DownloadError, download
 from .profiles import get_profile
 from .stages.listen_test import (
     GenreProfile,
     ListenTestReport,
     verify_audio_quality,
 )
-
-
-# ---------------------------------------------------------------------------
-# Path resolution
-# ---------------------------------------------------------------------------
-
-
-def _resolve_job_gcs_prefix(
-    *, user_id: str, job_id: str, public_prefix: str = "v1/",
-    bucket: Optional[str] = None,
-) -> str:
-    """Build the canonical gs://.../podcasts/{user_id}/{job_id}/ prefix.
-
-    ``bucket`` defaults to the env-configured public bucket (mirrors
-    the worker's ``self.public_prefix`` resolution). Callers that
-    don't have it can pass it explicitly.
-    """
-    bucket = bucket or os.environ.get(
-        "KFU_PUBLIC_BUCKET", "kitesforu-public",
-    )
-    return f"gs://{bucket}/{public_prefix.rstrip('/')}/podcasts/{user_id}/{job_id}/"
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +68,8 @@ class JobAudioContext:
     user_id: str
     genre: str = "default"
     expected_duration_s: Optional[float] = None
-    audio_gcs_uri: Optional[str] = None
-    speech_only_gcs_uri: Optional[str] = None
+    audio_url: Optional[str] = None
+    speech_only_url: Optional[str] = None
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -96,8 +78,8 @@ class JobAudioContext:
             "user_id": self.user_id,
             "genre": self.genre,
             "expected_duration_s": self.expected_duration_s,
-            "audio_gcs_uri": self.audio_gcs_uri,
-            "speech_only_gcs_uri": self.speech_only_gcs_uri,
+            "audio_url": self.audio_url,
+            "speech_only_url": self.speech_only_url,
             "notes": list(self.notes),
         }
 
@@ -107,8 +89,7 @@ def load_job_context(job_id: str) -> Optional[JobAudioContext]:
 
     Returns None when:
       - google-cloud-firestore is not installed
-      - the job document is missing
-      - the document lacks user_id (we can't build the GCS path)
+      - the job document is missing from ``podcast_jobs``
 
     Other fields are populated best-effort; an empty/missing field
     becomes a ``notes`` entry rather than a hard failure (the
@@ -121,16 +102,14 @@ def load_job_context(job_id: str) -> Optional[JobAudioContext]:
 
     try:
         db = firestore.Client()
-        snap = db.collection("jobs").document(job_id).get()
+        snap = db.collection("podcast_jobs").document(job_id).get()
     except Exception:
         return None
     if not snap.exists:
         return None
     doc = snap.to_dict() or {}
 
-    user_id = doc.get("user_id") or doc.get("user")
-    if not user_id:
-        return None
+    user_id = doc.get("user_id") or doc.get("user") or ""
 
     # Genre resolution: prefer the blueprint's genre_module (architect-
     # committed); fall back to the request's `genre` (intake-committed).
@@ -163,14 +142,14 @@ def load_job_context(job_id: str) -> Optional[JobAudioContext]:
             if isinstance(d, (int, float)) and d > 0:
                 expected_seconds = float(d) * 60.0
 
-    prefix = _resolve_job_gcs_prefix(user_id=str(user_id), job_id=job_id)
+    art = Artifact.from_doc(doc)
     ctx = JobAudioContext(
         job_id=job_id,
         user_id=str(user_id),
         genre=str(genre).strip() or "default",
         expected_duration_s=expected_seconds,
-        audio_gcs_uri=prefix + "audio.mp3",
-        speech_only_gcs_uri=prefix + "speech_only.mp3",
+        audio_url=art.audio_url,
+        speech_only_url=art.speech_only_url,
     )
     if expected_seconds is None:
         ctx.notes.append(
@@ -183,37 +162,6 @@ def load_job_context(job_id: str) -> Optional[JobAudioContext]:
             "(catch-all; per-genre tightenings won't apply)"
         )
     return ctx
-
-
-# ---------------------------------------------------------------------------
-# GCS download (single file)
-# ---------------------------------------------------------------------------
-
-
-def _gcs_download(uri: str, dest_path: str) -> bool:
-    """Download a single gs:// blob. Returns True on success, False
-    when the blob is missing / google-cloud-storage isn't installed.
-    Never raises — the verifier degrades gracefully on missing inputs."""
-    try:
-        from google.cloud import storage  # type: ignore[import-not-found]
-        from urllib.parse import urlparse
-    except ImportError:
-        return False
-    try:
-        parsed = urlparse(uri)
-        if parsed.scheme != "gs":
-            return False
-        bucket = parsed.netloc
-        blob_path = parsed.path.lstrip("/")
-        client = storage.Client()
-        blob = client.bucket(bucket).blob(blob_path)
-        if not blob.exists(client=client):
-            return False
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        blob.download_to_filename(dest_path)
-        return True
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +204,7 @@ def verify_job_live(
     The orchestration:
 
       1. Look up the job in Firestore -> JobAudioContext (genre +
-         expected duration + GCS paths).
+         expected duration + the audio URLs the doc names).
       2. Download audio.mp3 + (best-effort) speech_only.mp3 to a
          tempdir.
       3. Resolve the GenreProfile via L5.3's ``get_profile()`` unless
@@ -274,8 +222,7 @@ def verify_job_live(
             report=None,
             error=(
                 "could not load job from Firestore "
-                "(missing google-cloud-firestore, missing doc, "
-                "or doc lacked user_id)"
+                "(missing google-cloud-firestore, or no such podcast_jobs doc)"
             ),
         )
 
@@ -285,28 +232,40 @@ def verify_job_live(
     speech_path = os.path.join(work_dir, f"{job_id}.speech_only.mp3")
 
     try:
-        if not ctx.audio_gcs_uri or not _gcs_download(
-            ctx.audio_gcs_uri, audio_path,
-        ):
-            return LiveVerifyResult(
-                context=ctx, report=None,
-                error=(
-                    f"could not download {ctx.audio_gcs_uri} "
-                    "(missing google-cloud-storage, missing blob, or "
-                    "permission denied)"
-                ),
-            )
+        # The shared downloader: a failure RAISES DownloadError, and only a source that says the
+        # object does not exist (``not_found``) may be read as an absence.
+        if not ctx.audio_url:
+            return LiveVerifyResult(context=ctx, report=None,
+                                    error="the job names no master audio (Artifact.audio_url)")
+        try:
+            download(ctx.audio_url, audio_path)
+        except DownloadError as exc:
+            return LiveVerifyResult(context=ctx, report=None,
+                                    error=f"could not download {ctx.audio_url}: {exc}")
 
         speech_local: Optional[str] = None
-        if ctx.speech_only_gcs_uri and _gcs_download(
-            ctx.speech_only_gcs_uri, speech_path,
-        ):
-            speech_local = speech_path
-        else:
+        if not ctx.speech_only_url:
             ctx.notes.append(
-                "speech_only.mp3 not in GCS (legacy pre-PR-737 job?) — "
+                "the job names no speech-only audio (audio.speech_only_url) — "
                 "STOI/SMR/music_presence/SFX axes will not grade"
             )
+        else:
+            try:
+                download(ctx.speech_only_url, speech_path)
+                speech_local = speech_path
+            except DownloadError as exc:
+                if not exc.not_found:
+                    # A 403, an expired credential or a dropped connection is not a missing file:
+                    # grading on would drop four axes under a false label.
+                    return LiveVerifyResult(
+                        context=ctx, report=None,
+                        error=(f"could not download {ctx.speech_only_url}: {exc}. It is not "
+                               f"reported missing, so the job is not graded without it."),
+                    )
+                ctx.notes.append(
+                    f"the job names speech-only audio, but storage says it does not exist ({exc}) — "
+                    "STOI/SMR/music_presence/SFX axes will not grade"
+                )
 
         profile = profile_override or get_profile(ctx.genre)
         report = verify_audio_quality(

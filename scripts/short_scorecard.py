@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -34,6 +33,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
+from kitesforu_qa.integrations.download import download  # noqa: E402
 from kitesforu_qa.scorecard import ScorecardConfig, score_short  # noqa: E402
 
 
@@ -52,24 +52,25 @@ def fetch_job_doc(project: str, job_id: str) -> dict[str, Any]:
     return doc
 
 
-def resolve_video(video: str | None, doc: dict[str, Any], work_dir: str) -> str | None:
-    """Return a LOCAL filesystem path to the rendered MP4, downloading a ``gs://`` URI via
-    ``gsutil`` if needed. Falls back to the doc's own ``visual.video_burned_url``/``video_url``
-    when ``--video`` isn't passed. Returns ``None`` (never raises) when no video can be resolved —
-    the video-dependent axes then degrade honestly rather than crash the whole run."""
+def resolve_video(video: str | None, doc: dict[str, Any], work_dir: str, *,
+                  fetch: Any = None) -> str | None:
+    """Return a LOCAL filesystem path to the rendered MP4: a local path as it is, else the URI
+    fetched by ``fetch`` (the shared downloader, or a run's ``FetchBudget.download``), https and
+    gs:// alike. Falls back to the doc's own ``visual.video_burned_url``/``video_url`` when
+    ``--video`` isn't passed.
+
+    ``None`` only when no video is named at all. A download that fails, or a ``--video`` that is
+    neither a file nor a URI, RAISES ``DownloadError``: before, an https ``video_url`` (the form the
+    pipeline persists) came back ``None`` and every video-dependent axis degraded on nothing."""
     uri = video or (doc.get("visual") or {}).get("video_burned_url") or (doc.get("visual") or {}).get("video_url")
     if not uri:
         return None
     uri = str(uri)
-    if not uri.startswith("gs://"):
-        return uri if os.path.exists(uri) else None
-    dest = os.path.join(work_dir, os.path.basename(uri) or "episode_video.mp4")
-    try:
-        subprocess.run(["gsutil", "-q", "cp", uri, dest], check=True, timeout=180)
-        return dest
-    except Exception as exc:  # noqa: BLE001 — degrade, don't crash the whole scorecard run
-        print(f"warning: gsutil cp failed for {uri}: {exc}", file=sys.stderr)
-        return None
+    if os.path.exists(uri):
+        return uri
+    job_id = str(doc.get("job_id") or doc.get("id") or "job")
+    name = os.path.basename(uri.split("?", 1)[0]) or "episode_video.mp4"
+    return (fetch or download)(uri, os.path.join(work_dir, f"{job_id}_{name}")).path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -101,22 +102,22 @@ def main(argv: list[str] | None = None) -> int:
 
     doc = json.loads(Path(args.doc_file).read_text()) if args.doc_file else fetch_job_doc(args.project, args.job_id)
 
-    work_dir = tempfile.mkdtemp(prefix="kqa_short_scorecard_")
-    video_path = resolve_video(args.video, doc, work_dir)
-    if video_path is None:
-        print(
-            "warning: no local video resolved — motion_density/audio_feel will report missing_instrumentation",
-            file=sys.stderr,
-        )
-
-    art = Artifact.from_doc(doc, audio_path=args.audio, video_path=video_path)
     vlm_fn = None
     if args.vlm:
         from kitesforu_qa.scorecard.vlm import photo_vs_illustration_vlm_fn  # noqa: E402
 
         vlm_fn = photo_vs_illustration_vlm_fn
     cfg = ScorecardConfig(enable_judge=args.enable_judge, enable_vlm=args.vlm, vlm_fn=vlm_fn)
-    result = score_short(art, cfg)
+    # The download lives only while the job is scored.
+    with tempfile.TemporaryDirectory(prefix="kqa_short_scorecard_") as work_dir:
+        video_path = resolve_video(args.video, doc, work_dir)
+        if video_path is None:
+            print(
+                "warning: no local video resolved — motion_density/audio_feel will report missing_instrumentation",
+                file=sys.stderr,
+            )
+        art = Artifact.from_doc(doc, audio_path=args.audio, video_path=video_path)
+        result = score_short(art, cfg)
 
     out_json = json.dumps(result, indent=2, default=str)
     print(out_json)

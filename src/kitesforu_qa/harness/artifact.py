@@ -6,7 +6,9 @@ plus optionally-downloaded local audio/images. Checks read typed accessors (``ar
 digging through the raw doc, so a doc-shape change touches ONE place.
 
 Primary path is ``from_doc`` — fully offline, $0, no network (the path for fixtures + CI). ``load``
-fetches a live job + downloads its audio for ad-hoc local verification.
+fetches a live job + downloads its audio for ad-hoc local verification, through the one shared
+downloader (``integrations.download``). A download that fails RAISES ``DownloadError``: an artifact
+without its audio skips every audio check as N/A, so a grade over it would pass on nothing.
 """
 from __future__ import annotations
 
@@ -295,6 +297,36 @@ class Artifact:
     def has_audio(self) -> bool:
         return bool(self.audio_path)
 
+    @property
+    def audio_url(self) -> str | None:
+        """Where the episode's master audio lives. The ONE reader of that fact; every grader that
+        downloads the audio asks here.
+
+        Measured over all 3,162 completed ``podcast_jobs`` on 2026-10-05: ``outputs.audio_url`` on
+        3,159 (3,154 https, 5 gs://), a legacy top-level ``audio_url`` on the other 3 (all gs://),
+        and the audio stage's ``stages.job-audio.result.audio_url`` on 3,160, equal to
+        ``outputs.audio_url`` on all 3,157 jobs that carry both. ``audio_path``, ``audio_gcs_uri`` and
+        ``audio.mp3_url``, which other readers looked for, are on none. The API's status snapshot
+        carries no audio URL at all: ``KitesForUClient.get_job_audio`` asks
+        ``/v1/podcasts/{id}/audio-url``."""
+        url = (_g(self.doc, "outputs", "audio_url") or _g(self.doc, "audio_url")
+               or _g(self.doc, "stages", "job-audio", "result", "audio_url"))
+        return str(url) if url else None
+
+    @property
+    def speech_only_url(self) -> str | None:
+        """Where the episode's speech-only audio (the speech bed before music and SFX, PR #737)
+        lives, or None when the job names none. The ONE reader of that fact.
+
+        Measured over all 3,163 completed ``podcast_jobs`` on 2026-10-08: ``audio.speech_only_url``
+        on 1,305, all https, every one of them on a job that also has ``outputs.audio_url``.
+        ``stages.job-audio.result.speech_only_url``, ``outputs.speech_only_url``,
+        ``audio.speech_only_gcs_uri`` and a top-level ``speech_only_url`` are on none (the same
+        projection finds ``stages.job-audio.result.audio_url`` on 3,161 and ``outputs.audio_url`` on
+        3,160)."""
+        url = _g(self.doc, "audio", "speech_only_url")
+        return str(url) if url else None
+
     # ── visuals (nested under doc['visual'] on real jobs) ──
     @property
     def visual(self) -> dict[str, Any]:
@@ -386,31 +418,23 @@ class Artifact:
     @classmethod
     def load(cls, job_id: str, client: Any, *, download: bool = True,
              temp_dir: str = "/tmp/kitesforu-qa") -> Artifact:
-        """Fetch a live job doc (+ optionally download its audio) via the kqa client."""
+        """Fetch a live job doc (+ optionally download its audio) via the kqa client.
+
+        ``client.get_job`` returns the API's status snapshot, which carries no audio URL, so the URL
+        comes from :attr:`audio_url` when the doc has one, else from ``client.get_job_audio``
+        (``/v1/podcasts/{id}/audio-url``). With ``download=True`` an audio URL that cannot be found,
+        or a download that fails, raises ``DownloadError``. Pass ``download=False`` to grade the doc
+        alone, on purpose: the audio checks then skip, and say so.
+        """
+        from ..integrations.download import DownloadError
+        from ..integrations.download import download as fetch
+
         doc = client.get_job(job_id)
         art = cls.from_doc(doc if isinstance(doc, dict) else {"job_id": job_id})
         art.job_id = job_id
         if download:
-            audio_url = None
-            try:
-                audio_url = client.get_job_audio(job_id)
-            except Exception:
-                pass
-            audio_url = audio_url or _g(doc, "outputs", "audio_url")
-            if audio_url:
-                art.audio_path = _download(audio_url, f"{temp_dir}/{job_id}.audio")
+            url = art.audio_url or client.get_job_audio(job_id)
+            if not url:
+                raise DownloadError(f"job {job_id}: no audio URL, in the doc or from /audio-url", uri="")
+            art.audio_path = fetch(str(url), f"{temp_dir}/{job_id}.audio").path
         return art
-
-
-def _download(url: str, local_path: str) -> str | None:
-    import os
-    try:
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        if url.startswith("gs://"):
-            from ..integrations.gcs import download_from_gcs
-            return download_from_gcs(url, local_path)
-        import urllib.request
-        urllib.request.urlretrieve(url, local_path)
-        return local_path
-    except Exception:
-        return None

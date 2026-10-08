@@ -45,7 +45,12 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.harness.artifact import Artifact  # noqa: E402
+from kitesforu_qa.integrations.download import DownloadError, download  # noqa: E402
 
 logger = logging.getLogger("verify_pr")
 
@@ -136,32 +141,39 @@ def _fetch_job(project: str, job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _download_audio(job: Dict[str, Any], dest: str) -> Optional[str]:
-    """Download the final mastered MP3 to ``dest``. Returns local path or None.
+    """Download the final mastered MP3 to ``dest`` and return its path.
 
-    Reads ``audio_url`` (signed URL) or ``audio_gcs_uri``. We don't bake any
-    auth assumption — gsutil cp handles the gs:// path with ADC.
+    The URL is ``Artifact.audio_url``, the one reader of where the audio lives (``outputs.audio_url``
+    on 3,159 of 3,162 completed jobs). This function used to read ``audio_url`` and
+    ``audio_gcs_uri``, which no completed job carries, so it fetched nothing. ``None`` only when the
+    job names no audio. A download that fails RAISES ``DownloadError``; ``run_ladder`` records it on
+    rungs 4 and 5.
     """
-    url = job.get("audio_url") or ""
-    gcs = job.get("audio_gcs_uri") or ""
-    if gcs and gcs.startswith("gs://"):
-        try:
-            subprocess.run(
-                ["gsutil", "-q", "cp", gcs, dest],
-                check=True,
-                timeout=60,
-            )
-            return dest
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("gsutil cp failed for %s: %s", gcs, exc)
-    if url:
-        try:
-            import urllib.request
+    url = Artifact.from_doc(job).audio_url
+    if not url:
+        return None
+    return download(url, dest).path
 
-            urllib.request.urlretrieve(url, dest)  # noqa: S310 — signed URL
-            return dest
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("urlretrieve failed for %s: %s", url, exc)
-    return None
+
+def _try_download_audio(job: dict[str, Any], dest: str) -> tuple[str | None, str | None]:
+    """``(path, None)``, or ``(None, why)`` when the download failed. The cause is kept for the
+    rung it costs, never only logged."""
+    try:
+        return _download_audio(job, dest), None
+    except DownloadError as exc:
+        logger.warning("audio download failed: %s", exc)
+        return None, str(exc)
+
+
+def _note_download_errors(rung: RungResult, **errors: str | None) -> RungResult:
+    """Name, on the rung itself, every audio download that failed, so a rung computed without its
+    local audio says why."""
+    failed = {who: why for who, why in errors.items() if why}
+    if failed:
+        rung.evidence["audio_download_failed"] = failed
+        rung.detail = (f"{rung.detail}; " if rung.detail else "") + (
+            "local audio not downloaded: " + "; ".join(f"{who}: {why}" for who, why in failed.items()))
+    return rung
 
 
 # ---------------------------------------------------------------------------
@@ -758,27 +770,33 @@ def run_ladder(
     # Rung 3 — schema fields landed
     verdict.rungs.append(rung_3_schema_fields(post, pr_kind))
 
-    # Rung 4 + 5 — need local audio for full fidelity
+    # Rung 4 + 5 — need local audio for full fidelity. The downloads live only as long as the two
+    # rungs that read them: a directory nobody deletes grows with every run.
     post_audio_path: Optional[str] = None
     baseline_audio_path: Optional[str] = None
-    if not skip_audio_download:
-        tmpdir = tempfile.mkdtemp(prefix="kqa_verify_")
-        post_audio_path = _download_audio(post, os.path.join(tmpdir, "post.mp3"))
-        baseline_audio_path = _download_audio(baseline, os.path.join(tmpdir, "baseline.mp3"))
+    with tempfile.TemporaryDirectory(prefix="kqa_verify_") as tmpdir:
+        if not skip_audio_download:
+            post_audio_path, post_error = _try_download_audio(post, os.path.join(tmpdir, "post.mp3"))
+            baseline_audio_path, baseline_error = _try_download_audio(
+                baseline, os.path.join(tmpdir, "baseline.mp3"))
+        else:
+            post_error = baseline_error = None
 
-    # Rung 4 — audio measurements
-    verdict.rungs.append(rung_4_audio_measurements(post, post_audio_path))
+        # Rung 4 — audio measurements
+        rung_4 = rung_4_audio_measurements(post, post_audio_path)
+        _note_download_errors(rung_4, post=post_error)
+        verdict.rungs.append(rung_4)
 
-    # Rung 5 — A/B
-    if not baseline:
-        verdict.rungs.append(RungResult(
-            rung=5, name="ab_improvement", verdict=Verdict.SKIP,
-            detail=f"baseline job {baseline_job_id!r} not found",
-        ))
-    else:
-        verdict.rungs.append(rung_5_ab_improvement(
-            baseline, post, pr_kind, baseline_audio_path, post_audio_path,
-        ))
+        # Rung 5 — A/B
+        if not baseline:
+            verdict.rungs.append(RungResult(
+                rung=5, name="ab_improvement", verdict=Verdict.SKIP,
+                detail=f"baseline job {baseline_job_id!r} not found",
+            ))
+        else:
+            verdict.rungs.append(_note_download_errors(rung_5_ab_improvement(
+                baseline, post, pr_kind, baseline_audio_path, post_audio_path,
+            ), post=post_error, baseline=baseline_error))
 
     return verdict
 

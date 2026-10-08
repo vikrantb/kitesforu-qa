@@ -95,7 +95,7 @@ def test_score_all_scores_an_offline_doc(qm) -> None:
 def test_score_all_degrades_failing_cell_without_crashing_the_run(qm) -> None:
     docs = [_minimal_doc("job-good"), _minimal_doc("job-bad")]
 
-    def flaky_resolve_video(video, doc, work_dir):
+    def flaky_resolve_video(video, doc, work_dir, **_kw):
         if doc.get("job_id") == "job-bad":
             raise RuntimeError("simulated gsutil failure")
         return None
@@ -110,6 +110,27 @@ def test_score_all_degrades_failing_cell_without_crashing_the_run(qm) -> None:
     assert good["_scored"] is True
     assert bad["_scored"] is False
     assert "simulated gsutil failure" in bad["_error"]
+
+
+def test_score_all_fetches_through_the_runs_budget_into_a_directory_it_removes(qm) -> None:
+    """Round 2: the short sweep downloads every video (~1 GB a 60-short run, est.) into a directory
+    nobody deleted, with no run-level bound. Each job's directory goes once it is scored, and the
+    video is fetched through the run's ``FetchBudget``."""
+    from kitesforu_qa.integrations.download import FetchBudget
+
+    budget = FetchBudget(3600)
+    seen = []
+
+    def resolve(video, doc, work_dir, *, fetch=None):
+        seen.append((work_dir, fetch))
+        (Path(work_dir) / "v.mp4").write_bytes(b"x")
+        return None
+
+    qm.score_all([_minimal_doc("job-a"), _minimal_doc("job-b")], project="kitesforu-dev",
+                 cfg=qm.ScorecardConfig(), download_video=True,
+                 fetch_job_doc=lambda project, jid: {}, resolve_video=resolve, budget=budget)
+    assert [f for _, f in seen] == [budget.download, budget.download]
+    assert len({d for d, _ in seen}) == 2 and not any(Path(d).exists() for d, _ in seen)
 
 
 def test_score_all_bare_job_id_uses_fetch_job_doc(qm) -> None:

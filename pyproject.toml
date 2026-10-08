@@ -30,7 +30,11 @@ dependencies = [
     "numpy>=1.24.0",
     "google-generativeai>=0.3.0",
     "google-cloud-storage>=2.14.0",
+    # integrations.download streams gs:// media over google.auth's AuthorizedSession, and reads every
+    # body with urllib3's read1 (2.2+) so its deadline bounds a trickle (qa #185).
+    "google-auth>=2.15.0",
     "requests>=2.31.0",
+    "urllib3>=2.2",
     "pyyaml>=6.0",
     "rich>=13.0.0",
     # D21 L5.2 (audio-overhaul, 2026-05-29): listen_test verifier needs
@@ -65,6 +69,9 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
+    # the downloader's stall and trickle tests carry @pytest.mark.timeout; without the plugin the
+    # mark does nothing and a hang would hang the suite.
+    "pytest-timeout>=2.1.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.5.0",

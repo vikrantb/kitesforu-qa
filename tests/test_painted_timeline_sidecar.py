@@ -15,6 +15,7 @@ import pytest
 import requests
 
 from kitesforu_qa.harness import painted_timeline_sidecar as sc
+from kitesforu_qa.integrations.download import DownloadError
 
 URI = "gs://kitesforu-dev-podcasts/visuals/job/painted_timeline.json"
 PUBLIC = "https://storage.googleapis.com/kitesforu-dev-podcasts/visuals/job/painted_timeline.json"
@@ -116,17 +117,22 @@ def test_each_failed_step_says_which_step_failed(fetch, parse, status, detail):
 
 
 class _Raw:
-    def __init__(self, size: int):
-        self.size, self.asked = size, None
+    """A urllib3 2.x body of ``size`` bytes, read with ``read1``, counting the bytes handed over."""
 
-    def read(self, amt, decode_content=False):
-        self.asked = amt
-        return b"x" * min(amt, self.size)
+    def __init__(self, size: int):
+        self.left, self.handed = size, 0
+
+    def read1(self, amt, decode_content=True):
+        n = min(amt, self.left)
+        self.left -= n
+        self.handed += n
+        return b"x" * n
 
 
 class _Response:
-    def __init__(self, size: int, status_error: Exception | None = None):
-        self.raw, self._error = _Raw(size), status_error
+    def __init__(self, size: int, status_code: int = 200):
+        self.raw, self.status_code = _Raw(size), status_code
+        self.headers = {"Content-Type": "application/json", "Content-Length": str(size)}
 
     def __enter__(self):
         return self
@@ -135,37 +141,57 @@ class _Response:
         return False
 
     def raise_for_status(self):
-        if self._error:
-            raise self._error
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Client Error")
 
 
 @pytest.mark.parametrize("size, ok", [(3000, True), (sc.MAX_SIDECAR_BYTES, True),
                                       (sc.MAX_SIDECAR_BYTES + 1, False), (40_000_000, False)])
 def test_the_get_streams_and_stops_at_the_cap(size, ok, monkeypatch):
-    """A URI that points at the 40 MB master by mistake costs one megabyte, not the video."""
+    """A URI that points at the 40 MB master by mistake costs one megabyte and a byte, not the video.
+    The GET is the shared downloader's (``fetch_bytes``), with its timeouts and deadline."""
     calls = []
 
     def get(url, timeout, stream):
         calls.append((url, timeout, stream))
-        resp = _Response(size)
-        calls.append(resp.raw)
-        return resp
+        calls.append(_Response(size))
+        return calls[-1]
 
     monkeypatch.setattr(requests, "get", get)
     if ok:
-        assert len(sc._https_get(PUBLIC)) == size
+        assert len(sc._get(PUBLIC)) == size
     else:
-        with pytest.raises(ValueError, match="exceeds"):
-            sc._https_get(PUBLIC)
-    assert calls[0] == (PUBLIC, sc.FETCH_TIMEOUT_S, True)
-    assert calls[1].asked == sc.MAX_SIDECAR_BYTES + 1
+        with pytest.raises(DownloadError, match="exceeds"):
+            sc._get(PUBLIC)
+    assert calls[0] == (PUBLIC, (sc.FETCH_TIMEOUT_S, sc.FETCH_TIMEOUT_S), True)
+    assert calls[1].raw.handed == min(size, sc.MAX_SIDECAR_BYTES + 1)
+    assert len(calls) == 2                    # a body over the cap is not retried
 
 
 def test_an_http_error_is_a_failed_fetch(monkeypatch):
-    monkeypatch.setattr(requests, "get", lambda url, timeout, stream: _Response(
-        10, requests.HTTPError("404 Client Error")))
+    monkeypatch.setattr(requests, "get", lambda url, timeout, stream: _Response(10, 404))
     read = sc.read_sidecar(DOC, fetch=None, parse=_parse)
-    assert read.status == "fetch_failed" and "HTTPError: 404" in (read.why_unread or ""), read
+    assert read.status == "fetch_failed" and "HTTP 404" in (read.why_unread or ""), read
+
+
+def test_a_transient_failure_is_retried_before_the_sidecar_is_given_up(monkeypatch):
+    """Round-2 latency NIT on #184: the sidecar GET had no retry, so a blip read as "no sidecar" and
+    the estimate decided, while the same blip on the master was retried."""
+    answers = [_Response(10, 503), _Response(len(BODY))]
+    answers[1].raw = _Body(BODY)
+    monkeypatch.setattr(requests, "get", lambda url, timeout, stream: answers.pop(0))
+    monkeypatch.setattr("kitesforu_qa.integrations.download.time.sleep", lambda s: None)
+    read = sc.read_sidecar(DOC, fetch=None, parse=_parse)
+    assert read.status == "read" and answers == [], read
+
+
+class _Body:
+    def __init__(self, body):
+        self.body = body
+
+    def read1(self, amt, decode_content=True):
+        out, self.body = self.body[:amt], self.body[amt:]
+        return out
 
 
 # ── workers' parse_v1, loaded from its FILE, never through the workers package ─────────────────
@@ -334,51 +360,3 @@ def test_the_default_repo_is_the_canonical_checkouts_sibling_even_from_a_worktre
     assert sc.workers_repo().resolve() == (tmp_path / "kitesforu-workers").resolve()
     no_override.setattr(sc, "_QA_ROOT", tmp_path / "not-a-checkout" / "qa")
     assert sc.workers_repo() == tmp_path / "not-a-checkout" / "kitesforu-workers"
-
-
-# ── the master the reader fetched ──────────────────────────────────────────────────────────────
-
-def test_the_fetched_master_is_the_gets_generation_and_the_bytes_on_disk(tmp_path):
-    body = tmp_path / "v.mp4"
-    body.write_bytes(b"\x00" * 2048)
-    headers = ("HTTP/1.1 302 Found\r\nLocation: https://storage.googleapis.com/b/v.mp4\r\n"
-               "x-goog-generation: 111\r\n\r\n"
-               "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nX-Goog-Generation: 1759660800123456\r\n\r\n")
-    got = sc.fetched_master(headers, str(body))
-    assert got == sc.FetchedMaster(1759660800123456, 2048) and got.complete
-
-
-@pytest.mark.parametrize("headers, generation", [
-    ("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\r\n", None),
-    ("HTTP/1.1 200 OK\r\nx-goog-generation: not-a-number\r\n\r\n", None),
-    ("", None),
-])
-def test_a_get_without_a_usable_generation_is_incomplete(headers, generation, tmp_path):
-    body = tmp_path / "v.mp4"
-    body.write_bytes(b"\x00" * 10)
-    got = sc.fetched_master(headers, str(body))
-    assert got == sc.FetchedMaster(generation, 10) and not got.complete
-
-
-def test_only_the_final_responses_generation_counts(tmp_path):
-    """With ``-L`` every redirect hop writes its own header block. A generation on an earlier hop
-    names some other object, so a final block without one is no generation (round-2 critic #4)."""
-    body = tmp_path / "v.mp4"
-    body.write_bytes(b"\x00" * 10)
-    headers = ("HTTP/1.1 302 Found\r\nx-goog-generation: 111\r\nLocation: https://x/v.mp4\r\n\r\n"
-               "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\n\r\n")
-    assert sc.fetched_master(headers, str(body)) == sc.FetchedMaster(None, 10)
-
-
-def test_an_unreadable_generation_clears_one_read_before_it(tmp_path):
-    """Within the final block the LAST ``x-goog-generation`` decides, and one that is not a number
-    is no generation, never the value read before it."""
-    body = tmp_path / "v.mp4"
-    body.write_bytes(b"\x00" * 10)
-    headers = "HTTP/1.1 200 OK\r\nx-goog-generation: 5\r\nx-goog-generation: junk\r\n\r\n"
-    assert sc.fetched_master(headers, str(body)) == sc.FetchedMaster(None, 10)
-
-
-def test_a_missing_file_has_no_size(tmp_path):
-    got = sc.fetched_master("x-goog-generation: 5\r\n", str(tmp_path / "absent.mp4"))
-    assert got == sc.FetchedMaster(5, None) and not got.complete
