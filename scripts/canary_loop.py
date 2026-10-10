@@ -34,6 +34,9 @@ import requests
 from google.cloud import firestore
 from playwright.sync_api import sync_playwright
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.job_status import FINISHED_RENDERING, TERMINAL  # noqa: E402  (one list, every qa poller)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -332,7 +335,11 @@ def watch_job(db: firestore.Client, job_id: str) -> dict[str, Any]:
         stage = (doc.get("progress") or {}).get("stage")
         pct = (doc.get("progress") or {}).get("pct")
         print(f"  [{utcnow_iso()}] poll job={job_id} status={status} stage={stage} pct={pct}", flush=True)
-        if status in {"completed", "failed", "cancelled"}:
+        # Every terminal status, from the shared list. This stopped on completed|failed|cancelled
+        # only, so a finished `needs_review` / `failed_qa` episode polled to MAX_POLL_MINUTES and
+        # was reported as a STALL, with a Slack alert blaming "a long-running LLM call"
+        # (kitesforu-qa #175 round-3 design NIT-4).
+        if status in TERMINAL:
             return doc
     last["_timeout"] = True
     return last
@@ -432,15 +439,22 @@ def run_one(db: firestore.Client, iteration: int) -> dict[str, Any]:
         final = watch_job(db, job_id)
         diag = diagnose_terminal(final, job_id)
 
-        if diag["status"] == "completed" and not diag["is_timeout"]:
+        if diag["status"] in FINISHED_RENDERING and not diag["is_timeout"]:
+            # The episode finished rendering. `needs_review` / `failed_qa` are QA HOLDS on a
+            # finished episode (audio persisted), not stalls, so they get the same mp3 check and are
+            # logged as WARN with the hold named. Only `completed` with a good mp3 is a PASS.
             duration_sec, mp3_size = (None, None)
             if diag["mp3_url"]:
                 duration_sec, mp3_size = ffprobe_duration(diag["mp3_url"])
             # Prefer wall-clock from script-start (most honest).
             wall_sec = time.time() - started_at
+            held = diag["status"] != "completed"
+            mp3_ok = bool(mp3_size and mp3_size > 100_000 and duration_sec and 40 <= duration_sec <= 90)
+            ok = mp3_ok and not held
             note = "clean"
-            ok = bool(mp3_size and mp3_size > 100_000 and duration_sec and 40 <= duration_sec <= 90)
-            if not ok:
+            if held:
+                note = f"held:{diag['status']} (finished, QA hold; mp3 {'ok' if mp3_ok else 'off'})"
+            elif not mp3_ok:
                 note = f"completed_but_mp3_off (size={mp3_size}, dur={duration_sec})"
             append_log(
                 f"| {utcnow_iso()} | {iteration} | {'PASS' if ok else 'WARN'} | {job_id} | "
