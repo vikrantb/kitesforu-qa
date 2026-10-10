@@ -368,11 +368,12 @@ RESP="${POST_OUT%$'\n'*}"
 JOB_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('job_id') or d.get('id') or '')" 2>/dev/null || true)
 if [[ -z "$JOB_ID" ]]; then
   if [[ "$HTTP_CODE" =~ ^4[0-9][0-9]$ ]]; then
-    # 4xx is decided before anything is written: auth and validation before the handler runs, then the
-    # concurrency, quota and credit checks, all ahead of the charge and the job doc (kitesforu-api
-    # routes/podcasts/crud.py create_podcast_job; services/podcast_services.py create_job deducts and only
-    # then writes). The one 4xx that can follow a create, the Idempotency-Key 409, needs a header this
-    # script does not send.
+    # 4xx is decided before the job is written or any credit is charged: auth and validation before the
+    # handler runs, then the concurrency, quota and credit checks, all ahead of the charge and the job doc
+    # (kitesforu-api routes/podcasts/crud.py create_podcast_job; services/podcast_services.py create_job
+    # deducts and only then writes). A free owner's trial slot is reserved by the quota check, so a credit
+    # 429 after it has spent that slot, never credits. The one 4xx that can follow a create, the
+    # Idempotency-Key 409, needs a header this script does not send.
     POST_STATE="rejected"
     echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a job; nothing was charged. Response:" >&2
     echo "$RESP" >&2
