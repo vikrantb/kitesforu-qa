@@ -82,6 +82,14 @@ def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
     return None
 
 
+def _is_photo_frame(clips: list[dict] | None, index: int) -> bool:
+    """Is extracted frame ``index`` a generated photo (``scene_image``)? A photo legitimately bleeds
+    to every edge and can carry legible-looking text there, so the frame rules skip it. ONE
+    predicate for every rule that skips photos (the pixel edge rule and the text-integrity probe),
+    so the frame->clip mapping is changed in one place."""
+    return _clip_modality_at(clips, index * _FRAME_INTERVAL_MS) == "scene_image"
+
+
 def _sample_indices(n: int, want: int = 12) -> list[int]:
     """The frame indices `_pixel_invariants` inspects — EXTRACTED so a test can exercise the real
     arithmetic instead of restating it.
@@ -223,7 +231,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
         # A photo beat legitimately bleeds to every edge — the pipeline's own checker never
         # inspects one. Skip the rule, do not merely discount it.
-        if _clip_modality_at(clips, idx * _FRAME_INTERVAL_MS) == "scene_image":
+        if _is_photo_frame(clips, idx):
             edge_skipped_photo += 1
         else:
             edge_checked += 1
@@ -259,7 +267,7 @@ def _text_integrity(frames: list[str], doc: dict[str, Any], clips: list[dict] | 
 
     result = text_integrity.check_frames(
         frames, doc,
-        skip=lambda i: _clip_modality_at(clips, i * _FRAME_INTERVAL_MS) == "scene_image",
+        skip=lambda i: _is_photo_frame(clips, i),
     )
     found = text_integrity.issues(result)
     summary = {k: result[k] for k in ("status", "frames_checked", "frames_failed", "frames_skipped_photo")}
