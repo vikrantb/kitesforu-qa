@@ -247,6 +247,26 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     return issues
 
 
+def _text_integrity(frames: list[str], doc: dict[str, Any], clips: list[dict] | None) -> dict[str, Any]:
+    """Invariant D (`scripts/text_integrity.py`): EVERY non-photo frame OCR'd for text cut by the frame
+    edge, by a length cap's ellipsis, or shown only up to a point where a line the job authored does
+    not end. The pixel rule above reads 12 frames and fires only when a third of them show edge
+    structure; course 8a64fcff's four lessons passed it with cut text on all four (hero critic Elena,
+    2026-10-08). Photo frames are skipped exactly as the pixel rule skips them. OCR unavailable is
+    reported as a MAJOR "not checked", never as a pass."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import text_integrity
+
+    result = text_integrity.check_frames(
+        frames, doc,
+        skip=lambda i: _clip_modality_at(clips, i * _FRAME_INTERVAL_MS) == "scene_image",
+    )
+    found = text_integrity.issues(result)
+    summary = {k: result[k] for k in ("status", "frames_checked", "frames_failed", "frames_skipped_photo")}
+    summary["flagged"] = {name: sorted({f["kind"] for f in fs}) for name, fs in result["flagged"].items()}
+    return {"issues": found, "summary": summary}
+
+
 def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
     d = _fetch_job(job_id)
     topic = d.get("topic") or d.get("title") or ""
@@ -288,12 +308,17 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     frames = _extract_frames(tmp, fdir)
     issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
+    # Invariant D: no text on screen is CUT — by the frame, by a length cap's ellipsis, or by a
+    # budget or its own box — read from every non-photo frame (`text_integrity`, course 8a64fcff).
+    text_cut = _text_integrity(frames, d, clips)
+    issues.extend(text_cut["issues"])
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
+            "text_integrity": text_cut["summary"],
             "persona": persona or None,
             "next": _adversary_brief(persona)}
 

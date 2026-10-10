@@ -105,6 +105,9 @@ dmypy.json
 # every known finding as NEW on a fresh clone, i.e. a gate that cries wolf until someone silences
 # it. Mirrors kitesforu-workers/config/{mechanism_reach,orphan}_baseline.json, which are committed.
 !scripts/*_baseline.json
+# The text-integrity probe's fixture job docs are test INPUT: the authored lines its cut test compares
+# the fixture frames against, trimmed to the lines those frames can match.
+!tests/fixtures/text_integrity/*.doc.json
 
 # Docker
 docker/output/

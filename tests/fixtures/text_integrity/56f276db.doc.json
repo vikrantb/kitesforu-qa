@@ -1,0 +1,41 @@
+{
+ "preferences": {
+  "_nonfiction_blueprint": {
+   "segment_plan": [
+    {
+     "must_cover": [
+      "Contrast credit loads, lab hours, prerequisite sequencing, and overlapping exam schedules",
+      "Myth Difficulty Bonus — how it differs from similar roles",
+      "Surprising downstream consequence: a student in a 'less impressive' major who executes this plan often produces a more competitive application than a student in a prestigious major who is constantly triaging"
+     ]
+    }
+   ]
+  }
+ },
+ "segments_ready": [
+  {
+   "text_full": "No difficulty multiplier."
+  },
+  {
+   "text_full": "The classification is standardized across every applicant, every school, every major."
+  },
+  {
+   "text_full": "Intro psych, statistics for social sciences, cognitive psychology, research methods."
+  },
+  {
+   "text_full": "The statistics course is abstract, the essay-based exams require strong analytical writing."
+  },
+  {
+   "text_full": "Organic chemistry alone — that's the one that breaks people."
+  },
+  {
+   "text_full": "The transcript looks cleaner."
+  },
+  {
+   "text_full": "The clinical hours are there."
+  },
+  {
+   "text_full": "Only if it didn't cost you your BCPM, your MCAT prep, or your clinical hours."
+  }
+ ]
+}
