@@ -17,12 +17,19 @@
 #                                                           # test_user_e2e, invisible to the founder)
 #   ./create_verification_job.sh ... --dry-run            # print the request and its estimate; no auth, no POST, $0
 #
-# The estimate is computed FROM the body that is sent. Clips and stills are priced by the
-# kitesforu-workers selector and catalog at origin/main (KFU_WORKERS_REPO, or WORKERS_SRC=<tree>/src).
+# The estimate is computed FROM the body that is sent. A purchase (clips, stills, relimage bases,
+# character plates) is priced by the kitesforu-workers functions that select and price it, at origin/main
+# (KFU_WORKERS_REPO, or WORKERS_SRC=<tree>/src), imported under the workers venv's python
+# (KFU_WORKERS_PYTHON, default <KFU_WORKERS_REPO>/.venv/bin/python).
 # After a T4 POST the script reads back what the api STORED and fails if it is less than asked.
-# Exit: 0 ok · 1 usage, POST or pricing failure · 2 bad --on-behalf-of · 3 ACK needed, or status
-#       unreadable · 4 --wait ran out (NOT a result) · 5 ended with nothing to grade · 6 the api
-#       stored LESS than asked · 7 the stored request could not be read (6, 7: the job WAS created)
+# Exit codes, in three classes, so a retry can never buy a job twice:
+#   NOTHING WAS CREATED: 1 usage, pricing or auth refusal, or the api REJECTED the request (HTTP 4xx)
+#                        · 2 bad --on-behalf-of · 3 the founder ACK is needed
+#   A JOB MAY EXIST:     8 the POST's outcome is unknown (transport failure or timeout, HTTP 5xx, or no
+#                        job id in the reply). Check the owner's library before re-running.
+#   THE JOB WAS CREATED (its id is printed): 0 ok · 4 --wait ran out (NOT a result) · 5 ended with
+#                        nothing to grade · 6 the api stored LESS than asked · 7 the stored request could
+#                        not be read · 9 its status could not be read while waiting
 #
 # Auth: TEST_API_KEY env var, or fetched from Secret Manager (kitesforu-dev).
 
@@ -31,10 +38,36 @@ set -euo pipefail
 API_BASE="${API_BASE:-https://kitesforu-api-m6zqve5yda-uc.a.run.app}"
 ACK_FILE="/Users/vikrantbhosale/gitprojects/kitesforu/.claude/FOUNDER_SPEND_ACK"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# ONE EXIT TRAP. It removes the temporary workers tree, and once the POST has gone out it makes every exit
+# that did not explain itself say whether a job exists, so no path after the POST can leave a caller
+# guessing whether a retry buys the job twice (#175 round-5 code critic F3, latency L3). A deliberate
+# exit calls `finish`, which marks it explained.
+WORKERS_TREE=""
+POST_STATE="unsent"   # unsent | sent (outcome unknown) | rejected (HTTP 4xx) | created (JOB_ID known)
+JOB_ID=""
+EXPLAINED="false"
+finish() { EXPLAINED="true"; exit "$1"; }
+on_exit() {
+  local rc=$?
+  [[ -n "$WORKERS_TREE" ]] && rm -rf "$WORKERS_TREE"
+  if (( rc != 0 )) && [[ "$EXPLAINED" != "true" ]]; then
+    case "$POST_STATE" in
+      sent)    echo "Stopped (exit $rc) after the POST went out: a job MAY exist. Check the owner's library before re-running." >&2 ;;
+      created) echo "Stopped (exit $rc): job $JOB_ID WAS created. Do not re-run to retry it; read it instead." >&2 ;;
+    esac
+  fi
+  return 0
+}
+trap on_exit EXIT
 # The kitesforu-workers checkout whose origin/main prices a purchased clip or still: its own
 # selector and catalog, read from a temporary `git archive`, never from the working tree (a lane's
 # feature branch is not what serves). Read only when the job buys clips. Same root as ACK_FILE.
 WORKERS_REPO="${KFU_WORKERS_REPO:-/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers}"
+# THE INTERPRETER THAT IMPORTS THE PRODUCER IS THE PRODUCER'S. Pricing imports workers.*, so it needs the
+# workers dependencies; it used to run under whichever python3 was first on PATH, and a bare PATH refused
+# every purchase with "No module named 'google'" (#175 round-5 design D3). Checked before it is used.
+WORKERS_PY="${KFU_WORKERS_PYTHON:-$WORKERS_REPO/.venv/bin/python}"
 
 TOPIC="pipeline verification"
 DURATION="0.167"          # 10 seconds — the enforced API minimum
@@ -163,7 +196,15 @@ fi
 # nothing priced needs no tree, so the T3 default path reads no repo and runs no git.
 WORKERS_SRC_FOR_PLAN=""
 CATALOG_LABEL=""
+PLAN_PY="python3"
 if [[ "$MOTION_CLIPS" != "0" ]]; then
+  if [[ ! -x "$WORKERS_PY" ]] || ! "$WORKERS_PY" -c 'import sys' >/dev/null 2>&1; then
+    echo "Refusing: cannot price the clips this job buys. The workers interpreter '$WORKERS_PY' is missing or" >&2
+    echo "does not run. Pricing imports the workers selector, so it runs under the workers venv: create it" >&2
+    echo "(kitesforu-workers/.venv) or set KFU_WORKERS_PYTHON. Nothing was sent." >&2
+    exit 1
+  fi
+  PLAN_PY="$WORKERS_PY"
   if [[ -n "${WORKERS_SRC:-}" ]]; then
     WORKERS_SRC_FOR_PLAN="$WORKERS_SRC"
     CATALOG_LABEL="WORKERS_SRC=$WORKERS_SRC (explicit)"
@@ -172,7 +213,6 @@ if [[ "$MOTION_CLIPS" != "0" ]]; then
       || { echo "Refusing: cannot price the clips this job buys. No origin/main in $WORKERS_REPO (set KFU_WORKERS_REPO or WORKERS_SRC)." >&2; exit 1; }
     _wdate=$(git -C "$WORKERS_REPO" log -1 --format=%cs "$_wsha")
     WORKERS_TREE=$(mktemp -d "${TMPDIR:-/tmp}/kfu-verify-workers.XXXXXX")
-    trap 'rm -rf "$WORKERS_TREE"' EXIT
     git -C "$WORKERS_REPO" archive "$_wsha" -- src/workers config/model_catalog.csv | tar -x -C "$WORKERS_TREE" \
       || { echo "Refusing: cannot price the clips this job buys. git archive of workers $_wsha failed." >&2; exit 1; }
     WORKERS_SRC_FOR_PLAN="$WORKERS_TREE/src"
@@ -186,7 +226,7 @@ fi
 # and shared nothing with it: round 2 began buying stills while the printed estimate stayed
 # byte-identical (qa #175 round-2 cost D1/D2). A purchase it cannot price is a refusal (exit 1),
 # not a guess.
-PLAN=$(python3 "$HERE/verification_job.py" plan \
+PLAN=$("$PLAN_PY" "$HERE/verification_job.py" plan \
   "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--visuals=$VISUALS" \
   "--format=$FORMAT" "--content-rating=$CONTENT_RATING" "--source-writeup=$SOURCE_WRITEUP" \
   "--language=$LANGUAGE" "--motion-clips=$MOTION_CLIPS" "--paid-stills=$PAID_STILLS" "--short=$SHORT" \
@@ -310,19 +350,40 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-# A transport failure here used to end the script with curl's exit code and no word. The request
-# may have reached the api before the connection dropped, so the job may exist and be charged.
-RESP=$(curl -sS -X POST "$POST_URL" "${POST_HDR_ARGS[@]}" -d "$PAYLOAD") || {
+# THE POST. It is bounded (the /status reads always were, this was not, so a stalled api held the script
+# with no word: #175 round-5 latency L3), and every outcome is classified by what it says about the job.
+# A transport failure or a timeout can follow the api's write, so it is "a job MAY exist" (exit 8), never
+# a plain failure a caller would retry.
+POST_STATE="sent"
+POST_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$POST_URL" "${POST_HDR_ARGS[@]}" \
+  -d "$PAYLOAD" -w $'\n%{http_code}') || {
   _rc=$?
-  echo "POST failed at the transport level (curl exit $_rc). The job MAY have been created and charged:" >&2
+  _how="curl exit $_rc"; (( _rc == 28 )) && _how="timed out, curl exit 28"
+  echo "POST failed at the transport level ($_how). The job MAY have been created and charged:" >&2
   echo "check the owner's library before re-running, or this buys it twice." >&2
-  exit 1
+  finish 8
 }
-
+HTTP_CODE="${POST_OUT##*$'\n'}"
+RESP="${POST_OUT%$'\n'*}"
 JOB_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('job_id') or d.get('id') or '')" 2>/dev/null || true)
 if [[ -z "$JOB_ID" ]]; then
-  echo "Job creation failed. Response:" >&2; echo "$RESP" >&2; exit 1
+  if [[ "$HTTP_CODE" =~ ^4[0-9][0-9]$ ]]; then
+    # 4xx is decided before anything is written: auth and validation before the handler runs, then the
+    # concurrency, quota and credit checks, all ahead of the charge and the job doc (kitesforu-api
+    # routes/podcasts/crud.py create_podcast_job; services/podcast_services.py create_job deducts and only
+    # then writes). The one 4xx that can follow a create, the Idempotency-Key 409, needs a header this
+    # script does not send.
+    POST_STATE="rejected"
+    echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a job; nothing was charged. Response:" >&2
+    echo "$RESP" >&2
+    finish 1
+  fi
+  echo "No job id in the api's reply (HTTP ${HTTP_CODE:-none}). The job MAY have been created and charged: a 5xx or a" >&2
+  echo "gateway timeout can follow the api's write. Check the owner's library before re-running. Response:" >&2
+  echo "$RESP" >&2
+  finish 8
 fi
+POST_STATE="created"
 echo "job_id=$JOB_ID  (est $EST)"
 echo "status: $API_BASE/v1/podcasts/$JOB_ID/status"
 
@@ -336,7 +397,7 @@ if [[ "$NEEDS_ACK" == "true" ]]; then
   _readback="unread"
   SHORTFALL=""
   for _attempt in 1 2 3; do
-    _snap=$(curl -sS --max-time 20 "$API_BASE/v1/podcasts/$JOB_ID/status" "${HDR_ARGS[@]}" 2>/dev/null) || _snap=""
+    _snap=$(curl -sS --connect-timeout 10 --max-time 20 "$API_BASE/v1/podcasts/$JOB_ID/status" "${HDR_ARGS[@]}" 2>/dev/null) || _snap=""
     if SHORTFALL=$(printf '%s' "$_snap" | python3 "$HERE/verification_job.py" check-stored --requested "$PAYLOAD" --snapshot - 2>/dev/null); then
       _readback="read"
       break
@@ -346,7 +407,7 @@ if [[ "$NEEDS_ACK" == "true" ]]; then
   if [[ "$_readback" != "read" ]]; then
     echo "UNVERIFIED: job $JOB_ID WAS created, but what the api stored could not be read back (3 attempts)." >&2
     echo "Read its visual_options and quality_tier before grading it, and before re-running anything." >&2
-    exit 7
+    finish 7
   fi
   if [[ -n "$SHORTFALL" ]]; then
     echo "THE API STORED LESS THAN THIS SCRIPT ASKED FOR. Job $JOB_ID WAS created and charged for what it stored:" >&2
@@ -354,7 +415,7 @@ if [[ "$NEEDS_ACK" == "true" ]]; then
     echo "The usual cause is the owner's subscription: a free tier drops visual_options and caps quality at" >&2
     echo "medium (kitesforu-api podcast_services.create_job). The estimate above does not describe this job." >&2
     echo "Do not re-run with the same owner; it gets the same clamp." >&2
-    exit 6
+    finish 6
   fi
   echo "  read back: the api stored the requested quality_tier and visual_options" >&2
 fi
@@ -365,95 +426,129 @@ if [[ "$WAIT" == "true" ]]; then
   # The bound exists because a poll loop billed Cloud Run for 8 days 17 hours. A bound alone does
   # not fix the class: the loop used to fold an UNREADABLE status into "keep waiting", 60 useless
   # requests (in the unbounded ancestor, ~26,000). A probe that cannot answer is a DIFFERENT
-  # condition from "still running", and three in a row abort with exit 3.
+  # condition from "still running", and three in a row abort with exit 9 (the job exists).
   #
   # A TRANSPORT failure is a failed probe too. `RAW=$(curl ...)` under `set -e` used to END the
   # script on one timeout (curl exit 28) or refused connection (7), with no message, skipping the
   # probe counter entirely. On a paid wait that abandons a render being charged for, and invites a
   # re-run that buys it twice (qa #175 round-3 code FIX-1, design FIX-1, cost FIX-2).
   #
-  # WHAT TO WAIT FOR. `status` turns terminal when the AUDIO completes; visuals run on a parallel
-  # subscriber and finish later. A job that bought or asked for visuals (`/status` wants_visuals)
-  # is gradeable only once its video is assembled. Assembly is once-only and waits for any Veo op
-  # still rendering, so a video URL means the hero clips that will land have landed (qa #175
-  # round-2 latency D1, round-3 latency 1).
+  # WHAT TO WAIT FOR: ONE readiness rule, the package's (kitesforu_qa.visual_readiness, #175 round 5).
+  # `status` turns terminal when the AUDIO completes; visuals run on a parallel subscriber and finish
+  # later. A run that asked for a video (the script's own --visuals / --visuals-auto / purchase, OR the
+  # doc's wants_visuals) is gradeable only when the video ladder says `ready` AND its clip array has
+  # settled: the clips_settled_at stamp is not cleared and the same clip fingerprint holds for the
+  # settled_clips window. Only that read's hero count is reported. A video that is NOT coming
+  # (video_status=failed_assembly, a terminal skip reason such as audio_only_no_clips, visual.status=failed)
+  # ends the wait with exit 5, naming the reason, once two reads a poll apart agree (workers say a retry
+  # can flip failed_assembly back to ready). It used to wait out the whole budget for that video.
   #
-  # HOW LONG, by wall clock (SECONDS), not a poll count: the printed bound used to omit each probe's
-  # own time (qa #175 round-2 latency D2). Read-only census, newest 600 podcast_jobs by created_at,
-  # 2026-10-08:
-  #   created -> completed_at, terminal jobs, n=591: median 368s, p99 1208s, max 2761s
-  #   bought motion clips, n=26 (all quality ultra): audio by <=1238s, but visual.clips_settled_at a
-  #   median 4141s after creation (n=21; re-stamped by later passes, so it overstates first assembly)
-  # Audio-only: 1800s. Visuals: 5400s = audio p99 + the visuals pass hard ceiling (3300s,
-  # pass_deadline.py) + margin. A long paid episode can still run out; that is exit 4, not success.
-  # While waiting on visuals, poll once a minute: each /status read of a completed job runs the
-  # refund check (a Firestore transaction).
+  # HOW LONG, by wall clock (SECONDS), and never STARTING a poll whose sleep plus its probe's own
+  # timeout would end past the budget, so the printed bound is the real ceiling (#175 round-5 latency
+  # N2). The budgets are chosen, and the census beside each says how often a healthy job outlasts it.
+  # Read-only census 2026-10-10, newest 600 podcast_jobs by created_at, video time = the GCS object
+  # time_created of visual.video_url (the job doc stamps no video time): see the PR body for the command.
+  #   audio-only, 1800s: created -> completed_at p99 1208s, max 2761s (n=591, the 2026-10-08 census)
+  #   a video, no purchase, 5400s: created -> video, 18 of 443 jobs after 5400s (p95 3597s)
+  #   purchased clips, 10800s: created -> video, 3 of 21 jobs after 10800s (median 4280s, p90 12719s);
+  #     all 21 are ultra / motion_clips 3 / one owner, not a low-tier 2-clip run
+  # Running out is exit 4, never success: a paid --wait can run out while the job is healthy.
+  # Once the audio is done, poll once a minute: a video is minutes away, and the clip array needs reads
+  # a window apart. (The 60 s cadence used to be justified by a refund transaction each /status read ran;
+  # api #867 moved that refund to the watchdog sweep, so the reason is latency, not cost.)
   TERMINAL_STATUSES=$(python3 "$HERE/../src/kitesforu_qa/job_status.py" terminal)
-  GRADEABLE_STATUSES=$(python3 "$HERE/../src/kitesforu_qa/job_status.py" gradeable)
+  FINISHED_STATUSES=$(python3 "$HERE/../src/kitesforu_qa/job_status.py" finished-rendering)
+  SETTLE_WINDOW_S=$(python3 "$HERE/verification_job.py" settle-window)
   in_list() { [[ -n "$1" && " $2 " == *" $1 "* ]]; }
   AUDIO_BUDGET_S=1800
   VISUALS_BUDGET_S=5400
+  PURCHASE_BUDGET_S=10800
   POLL_INTERVAL_S=15
   VISUALS_POLL_INTERVAL_S=60
   PROBE_TIMEOUT_S=20
   MAX_CONSECUTIVE_PROBE_FAILURES=3
+  EXPECT_VIDEO="no"
+  [[ "$VISUALS" != "false" || "$MOTION_CLIPS" != "0" ]] && EXPECT_VIDEO="yes"
   probe_failures=0
   polls=0
-  LAST_STATUS=""; WANTS_VISUALS="no"; VIDEO="no"; VSTATUS=""; HERO="0"
+  scheduled=0
+  LAST_STATUS=""; VIDEO_EXPECTED="$EXPECT_VIDEO"; PHASE=""; REASON=""; SETTLE=""; HERO="0"
+  FP=""; FP_STILL_S=0; PREV_ENDING=""
   AUDIO_DONE_AT=""
   RESULT=""
   wait_start=$SECONDS
-  echo "Polling until gradeable (audio-only: up to ${AUDIO_BUDGET_S}s; with visuals: up to ${VISUALS_BUDGET_S}s; wall clock)..."
+  echo "Polling until gradeable (wall clock, at most: audio-only ${AUDIO_BUDGET_S}s; a video ${VISUALS_BUDGET_S}s; purchased clips ${PURCHASE_BUDGET_S}s)..."
   while :; do
     _budget=$AUDIO_BUDGET_S
-    [[ "$WANTS_VISUALS" == "yes" ]] && _budget=$VISUALS_BUDGET_S
-    # The clock bounds the wait; an iteration bound as well ends it even if time does not advance.
-    (( SECONDS - wait_start >= _budget || polls >= _budget / POLL_INTERVAL_S )) && break
-    polls=$(( polls + 1 ))
+    [[ "$VIDEO_EXPECTED" == "yes" ]] && _budget=$VISUALS_BUDGET_S
+    (( MOTION_CLIPS > 0 )) && _budget=$PURCHASE_BUDGET_S
     _interval=$POLL_INTERVAL_S
     [[ -n "$AUDIO_DONE_AT" ]] && _interval=$VISUALS_POLL_INTERVAL_S
+    # Never START a poll that could end past the budget: its sleep and its probe's own timeout must fit.
+    # The scheduled sleep total bounds it too, so the bound holds even where time does not advance.
+    (( SECONDS - wait_start + _interval + PROBE_TIMEOUT_S > _budget || scheduled + _interval > _budget )) && break
+    polls=$(( polls + 1 ))
     sleep "$_interval"
-    RAW=$(curl -sS --max-time "$PROBE_TIMEOUT_S" "$API_BASE/v1/podcasts/$JOB_ID/status" "${HDR_ARGS[@]}" 2>/dev/null) || RAW=""
-    IFS='|' read -r STATUS _wv _video _vstatus _hero <<< "$(printf '%s' "$RAW" | python3 "$HERE/verification_job.py" status-fields --snapshot -)"
+    scheduled=$(( scheduled + _interval ))
+    RAW=$(curl -sS --connect-timeout 10 --max-time "$PROBE_TIMEOUT_S" "$API_BASE/v1/podcasts/$JOB_ID/status" "${HDR_ARGS[@]}" 2>/dev/null) || RAW=""
+    IFS='|' read -r STATUS _vexp _phase _reason _settle _fp _hero <<< "$(printf '%s' "$RAW" | python3 "$HERE/verification_job.py" status-fields --snapshot - --expect-video "$EXPECT_VIDEO")"
     if [[ -z "$STATUS" ]]; then
       probe_failures=$((probe_failures + 1))
       _why="${RAW:0:120}"; [[ -z "$RAW" ]] && _why="(no response: transport failure or timeout)"
       echo "  [$polls] (status unreadable — probe failure $probe_failures/$MAX_CONSECUTIVE_PROBE_FAILURES): $_why"
       if (( probe_failures >= MAX_CONSECUTIVE_PROBE_FAILURES )); then
-        echo "ABORTING: cannot read job status ($probe_failures consecutive failures, +$(( SECONDS - wait_start ))s)." >&2
-        echo "This is a PROBE failure, not a job state — check auth (TEST_API_KEY), the api and the network." >&2
-        echo "Job $JOB_ID may still be running; read it directly rather than polling blind." >&2
-        exit 3
+        RESULT="unreadable"; break
       fi
       continue
     fi
     probe_failures=0
-    LAST_STATUS="$STATUS"; WANTS_VISUALS="$_wv"; VIDEO="$_video"; VSTATUS="$_vstatus"; HERO="$_hero"
+    LAST_STATUS="$STATUS"; VIDEO_EXPECTED="$_vexp"; PHASE="$_phase"; REASON="$_reason"; SETTLE="$_settle"
     _vis=""
-    [[ "$WANTS_VISUALS" == "yes" ]] && _vis="  visuals=${VSTATUS:-none} video=$VIDEO hero_clips=$HERO"
-    echo "  [$polls] $STATUS (+$(( SECONDS - wait_start ))s)$_vis"
-    if in_list "$STATUS" "$TERMINAL_STATUSES" && ! in_list "$STATUS" "$GRADEABLE_STATUSES"; then
+    [[ "$VIDEO_EXPECTED" == "yes" ]] && _vis="  video=$PHASE ($REASON) clips_settled_at=$SETTLE"
+    echo "  [$polls] $STATUS (waited $(( SECONDS - wait_start ))s)$_vis"
+    if in_list "$STATUS" "$TERMINAL_STATUSES" && ! in_list "$STATUS" "$FINISHED_STATUSES"; then
       RESULT="ended"; break
     fi
-    if in_list "$STATUS" "$GRADEABLE_STATUSES"; then
-      [[ -z "$AUDIO_DONE_AT" ]] && AUDIO_DONE_AT=$(( SECONDS - wait_start ))
-      if [[ "$WANTS_VISUALS" != "yes" || "$VIDEO" == "yes" ]]; then RESULT="gradeable"; break; fi
-      if [[ "$VSTATUS" == "failed" ]]; then RESULT="visuals_failed"; break; fi
-    fi
+    in_list "$STATUS" "$FINISHED_STATUSES" || continue
+    [[ -z "$AUDIO_DONE_AT" ]] && AUDIO_DONE_AT=$(( SECONDS - wait_start ))
+    if [[ "$VIDEO_EXPECTED" != "yes" ]]; then RESULT="gradeable"; break; fi
+    case "$PHASE" in
+      failed|no_video)
+        FP=""; FP_STILL_S=0
+        if [[ "$PREV_ENDING" == "$PHASE:$REASON" ]]; then RESULT="no_video"; break; fi
+        PREV_ENDING="$PHASE:$REASON" ;;
+      ready)
+        PREV_ENDING=""
+        if [[ "$SETTLE" == "in_flight" ]]; then
+          FP=""; FP_STILL_S=0              # a pass is writing the array: no read of it counts
+        elif [[ "$_fp" != "$FP" ]]; then
+          FP="$_fp"; FP_STILL_S=0          # the array moved: start the window again
+        else
+          FP_STILL_S=$(( FP_STILL_S + _interval ))
+          if (( FP_STILL_S >= SETTLE_WINDOW_S )); then HERO="$_hero"; RESULT="gradeable"; break; fi
+        fi ;;
+      *)
+        PREV_ENDING=""; FP=""; FP_STILL_S=0 ;;
+    esac
   done
-  _elapsed=$(( SECONDS - wait_start ))
+  _waited=$(( SECONDS - wait_start ))
   case "$RESULT" in
+    unreadable)
+      echo "ABORTING: cannot read job status ($probe_failures consecutive failures, waited ${_waited}s)." >&2
+      echo "This is a PROBE failure, not a job state — check auth (TEST_API_KEY), the api and the network." >&2
+      echo "Job $JOB_ID WAS created and may still be running; read it directly rather than polling blind, and do not re-run it." >&2
+      finish 9 ;;
     ended)
       # failed / cancelled: terminal, and there is no episode. It used to exit 0 with "grade it".
-      echo "ENDED: job $JOB_ID is '$LAST_STATUS' after ${_elapsed}s. There is nothing to grade." >&2
-      exit 5 ;;
-    visuals_failed)
-      echo "ENDED: job $JOB_ID finished its audio ('$LAST_STATUS') but its VISUALS FAILED after ${_elapsed}s." >&2
-      echo "A job that bought or asked for visuals has nothing to grade for what it bought." >&2
-      exit 5 ;;
+      echo "ENDED: job $JOB_ID is '$LAST_STATUS' after waiting ${_waited}s. There is nothing to grade." >&2
+      finish 5 ;;
+    no_video)
+      echo "ENDED: job $JOB_ID finished its audio ('$LAST_STATUS') but NO VIDEO is coming: $PHASE, $REASON" >&2
+      echo "(the same on two reads a poll apart, waited ${_waited}s). A run that asked for a video has nothing to grade for it." >&2
+      finish 5 ;;
     gradeable)
-      if [[ "$WANTS_VISUALS" == "yes" ]]; then
-        echo "Visuals assembled: video present, $HERO hero clip(s) in the delivered compartment."
+      if [[ "$VIDEO_EXPECTED" == "yes" ]]; then
+        echo "Video ready and its clip array settled (unchanged for ${FP_STILL_S}s, clips_settled_at $SETTLE): $HERO delivered hero clip(s)."
         if (( MOTION_CLIPS > 0 && HERO < MOTION_CLIPS )); then
           echo "⚠️  Only $HERO of $MOTION_CLIPS PURCHASED clip(s) landed in the delivered video. That is a finding to" >&2
           echo "   grade, not a pass: the rest failed or were refunded (read visual_veo on the job doc)." >&2
@@ -464,23 +559,26 @@ if [[ "$WAIT" == "true" ]]; then
         failed_qa)    _what="finished, failed the automatic QA gate (audio may still be usable)" ;;
         *)            _what="finished" ;;
       esac
-      echo "Final status: $LAST_STATUS — $_what, after ${_elapsed}s. Grade it with the \$0 battery: kqa / Artifact.load('$JOB_ID')"
+      echo "Final status: $LAST_STATUS — $_what, after waiting ${_waited}s. Grade it with the \$0 battery: kqa / Artifact.load('$JOB_ID')"
       exit 0 ;;
   esac
   if [[ -z "$LAST_STATUS" ]]; then
-    echo "Final status: UNKNOWN (never read a status in ${_elapsed}s, $polls polls) — job $JOB_ID" >&2
-    exit 3
+    echo "Final status: UNKNOWN (never read a status in ${_waited}s of waiting, $polls polls) — job $JOB_ID WAS created; read it directly." >&2
+    finish 9
   fi
   # RUNNING OUT IS NOT SUCCESS. The loop used to fall through and exit 0 with whatever non-terminal
   # status it last read, so the caller could not tell a finished job from one still rendering.
   if [[ -n "$AUDIO_DONE_AT" ]]; then
-    echo "TIMED OUT after ${_elapsed}s ($polls polls): job $JOB_ID finished its audio ('$LAST_STATUS' at +${AUDIO_DONE_AT}s)," >&2
-    echo "but its video is not assembled (visual status '${VSTATUS:-none}', hero clips $HERO)." >&2
-    echo "This is NOT a result for a job that bought or asked for visuals. Re-read it later: kqa / Artifact.load('$JOB_ID')" >&2
+    echo "TIMED OUT after waiting ${_waited}s ($polls polls): job $JOB_ID finished its audio ('$LAST_STATUS', waited +${AUDIO_DONE_AT}s)," >&2
+    echo "but its video is not ready to grade: ${PHASE:-none} (${REASON:-no read}), clips_settled_at ${SETTLE:-none}." >&2
+    if [[ "$PHASE" == "ready" ]]; then
+      echo "The video exists but its clip array never held still for ${SETTLE_WINDOW_S}s, so no clip count was taken." >&2
+    fi
+    echo "This is NOT a result: a healthy paid job can outlast this wait (see the budgets in this script). Re-read it later: kqa / Artifact.load('$JOB_ID')" >&2
   else
-    echo "TIMED OUT after ${_elapsed}s ($polls polls): job $JOB_ID last read as '$LAST_STATUS'." >&2
+    echo "TIMED OUT after waiting ${_waited}s ($polls polls): job $JOB_ID last read as '$LAST_STATUS'." >&2
     echo "This is NOT a result — the job is still running and nothing here is gradeable yet." >&2
     echo "Re-read it later: kqa / Artifact.load('$JOB_ID')" >&2
   fi
-  exit 4
+  finish 4
 fi

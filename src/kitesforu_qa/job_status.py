@@ -27,8 +27,12 @@ not classified here. A new status cannot silently fall through to "still running
 
 Offline and $0: no imports beyond the standard library, so a shell script can read it.
 
-    python3 src/kitesforu_qa/job_status.py terminal      # space-separated, for the shell
-    python3 src/kitesforu_qa/job_status.py gradeable
+    python3 src/kitesforu_qa/job_status.py terminal              # space-separated, for the shell
+    python3 src/kitesforu_qa/job_status.py finished-rendering
+
+"Finished rendering" is not "gradeable": a job that asked for a video is gradeable only once its video is
+ready and its clip array has settled (``kitesforu_qa.visual_readiness``). The set is named for what it is
+(#175 round-5 design D5).
 """
 from __future__ import annotations
 
@@ -49,7 +53,7 @@ NON_TERMINAL = frozenset({"queued", "clarifying", "running", "awaiting_review"})
 
 _SETS = {
     "terminal": TERMINAL,
-    "gradeable": FINISHED_RENDERING,
+    "finished-rendering": FINISHED_RENDERING,
     "ended-without-episode": ENDED_WITHOUT_EPISODE,
     "non-terminal": NON_TERMINAL,
 }

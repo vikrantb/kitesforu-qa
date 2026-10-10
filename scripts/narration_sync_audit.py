@@ -33,7 +33,6 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kitesforu_qa.harness.checks.video_sync import _parse_vtt_cues  # noqa: E402
-from kitesforu_qa.job_status import TERMINAL  # noqa: E402  (one list for every qa poller)
 from kitesforu_qa.harness.narration_alignment import (  # noqa: E402
     Cue,
     boundary_alignment,
@@ -42,6 +41,7 @@ from kitesforu_qa.harness.narration_alignment import (  # noqa: E402
     shown_words_lag,
     starved_clips,
 )
+from kitesforu_qa.job_status import TERMINAL  # noqa: E402  (one list for every qa poller)
 
 _PROJECT = os.environ.get("KITESFORU_PROJECT", "kitesforu-dev")
 _COLLECTION = "podcast_jobs"
@@ -53,13 +53,6 @@ def _cues(doc: dict[str, Any]) -> list[Cue]:
     if not vtt:
         return []
     return [Cue(c["start_ms"], c["end_ms"], c.get("text") or "") for c in _parse_vtt_cues(vtt)]
-
-
-# Every terminal status, from the one list every qa poller reads. This was
-# {"completed", "failed_qa", "failed"}, so the census silently dropped every finished
-# `needs_review` episode, the held ones, and every `cancelled` one (kitesforu-qa #175 round-2
-# design D1). A terminal doc is not mid-flight, which is what this filter exists to require.
-_TERMINAL = TERMINAL
 
 
 def _cards(doc: dict[str, Any], clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -109,7 +102,12 @@ def audit(doc: dict[str, Any]) -> dict[str, Any] | None:
     cues = _cues(doc)
     if not clips or not cues:
         return None
-    if str(doc.get("status") or "") not in _TERMINAL or not visual.get("video_url"):
+    # Every terminal status, from the one list every qa poller reads (kitesforu_qa.job_status). This was
+    # {"completed", "failed_qa", "failed"}, so the census silently dropped every finished `needs_review`
+    # episode, the held ones (kitesforu-qa #175 round-2 design D1). A terminal doc is not mid-flight,
+    # which is what this filter exists to require. POPULATION CHANGE, named (#175 round-5 design D5): a
+    # `cancelled` doc that carries a `video_url` is now scored too; before, it was dropped.
+    if str(doc.get("status") or "") not in TERMINAL or not visual.get("video_url"):
         return None
 
     hold = hold_across_sentences(clips, cues)
