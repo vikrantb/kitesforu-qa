@@ -1019,6 +1019,10 @@ def test_the_quote_never_reads_a_sheet_catalog(tmp_path, monkeypatch):
     loader falls back to the CSV on any Sheets error, so a reverted guard prices the same (round-5 sabotage Q23
     stayed green on it)."""
     (tmp_path / "workers").mkdir()                     # a tree that gets past the first check, then refuses
+    # `_workers` puts the tree on sys.path, as the plan subprocess needs. Restore it, or this empty `workers`
+    # namespace package shadows the real one for every later test in the process (it turned 23 skipped
+    # mirror tests into failures in the full suite).
+    monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setenv("MODEL_CATALOG_SHEET_ID", "bogus-sheet-never-read")
     with pytest.raises(verification_job.PricingUnavailable, match="predates the quote seam"):
         verification_job._workers(str(tmp_path))
