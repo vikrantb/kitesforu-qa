@@ -636,13 +636,16 @@ def test_a_visuals_job_is_gradeable_only_once_its_video_is_ready_and_its_clips_s
         snap("queued", visual_options=PAID_VO),                                   # the read-back
         snap("running", wants_visuals=True),
         snap("completed", wants_visuals=True, visual_status="done", video_status="rendering"),
-        snap("completed", wants_visuals=True, video=True, video_status="ready", hero=1, signed=True),
+        # Three reads of the SAME ready array, each re-signed as the api re-signs every read.
+        *[snap("completed", wants_visuals=True, video=True, video_status="ready", hero=1, signed=True)
+          for _ in range(3)],
     ])
     r = harness.run("--motion-clips", "2", "--wait", env={"WORKERS_SRC": workers_src})
     assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
     # 1 read-back + running + rendering + three reads of the ready video, 60 s apart: the clip array must
     # hold still for the settled_clips window (120 s) before a clip is counted. Every read re-signs the
-    # poster URL, and the fingerprint must not mistake a signature for a change.
+    # poster URL, and the fingerprint must not mistake a signature for a change (a fingerprint that did
+    # would restart the window on each read and take two more).
     assert harness.gets() == 6, "the wait stopped before the clip array had settled"
     assert "Only 1 of 2 PURCHASED clip(s)" in r.stderr
     sleeps = [c[1] for c in harness.calls("sleep")]
@@ -1008,14 +1011,18 @@ def test_without_paid_stills_no_plate_and_no_anchored_clip_is_priced(harness, wo
     assert m and abs(float(m.group(2) or m.group(1)) - 2 * plain_hi) < 0.006, "an unreachable anchored cell set the ceiling"
 
 
-def test_a_sheet_id_in_the_environment_does_not_change_the_prices(harness, workers_src):
-    """critic F4 X6: with MODEL_CATALOG_SHEET_ID set the loader would read Google Sheets (a network call and a
-    possibly different catalog). The quote clears it; the estimate must equal the CSV-priced one."""
-    base = harness.run("--dry-run", "--motion-clips", "2", env={"WORKERS_SRC": workers_src})
-    bogus = harness.run("--dry-run", "--motion-clips", "2",
-                        env={"WORKERS_SRC": workers_src, "MODEL_CATALOG_SHEET_ID": "bogus-sheet-never-read"})
-    assert base.returncode == 0 and bogus.returncode == 0, (base.stderr, bogus.stderr)
-    assert _est(base.stderr) == _est(bogus.stderr)
+def test_the_quote_never_reads_a_sheet_catalog(tmp_path, monkeypatch):
+    """critic F4 X6: with MODEL_CATALOG_SHEET_ID set the workers loader reads Google Sheets (a network call, and
+    possibly a different catalog from the CSV the serving worker reads). The quote clears it before importing.
+
+    Pinned where the guard ACTS. The end-to-end form (a bogus id, then compare the estimates) cannot fail: the
+    loader falls back to the CSV on any Sheets error, so a reverted guard prices the same (round-5 sabotage Q23
+    stayed green on it)."""
+    (tmp_path / "workers").mkdir()                     # a tree that gets past the first check, then refuses
+    monkeypatch.setenv("MODEL_CATALOG_SHEET_ID", "bogus-sheet-never-read")
+    with pytest.raises(verification_job.PricingUnavailable, match="predates the quote seam"):
+        verification_job._workers(str(tmp_path))
+    assert "MODEL_CATALOG_SHEET_ID" not in os.environ
 
 
 @pytest.mark.parametrize("args,needle", [
