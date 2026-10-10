@@ -55,10 +55,8 @@ MIN_PREFIX_CHARS = 24
 MIN_PREFIX_WORDS = 6
 #: How close OCR'd text must be to the source's opening to count as it (SequenceMatcher ratio).
 PREFIX_RATIO = 0.86
-#: The source must continue for at least this many alphanumerics past the block, and this many
-#: whole words past the word the block ends in, or it is not cut.
+#: The source must continue for at least this many alphanumerics past the block, or it is not cut.
 MIN_REST_CHARS = 8
-MIN_REST_WORDS = 2
 #: How much longer than the OCR'd block the source text it shows may be: the share of characters
 #: OCR drops from small type at the gate's 540 px (ep4 cdcf1150 b17 lost ~12%).
 OCR_DROP_SLACK = 1.3
@@ -203,12 +201,6 @@ def _cut_prefix(block: str, sources: Sequence[tuple[str, str, list[int]]],
             continue
         end = idx[shown - 1]  # the last source character the block shows
         rest = src[end + 1:]
-        # A block ending INSIDE a source word ("...policies before si" for "before switching") is
-        # OCR clipping small type, not a cut: count only what lies past the end of that word, and
-        # call it cut only if whole words of the line remain unshown.
-        tail = re.sub(r"^\w*", "", rest)
-        if len(re.findall(r"[A-Za-z0-9]+", tail)) < MIN_REST_WORDS:
-            continue
         nxt_ch = rest.lstrip()[:1]
         if src[end] in _CLAUSE_END or nxt_ch in tuple(_CLAUSE_END) or (nxt_ch == "," and not open_paren):
             continue  # it stops where a sentence or clause stops: whole, not cut

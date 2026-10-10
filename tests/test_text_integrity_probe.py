@@ -120,13 +120,34 @@ _COMMA = ("Because we spent episodes two and three on popular majors, the assump
     (_COLON, "Because we spent episodes two and three on popular majors:", "it stops at the line's colon"),
     (_COMMA, "Because we spent episodes two and three on popular majors", "the line's next mark is a comma"),
     (_COMMA, "Because we spent episodes", "too short to tell a cut from a label"),
-    (_COMMA, "Because we spent episodes two and three on popular majors.", "it ends a sentence on screen"),
 ])
 def test_a_block_that_ends_where_a_line_may_end_is_not_cut(src: str, block: str, why: str):
     srcs = [(src, *ti._squeeze(src))]
     assert ti._cut_prefix(block, srcs, ti._squeeze(block)[0]) is None, why
     cut = block.rstrip(":.") + " the assumption that one"  # control: the same line, stopped mid-clause
     assert ti._cut_prefix(cut, srcs, ti._squeeze(cut)[0]) is not None or len(block.split()) < 6, why
+
+
+def test_a_whole_sentence_on_screen_is_not_cut_by_a_longer_authored_line():
+    """A card may state a complete sentence that opens a longer line the job authored elsewhere (the
+    narrator's variant of it). The period on screen says the card ended it there."""
+    src = "A prestigious major cannot substitute for a thin extracurricular record or a mediocre MCAT score"
+    block = "A prestigious major cannot substitute for a thin extracurricular record."
+    srcs = [(src, *ti._squeeze(src))]
+    assert ti._cut_prefix(block, srcs, ti._squeeze(block)[0]) is None
+    assert ti._cut_prefix(block[:-1], srcs, ti._squeeze(block)[0]) is not None, "control: without its period it is cut"
+
+
+def test_a_block_from_the_middle_of_a_line_is_not_its_opening():
+    """PREFIX claims OPENINGS only: a card can quote a later clause of a narrated line, and whether
+    that clause is whole cannot be told from the line. A line that repeats its own opening words
+    passes the cheap first-15-characters screen, so the alignment itself must start at the opening."""
+    src = "A strong science GPA matters, and a strong science GPA alone does not decide an application to medical school"
+    block = "a strong science GPA alone does not decide an application"
+    srcs = [(src, *ti._squeeze(src))]
+    assert ti._cut_prefix(block, srcs, ti._squeeze(block)[0]) is None
+    opening = "A strong science GPA matters, and a strong science GPA alone does not"
+    assert ti._cut_prefix(opening, srcs, ti._squeeze(opening)[0]) is not None, "control: the opening, cut, is flagged"
 
 
 def test_a_comma_inside_an_open_parenthesis_is_still_a_cut():
