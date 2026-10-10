@@ -142,11 +142,11 @@ def test_a_block_from_the_middle_of_a_line_is_not_its_opening():
     """PREFIX claims OPENINGS only: a card can quote a later clause of a narrated line, and whether
     that clause is whole cannot be told from the line. A line that repeats its own opening words
     passes the cheap first-15-characters screen, so the alignment itself must start at the opening."""
-    src = "A strong science GPA matters, and a strong science GPA alone does not decide an application to medical school"
-    block = "a strong science GPA alone does not decide an application"
+    src = "Choosing a major, choosing a major you can sustain, is the decision that shapes every semester of your plan"
+    block = "choosing a major you can sustain, is the decision that shapes every semester"
     srcs = [(src, *ti._squeeze(src))]
     assert ti._cut_prefix(block, srcs, ti._squeeze(block)[0]) is None
-    opening = "A strong science GPA matters, and a strong science GPA alone does not"
+    opening = "Choosing a major, choosing a major you can sustain, is the decision that shapes"
     assert ti._cut_prefix(opening, srcs, ti._squeeze(opening)[0]) is not None, "control: the opening, cut, is flagged"
 
 
