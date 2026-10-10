@@ -29,9 +29,20 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from google.cloud import firestore
+
+# THE STAMP RULE IS THE PACKAGE'S (kitesforu_qa.visual_readiness, #175 round 5): ONE definition of what
+# `visual.clips_settled_at` means, read by this script and by the verification job's wait. The three
+# states and their ABSENT-vs-NULL distinction moved there verbatim; this script used to own them.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.visual_readiness import (  # noqa: E402
+    STAMP_ABSENT,
+    STAMP_SETTLED,
+    settle_stamp_state,
+)
 
 PROJECT = "kitesforu-dev"
 COLLECTION = "podcast_jobs"
@@ -217,36 +228,6 @@ PROBES = {
 }
 
 
-#: Three states, and the ABSENT-vs-NULL distinction is load-bearing.
-#:
-#: workers stamps `visual.clips_settled_at` at the TERMINAL persist and CLEARS it
-#: to None on every partial (`worker.py:5217` / `:8690`), so:
-#:
-#:   non-empty str -> the array is the DELIVERED one. Trust it NOW.
-#:   None          -> present but cleared: a pass is IN FLIGHT. Keep waiting.
-#:   absent        -> the job predates the stamp. Fall back to the quiet period.
-#:
-#: Reading None as "no stamp" would hang on every in-flight job until max_wait;
-#: reading absent as "in flight" would hang on every job already in Firestore.
-#: Opposite diagnoses, one `in` check apart.
-_SETTLE_STAMP_KEY = "clips_settled_at"
-
-_STAMP_SETTLED = "settled"
-_STAMP_IN_FLIGHT = "in_flight"
-_STAMP_ABSENT = "absent"
-
-
-def settle_stamp_state(job: dict) -> str:
-    """Which of the three states the stamp reports for this job."""
-    visual = job.get("visual")
-    if not isinstance(visual, dict) or _SETTLE_STAMP_KEY not in visual:
-        return _STAMP_ABSENT
-    value = visual.get(_SETTLE_STAMP_KEY)
-    if isinstance(value, str) and value.strip():
-        return _STAMP_SETTLED
-    return _STAMP_IN_FLIGHT
-
-
 def read_settled(ref, *, quiet_s: float = 300.0, poll_s: float = 15.0,
                  max_wait_s: float = 1200.0):
     """Read a job doc only once it has stopped moving, and say so if it hasn't.
@@ -304,14 +285,19 @@ def read_settled(ref, *, quiet_s: float = 300.0, poll_s: float = 15.0,
         job = snap.to_dict() or {}
         quiet_for = _quiet_for(snap.update_time)
 
-        # PREFER THE STAMP. It is authoritative and instant: the producer knows
-        # it has written the delivered array, which no amount of waiting can
-        # infer. The quiet period stays as the fallback because it works on
-        # every job ALREADY in Firestore, which a new stamp never will.
+        # PREFER THE STAMP for what it is authoritative about: no pass is writing
+        # the array NOW (the incremental writer clears it on every partial write,
+        # the terminal persist sets it). It is NOT a promise that no later pass
+        # will run: the terminal persist stamps a pass whose purchased Veo op is
+        # still rendering too, and the hot-swap pass rewrites the array later
+        # (kitesforu_qa.visual_readiness, #175 round 5). For a clip COUNT on a job
+        # that bought clips, wait for the video ladder as well. The quiet period
+        # stays as the fallback because it works on every job ALREADY in
+        # Firestore, which a new stamp never will.
         state = settle_stamp_state(job)
-        if state == _STAMP_SETTLED:
+        if state == STAMP_SETTLED:
             return job, True, snap.update_time, quiet_for
-        if state == _STAMP_ABSENT and quiet_for >= quiet_s:
+        if state == STAMP_ABSENT and quiet_for >= quiet_s:
             return job, True, snap.update_time, quiet_for
         # state == IN_FLIGHT: the producer says a pass is running. Never trust
         # the quiet period here — the 47s and 151s gaps between bursts are long

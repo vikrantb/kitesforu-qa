@@ -82,15 +82,33 @@ def clips_fingerprint(clips: Any) -> str:
     Deliberately NOT a length: a later pass can rewrite the array while preserving its count, and the
     observed sequence (17 -> 2 -> 14 -> 16 -> 9) both grew and shrank, so a repeated count is not
     evidence of rest. Keys are sorted so dict ordering can never masquerade as a change.
+
+    A URL SIGNATURE IS NOT A CHANGE. ``GET /v1/podcasts/{id}/status`` re-signs ``asset_uri`` on every
+    read (api ``sign_visual_compartment``, ``max_signed_clips=1``: the poster clip), so the same clip
+    arrives with a new ``X-Goog-Signature`` each time, or as the bare public URL when signing fails.
+    Hashing that verbatim would never settle, so an ``asset_uri`` carrying a query string is hashed
+    without it (kitesforu-qa #175 round 5). A Firestore read carries no query string, so its
+    fingerprint is byte-identical to before.
     """
     if not isinstance(clips, list):
         return "not-a-list"
     try:
         return hashlib.sha256(
-            json.dumps(clips, sort_keys=True, default=str).encode("utf-8")
+            json.dumps(_unsigned(clips), sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()[:16]
     except Exception:  # noqa: BLE001 — a fingerprint must never raise on odd content
         return f"unhashable:{len(clips)}"
+
+
+def _unsigned(clips: list[Any]) -> list[Any]:
+    """``clips`` with each ``asset_uri``'s query string dropped. Only a clip that HAS one is copied."""
+    out: list[Any] = []
+    for clip in clips:
+        uri = clip.get("asset_uri") if isinstance(clip, dict) else None
+        if isinstance(uri, str) and "?" in uri:
+            clip = {**clip, "asset_uri": uri.split("?", 1)[0]}
+        out.append(clip)
+    return out
 
 
 def wait_for_settled_clips(
