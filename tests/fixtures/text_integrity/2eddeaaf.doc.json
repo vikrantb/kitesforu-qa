@@ -1,0 +1,122 @@
+{
+ "preferences": {
+  "_nonfiction_blueprint": {
+   "central_question": "How should a pre-med student compare majors when medical-school prerequisites are similar but the academic risks and opportunities are not?",
+   "worldview_shift": {
+    "listener_believes_before": "The best pre-med major is the one that checks off the most medical-school prerequisite courses and looks most familiar to admissions committees.",
+    "listener_believes_after": "The best major is the one whose complete four-year plan lets a particular student earn strong grades, prepare for the MCAT, complete each target school's requirements, and sustain meaningful clinical, service, or research experiences."
+   },
+   "segment_plan": [
+    {
+     "must_cover": [
+      "Pose the comparison question: what does a major actually buy an applicant?",
+      "decision correctly: medical schools generally — key responsibilities and skills",
+      "Carry one escalating through-line question the listener actively feels — raise the stakes of the mystery before you resolve it, so a \"wait, but then how...\" keeps pulling them through the middle instead of a flat march of facts.",
+      "COMPARISON — Neuroscience versus the traditional science majors: compare its possible blend of biology, psychology, chemistry, physics, statistics, and research with the substantial variation among universities.",
+      "Show the workload risk of adding laboratory science without allowing it to crowd out grades or sustained experiences.",
+      "Demonstrate the hidden trade-off: maximizing course overlap can compress difficult sequences into the same terms and reduce the quality of the resulting evidence.",
+      "ENUMERATION — The four competitiveness tests: prerequisite fit, GPA exposure, MCAT preparation, and schedule capacity for clinical, service, research, and shadowing experiences.",
+      "For each test, give a concrete question: Which target-school requirement is covered? What grade risk does the sequence create? Which MCAT foundation does it support? What meaningful time remains?",
+      "MSAR comparison tool, while individual — how it differs from similar roles",
+      "ENUMERATION — The final audit before choosing: list every target school's current prerequisite, laboratory, AP-credit, online-course, and timing policy; map each course by semester; estimate GPA and workload risk; reserve time for sustained experiences; review the plan with a pre-health advisor."
+     ]
+    }
+   ]
+  }
+ },
+ "segments_ready": [
+  {
+   "text_full": "Here's a counterintuitive thing to open with: the pre-med major that covers the most prerequisites on paper can actually make you a less competitive applicant."
+  },
+  {
+   "text_full": "Not because admissions committees penalize it — but because of what that major does to your GPA, your schedule, and your ability to sustain the clinical work that gets you in."
+  },
+  {
+   "text_full": "So the diploma label itself isn't the credential."
+  },
+  {
+   "text_full": "The major is the container."
+  },
+  {
+   "text_full": "The list varies."
+  },
+  {
+   "text_full": "So the first move is always: look up your target schools, not a general list."
+  },
+  {
+   "text_full": "So the prerequisite overlap is high."
+  },
+  {
+   "text_full": "The MCAT's biological and biochemical foundations section aligns well."
+  },
+  {
+   "text_full": "Organic chemistry, genetics lab, and cell biology in one semester is not unusual."
+  },
+  {
+   "text_full": "School prerequisites — does the major cover what your target schools actually require?"
+  },
+  {
+   "text_full": "MCAT coverage — which sections does this major's content support?"
+  },
+  {
+   "text_full": "And experience time — does the schedule leave room for sustained clinical work, research, or service?"
+  },
+  {
+   "text_full": "Every major decision runs through those four."
+  },
+  {
+   "text_full": "We should say that explicitly."
+  },
+  {
+   "text_full": "Those tables are descriptive, not prescriptive."
+  },
+  {
+   "text_full": "Now, chemistry and biochemistry — how do they compare?"
+  },
+  {
+   "text_full": "These majors go deeper into the chemical side."
+  },
+  {
+   "text_full": "General chemistry, organic chemistry, and biochemistry are often core requirements, which means strong MCAT preparation for the chemical and physical foundations section."
+  },
+  {
+   "text_full": "So a biochemistry major might have a gap on the biology side of the MCAT."
+  },
+  {
+   "text_full": "The overlap is valuable only when you can master the sequence and protect the science GPA."
+  },
+  {
+   "text_full": "So the interdisciplinary label can be misleading."
+  },
+  {
+   "text_full": "A biochemistry student at UW Bothell may have a very different required course list than one at UW Seattle."
+  },
+  {
+   "text_full": "Map every required course against your target schools' prerequisite lists."
+  },
+  {
+   "text_full": "Neuroscience can align with multiple MCAT areas — biological systems, behavior, even research methods."
+  },
+  {
+   "text_full": "What about psychology or humanities majors?"
+  },
+  {
+   "text_full": "So the major with more overlap isn't automatically the stronger plan."
+  },
+  {
+   "text_full": "It's demonstrated through the record."
+  },
+  {
+   "text_full": "What grade risk does this course create in the semester I'd take it?"
+  },
+  {
+   "text_full": "And after this course, how much time remains for meaningful clinical, service, or research continuity?"
+  },
+  {
+   "text_full": "Advanced science and biochemistry should ideally land before your MCAT date so the content is fresh."
+  },
+  {
+   "text_full": "So the diploma label is a starting constraint, not the finish line."
+  }
+ ]
+}

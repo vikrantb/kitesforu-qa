@@ -1,0 +1,57 @@
+{
+ "preferences": {
+  "_nonfiction_blueprint": {
+   "central_question": "Which pre-med courses are genuinely foundational, and which requirements must you verify school by school?",
+   "takeaway": "Choose the major you can excel in, then let a school-by-school prerequisite spreadsheet — not a borrowed checklist — be your protection against a missing requirement.",
+   "worldview_shift": {
+    "listener_believes_after": "There is a common academic core, but prerequisites are institution-specific and increasingly expressed as competencies; the safe plan distinguishes likely foundations from requirements that must be verified school by school."
+   },
+   "succes_plan": {
+    "concrete": [
+     "AP chemistry credit accepted at some schools (e.g., UC Davis) but not others (e.g., Johns Hopkins)"
+    ]
+   },
+   "segment_plan": [
+    {
+     "must_cover": [
+      "The Common Science Foundation — Enumeration of the recurring core courses most medical schools expect",
+      "Chemistry major: strong in gen chem and organic, but must add biology, physics, and writing deliberately",
+      "Engineering major: calculus and physics covered, but biology, organic chemistry, and biochemistry must be scheduled from scratch"
+     ]
+    }
+   ]
+  }
+ },
+ "segments_ready": [
+  {
+   "text_full": "Same MCAT score."
+  },
+  {
+   "text_full": "Three common cracks."
+  },
+  {
+   "text_full": "The safer move is just to take it."
+  },
+  {
+   "text_full": "A chemistry major's four-year plan doesn't naturally include sociology."
+  },
+  {
+   "text_full": "Different schools — different answers."
+  },
+  {
+   "text_full": "So the mechanism underneath all of this — why schools differ at all — what's actually driving that?"
+  },
+  {
+   "text_full": "Chemistry major?"
+  },
+  {
+   "text_full": "Engineering major: calculus and physics are covered — often more rigorously than the pre-med versions."
+  },
+  {
+   "text_full": "Choose the major you can excel in — then build a school-by-school prerequisite spreadsheet, not a borrowed checklist."
+  },
+  {
+   "text_full": "The common core — biology, chemistry, organic chemistry, physics, writing — those recur so reliably you can count on them."
+  }
+ ]
+}

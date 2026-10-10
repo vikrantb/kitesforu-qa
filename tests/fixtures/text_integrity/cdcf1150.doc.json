@@ -1,0 +1,22 @@
+{
+ "preferences": {
+  "_nonfiction_blueprint": {
+   "central_question": "When does changing an undergraduate major improve a student's path to medical school, and when does it create avoidable academic risk?",
+   "segment_plan": [
+    {
+     "must_cover": [
+      "Summer coursework and financial-aid implications of extending the timeline"
+     ]
+    }
+   ]
+  }
+ },
+ "segments_ready": [
+  {
+   "text_full": "Summer coursework, extended enrollment — it adds up fast."
+  },
+  {
+   "text_full": "Don't change the wrapper until the product's blueprint is conflict-free on paper."
+  }
+ ]
+}

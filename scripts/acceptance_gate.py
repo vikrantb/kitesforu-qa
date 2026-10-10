@@ -82,6 +82,14 @@ def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
     return None
 
 
+def _is_photo_frame(clips: list[dict] | None, index: int) -> bool:
+    """Is extracted frame ``index`` a generated photo (``scene_image``)? A photo legitimately bleeds
+    to every edge and can carry legible-looking text there, so the frame rules skip it. ONE
+    predicate for every rule that skips photos (the pixel edge rule and the text-integrity probe),
+    so the frame->clip mapping is changed in one place."""
+    return _clip_modality_at(clips, index * _FRAME_INTERVAL_MS) == "scene_image"
+
+
 def _sample_indices(n: int, want: int = 12) -> list[int]:
     """The frame indices `_pixel_invariants` inspects — EXTRACTED so a test can exercise the real
     arithmetic instead of restating it.
@@ -223,7 +231,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
         # A photo beat legitimately bleeds to every edge — the pipeline's own checker never
         # inspects one. Skip the rule, do not merely discount it.
-        if _clip_modality_at(clips, idx * _FRAME_INTERVAL_MS) == "scene_image":
+        if _is_photo_frame(clips, idx):
             edge_skipped_photo += 1
         else:
             edge_checked += 1
@@ -245,6 +253,26 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
             f"the frame edge — content likely cut off-frame{skipped}")})
     return issues
+
+
+def _text_integrity(frames: list[str], doc: dict[str, Any], clips: list[dict] | None) -> dict[str, Any]:
+    """Invariant D (`scripts/text_integrity.py`): EVERY non-photo frame OCR'd for text cut by the frame
+    edge, by a length cap's ellipsis, or shown only up to a point where a line the job authored does
+    not end. The pixel rule above reads 12 frames and fires only when a third of them show edge
+    structure; course 8a64fcff's four lessons passed it with cut text on all four (hero critic Elena,
+    2026-10-08). Photo frames are skipped exactly as the pixel rule skips them. OCR unavailable is
+    reported as a MAJOR "not checked", never as a pass."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import text_integrity
+
+    result = text_integrity.check_frames(
+        frames, doc,
+        skip=lambda i: _is_photo_frame(clips, i),
+    )
+    found = text_integrity.issues(result)
+    summary = {k: result[k] for k in ("status", "frames_checked", "frames_failed", "frames_skipped_photo")}
+    summary["flagged"] = {name: sorted({f["kind"] for f in fs}) for name, fs in result["flagged"].items()}
+    return {"issues": found, "summary": summary}
 
 
 def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
@@ -288,12 +316,17 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     frames = _extract_frames(tmp, fdir)
     issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
+    # Invariant D: no text on screen is CUT — by the frame, by a length cap's ellipsis, or by a
+    # budget or its own box — read from every non-photo frame (`text_integrity`, course 8a64fcff).
+    text_cut = _text_integrity(frames, d, clips)
+    issues.extend(text_cut["issues"])
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
+            "text_integrity": text_cut["summary"],
             "persona": persona or None,
             "next": _adversary_brief(persona)}
 
