@@ -1035,6 +1035,17 @@ def test_the_audio_band_follows_the_duration_where_its_basis_is_known(harness, w
     assert needle in _est(r.stderr), _est(r.stderr)
 
 
+def test_a_born_short_purchase_names_the_paid_sites_it_does_not_bound(harness, workers_src):
+    """A born-short also reaches short_photoreal and concrete_referent_images, which one plan's terms do not
+    bound. The line names them, once, as a term of its own."""
+    r = harness.run("--dry-run", "--short", "--duration", "1.0", "--motion-clips", "1", env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, r.stderr
+    est = _est(r.stderr)
+    assert est.count(" + born-short photoreal/referent stills NOT BOUNDED here") == 1 and "+ +" not in est, est
+    plain = harness.run("--dry-run", "--duration", "1.0", "--motion-clips", "1", env={"WORKERS_SRC": workers_src})
+    assert "born-short" not in _est(plain.stderr)
+
+
 def test_visuals_auto_prices_the_authors_it_runs():
     """--visuals-auto lets the visuals pass author diagrams (LLM calls), so its estimate says so; the T3
     default opts out of visuals and does not."""

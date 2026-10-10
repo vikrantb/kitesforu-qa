@@ -438,7 +438,7 @@ def estimate(body: Dict[str, Any], *, clips: Optional[ClipQuote] = None,
         terms += images.terms(n_stills)
         detail += images.detail(n_stills)
         if short:
-            terms.append((0.0, 0.0, "+ born-short photoreal/referent stills NOT BOUNDED here"))
+            terms.append((0.0, 0.0, "born-short photoreal/referent stills NOT BOUNDED here"))
     if len(terms) == 1:
         return Estimate(text=terms[0][2], low=terms[0][0], high=terms[0][1], detail=detail)
     parts = [f"audio {terms[0][2]}"] + [t[2] for t in terms[1:]]
