@@ -69,13 +69,17 @@ import argparse
 import collections
 import datetime
 import sys
+from pathlib import Path
 
 sys.path.insert(0, "scripts")
 sys.path.insert(0, "../kitesforu-workers/src")
+# The settle-stamp rule is the package's ONE definition (#175 round-6 design D2): this tree's `src`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from google.cloud import firestore  # noqa: E402
 
 from capture_starved_measurements import COLLECTION, PROJECT  # noqa: E402
+from kitesforu_qa.visual_readiness import STAMP_SETTLED, settle_stamp_state  # noqa: E402
 from image_census_rules import legacy_per_clip_count  # noqa: E402
 from workers.common.architect_wiring import (  # noqa: E402
     _FICTION_CONTENT_CATEGORIES as FIC,
@@ -252,9 +256,10 @@ def main() -> int:
             visual_no_clips.append(d.id[:8])
             continue
 
-        # TRAP 3 — only a non-empty settle stamp means the array is the delivered one.
-        stamp = v.get("clips_settled_at")
-        if not (isinstance(stamp, str) and stamp):
+        # TRAP 3 — only a SETTLED stamp means the array is the delivered one, by the package's rule. This
+        # script used to read it itself and called a whitespace stamp settled, where the package says
+        # in flight (#175 round-6 design D2).
+        if settle_stamp_state(j) != STAMP_SETTLED:
             unsettled.append(d.id[:8])
             continue
         settled += 1

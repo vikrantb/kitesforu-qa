@@ -6,6 +6,7 @@ from typing import Optional
 import requests
 
 from ..config import get_config
+from ..job_status import TERMINAL
 
 
 class KitesForUClient:
@@ -122,10 +123,10 @@ class KitesForUClient:
             job = self.get_job(job_id)
             status = job.get('status', '').lower()
 
-            if status in ('completed', 'complete', 'done'):
-                return job
-
-            if status in ('failed', 'error', 'cancelled'):
+            # Every terminal status, from the one list (kitesforu_qa.job_status). This stopped on
+            # completed|complete|done|failed|error|cancelled, so a finished needs_review or
+            # failed_qa episode polled to the timeout and raised TimeoutError.
+            if status in TERMINAL:
                 return job
 
             time.sleep(poll_interval)

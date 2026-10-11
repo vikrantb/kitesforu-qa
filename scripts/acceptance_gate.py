@@ -21,7 +21,16 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
+
+# The package's ONE readiness rule (stdlib only): this tree's `src`, never an installed copy.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from kitesforu_qa.visual_readiness import (  # noqa: E402
+    PHASE_READY,
+    VisualReadiness,
+    is_delivered_hero_clip,
+)
 
 _EDU_KEYS = ("explain", "educat", "understand", "how ", "what is", "concept",
             "informational", "tutorial", "guide", "why do", "why does")
@@ -252,9 +261,17 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
     topic = d.get("topic") or d.get("title") or ""
     vis = d.get("visual") or {}
     clips = vis.get("clips") or []
-    # PRODUCE: the SURFACED url the watch page reads — never an intermediate render path.
+    # PRODUCE: the SURFACED url the watch page reads — never an intermediate render path. And only once the
+    # ladder says it is the master the watch page shows. The api writes the URL BEFORE the status settles, so
+    # a URL beside `assembling` (a re-mux after a hot-swap) is a master about to be replaced, and the frontend
+    # shows "rendering", not this file (#175 round-6 design D2: the gate read the URL with no ladder check).
     url = vis.get("video_url") or vis.get("video_burned_url")
     issues: list[dict[str, str]] = []
+    phase, why = VisualReadiness.from_visual(vis).video_phase(expected=True)
+    if phase != PHASE_READY:
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
+                "issues": [{"sev": "BLOCKER", "msg": f"NOT SURFACED: the video is {phase} ({why}), not the master "
+                                                     "the watch page shows"}]}
     if not url:
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
@@ -278,7 +295,9 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
     ct = str((d.get("audio_config") or {}).get("content_type") or d.get("content_type") or "").lower()
     genre = str(d.get("genre") or "").lower()
     edu = any(k in (ct + genre + topic.lower()) for k in _EDU_KEYS)
-    veo = [c for c in clips if c.get("modality") == "video_hero"]
+    # The producer's hero predicate (`veo_hero.is_hot_swapped`, via the package): a reclaimed STILL stamped
+    # `video_hero` by degrade_ladder is not a Veo clip and must not count toward an off-topic finding.
+    veo = [c for c in clips if is_delivered_hero_clip(c)]
     if edu and veo:
         issues.append({"sev": "MAJOR", "msg": (
             f"OFF-TOPIC RISK: {len(veo)} abstract Veo video_hero clips on EDUCATIONAL content "

@@ -101,6 +101,10 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Import THIS tree's package, not whatever the venv has installed. The shared venv carries an
+# editable install of the MAIN checkout, so a worktree's tests otherwise run that checkout's
+# kitesforu_qa (whatever branch it is on), not the code under review.
+pythonpath = ["src"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
