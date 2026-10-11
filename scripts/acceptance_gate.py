@@ -61,19 +61,58 @@ def _extract_frames(mp4: str, out_dir: str) -> list[str]:
     """OBSERVE: one frame every ~3s across the FULL duration (never one hero frame)."""
     os.makedirs(out_dir, exist_ok=True)
     subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", "fps=1/3,scale=540:-1",
-                    os.path.join(out_dir, "f_%03d.png")],
+                    os.path.join(out_dir, "f_%05d.png")],
                    capture_output=True)
-    return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".png"))
+    return _frames_in_order(out_dir)
 
 
-#: `_extract_frames` runs ffmpeg at `fps=1/3`, so output frame i (0-based) is the video at
-#: i*3 seconds. Named rather than inlined because the frame->clip mapping below is only as
-#: correct as this constant, and the two must be changed together.
+def _frames_in_order(out_dir: str) -> list[str]:
+    """Frame files in TIME order. A string sort puts f_1000 before f_101 (past ~50 minutes at one
+    frame per 3 s), which scrambles every timestamp after it; the frame number decides."""
+    def _n(name: str) -> int:
+        try:
+            return int(name[2:-4])
+        except ValueError:
+            return 10 ** 9
+    names = [f for f in os.listdir(out_dir) if f.startswith("f_") and f.endswith(".png")]
+    return [os.path.join(out_dir, f) for f in sorted(names, key=_n)]
+
+
+#: `_extract_frames` runs ffmpeg at `fps=1/3`: output frame i (0-based) is taken from inside the
+#: video's [3i, 3i+3) s window. Named rather than inlined because the frame->clip mapping below is
+#: only as correct as this constant, and the two must be changed together.
 _FRAME_INTERVAL_MS = 3000
 
 
-def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
-    """The authored modality of the clip covering ``ts_ms``, or None when unknown.
+def _frame_time_ms(i: int) -> int:
+    """Where frame i sits in the video: the MIDDLE of its window. ffmpeg's fps filter takes the
+    frame at about 3i+1.3 s (measured by the #187 review from the luma clock), not 3i; using 3i
+    mapped 33 of the 850 census frames to the wrong clip (a photo checked as a diagram)."""
+    return i * _FRAME_INTERVAL_MS + _FRAME_INTERVAL_MS // 2
+
+
+#: Modalities whose pixels are photographed or filmed: they bleed to every edge by design, so the
+#: edge rule never inspects them. `ai_generated` (any diffusion image or Veo clip) counts too: the
+#: first version exempted `scene_image` alone, and Veo footage (`video_hero`) then made 19 of the
+#: 151 run frames in the census.
+_FOOTAGE_MODALITIES = frozenset({"scene_image", "video_hero"})
+
+
+def _is_footage(clip: dict | None) -> bool:
+    """True when the clip's pixels are a picture. A picture reframed into a card slot keeps
+    `modality: diagram` and `ai_generated: False`, but its `visual_register` says "photo": 11 of
+    the 393 census clips are diagram/photo, and the one RUN on them (33ae4811 123-129 s, a
+    full-bleed office scene) was a false positive. No real cut or margin touch in the census sits
+    on a photo-register clip. "cartoon" is NOT exempt: diagram/cartoon clips exist and none was
+    examined."""
+    if not clip:
+        return False
+    return (clip.get("modality") in _FOOTAGE_MODALITIES or clip.get("ai_generated") is True
+            or clip.get("visual_register") == "photo")
+
+
+def _clip_at(clips: list[dict] | None, ts_ms: int) -> dict | None:
+    """The clip covering ``ts_ms``, or None when unknown.
 
     None is returned for BOTH "no clips supplied" and "no clip covers this timestamp", and both
     mean the same thing to the caller: keep checking. Absence must never be read as permission
@@ -86,41 +125,8 @@ def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
         except (TypeError, ValueError):
             continue
         if dur > 0 and start <= ts_ms < start + dur:
-            m = c.get("modality")
-            return m if isinstance(m, str) and m else None
+            return c
     return None
-
-
-def _sample_indices(n: int, want: int = 12) -> list[int]:
-    """The frame indices `_pixel_invariants` inspects — EXTRACTED so a test can exercise the real
-    arithmetic instead of restating it.
-
-    That distinction is the reason this function exists. The first test written for this fix
-    recomputed the stride itself, so reverting the source left it green: it tested a copy of the
-    rule, not the rule. Anything that re-derives the logic under test is not testing it.
-
-    THE ORIGINAL DEFECT. Plain `n // want` FLOORS to 1 for any n in 13..23 and `[::1][:12]` then
-    takes the FIRST twelve frames, so a 22-frame video was scored on its first 36 seconds.
-    Measured 2026-09-01 with `(max(f)-min(f)+1)/n` over `_sample_indices`: 18 frames -> 67%,
-    22 -> 55%, 23 -> 52%.
-
-    WHY NOT A CEILING STRIDE. The first fix used `step = max(1, -(-n // want))`, which spans the
-    array but returns `ceil(n/step)` frames — BELOW the 12 it asks for on 55 of the 229 counts in
-    12..240, bottoming out at 7 of 13. The #172 code-critic lens caught it; re-derived here with
-    `len([n for n in range(12,241) if len(_sample_indices(n)) < min(n,12)]) == 55`. That also drags
-    both verdict thresholds down with it, since `max(2, len(samp)//2)` and `max(2, edge//3)` are
-    derived from the sample size — the gate would have become thinner AND more trigger-happy.
-
-    Even spacing wins both axes at once: exactly `min(n, want)` indices, first and last frame
-    always included (`i*(n-1)//(want-1)` lands on `n-1` at `i == want-1`, which a stride misses at
-    n=14,16,18,20,22,...), so coverage is 100% at every n. Verified 2026-09-01 across n in 2..240:
-    never short, never clustered, last index always `n-1`.
-    """
-    if n <= 0:
-        return []
-    if n <= want:
-        return list(range(n))
-    return [i * (n - 1) // (want - 1) for i in range(want)]
 
 
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
@@ -158,40 +164,36 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     try:
         import numpy as np
         from PIL import Image
-    except ImportError:
-        return issues
+    except ImportError as exc:
+        # LOUD, never an empty list. Returning no issues here made the gate say PASS_DETERMINISTIC
+        # without looking at a single pixel: the 2026-10-11 frame census ran in a venv that had
+        # drifted from the declared `Pillow>=10`, and all 8 "passes" were this branch.
+        return [{"sev": "BLOCKER", "msg": (
+            f"PIXEL INVARIANTS DID NOT RUN: {exc}. Install the declared dependencies "
+            "(pip install -e . in kitesforu-qa); a gate that cannot look must not pass.")}]
     if not frames:
-        return issues
-    # SPAN THE WHOLE VIDEO. `len(frames) // 12` FLOORS to 1 for any count in 13..23, and
-    # `[::1][:12]` then takes the FIRST twelve frames — so a 22-frame video (about 66s at the
-    # fps=1/3 extraction above) was scored on its first 36 seconds and the rest was never looked
-    # at. Measured 2026-09-02::
-    #
-    #     frames  old step  old window   coverage
-    #        18       1       0..11         67%
-    #        22       1       0..11         55%
-    #        23       1       0..11         52%
-    #        24       2       0..22         96%   <- only once the floor reaches 2
-    #
-    # Found by correlating a real job: `0082f988` carries `maps_sequence` at beats 6-7, which
-    # occupy 57.9-66.6s = frames 19..22 — entirely outside the sampled window, so a MAJOR
-    # edge-clip verdict on that job said nothing whatever about its map frames.
-    #
-    # This is the gate `.claude/rules/02-done.md` relies on precisely because it "scores every
-    # frame across the full duration rather than one hero frame". For a whole band of realistic
-    # durations it scored the first half. `-(-n // 12)` is ceiling division, so the stride always
-    # spans the array.
-    # Keep the ORIGINAL index alongside the path — it is the only thing that maps a frame back to
-    # a timestamp, and therefore to the clip that authored it.
-    samp = [(i, frames[i]) for i in _sample_indices(len(frames))]
+        # Same rule as the missing dependency: no frames means nothing was inspected, and that is
+        # never a pass (the #187 review: a 403 body saved as the .mp4 extracted 0 frames and
+        # the job PASSED).
+        return [{"sev": "BLOCKER", "msg": "NO FRAMES INSPECTED: the extraction produced no frames"}]
+    # EVERY FRAME, not a sample. The gate used to inspect 12 evenly spaced frames and flag edge-clip
+    # only when a third of them clipped, so a defect lasting a few seconds could not register. A frame
+    # costs milliseconds here, so there is nothing to save by sampling. On the 2026-10-11 frame census
+    # this newly flags 2 of 9 episodes; the census's PASS verdicts themselves came from the missing
+    # Pillow (the ImportError branch above). The ORIGINAL index stays with each path: it is the only
+    # thing that maps a frame back to a time, and so to the clip that authored it.
+    inspected = list(enumerate(frames))
     letterbox = edge_clip = 0
-    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
+    readable = 0
+    edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (footage is skipped)
     edge_skipped_photo = 0
-    for idx, fp in samp:
+    clipped: list[tuple[int, frozenset]] = []  # (frame index, clipped edges), in order, for the RUN rule
+    for idx, fp in inspected:
         try:
             im = np.asarray(Image.open(fp).convert("L"), dtype=float)
         except Exception:  # noqa: BLE001 — a bad frame is skipped, never fatal
             continue
+        readable += 1
         h = im.shape[0]
         band = max(1, int(h * 0.10))
         top, bot, mid = im[:band], im[-band:], im[band:-band]
@@ -230,30 +232,73 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             return int((np.abs(np.diff(strip, axis=0)) > 28).sum())
         def _hsteps(strip):
             return int((np.abs(np.diff(strip, axis=1)) > 28).sum())
-        # A photo beat legitimately bleeds to every edge — the pipeline's own checker never
-        # inspects one. Skip the rule, do not merely discount it.
-        if _clip_modality_at(clips, idx * _FRAME_INTERVAL_MS) == "scene_image":
+        # Footage (a photo, an illustration, Veo) legitimately bleeds to every edge: the pipeline's own
+        # checker never inspects one. Skip the rule, do not merely discount it.
+        if _is_footage(_clip_at(clips, _frame_time_ms(idx))):
             edge_skipped_photo += 1
         else:
             edge_checked += 1
-            if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
-                    or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
+            edges = frozenset(e for e, hit in (
+                ("left", _vsteps(im[:, :mw]) >= 12), ("right", _vsteps(im[:, -mw:]) >= 12),
+                ("top", _hsteps(im[:mh, :]) >= 12), ("bottom", _hsteps(im[-mh:, :]) >= 12)) if hit)
+            if edges:
                 edge_clip += 1
-    if letterbox >= max(2, len(samp) // 2):
+                clipped.append((idx, edges))
+    if not readable:
+        return [{"sev": "BLOCKER", "msg": (
+            f"NO FRAMES INSPECTED: none of the {len(frames)} extracted frame(s) could be read")}]
+    if letterbox >= max(2, readable // 2):
         issues.append({"sev": "MAJOR", "msg": (
-            f"LETTERBOX: {letterbox}/{len(samp)} frames show a persistent dark band — content "
+            f"LETTERBOX: {letterbox}/{readable} frames show a persistent dark band — content "
             "not filling the vertical frame (authored for the wrong aspect)")})
     # THE DENOMINATOR IS WHAT WAS CHECKED, not what was sampled. Dividing by the full sample
     # after skipping photos would make a photo-heavy job progressively harder to flag — the gate
     # would quietly weaken on exactly the jobs where the skip applies, which is the opposite of
     # what the skip is for.
     if edge_checked and edge_clip >= max(2, edge_checked // 3):
-        skipped = (f" ({edge_skipped_photo} photo frame(s) exempt — a scene_image bleeds to the "
-                   "edge by design)") if edge_skipped_photo else ""
+        skipped = (f" ({edge_skipped_photo} footage frame(s) exempt — a photo, illustration or Veo "
+                   "clip bleeds to the edge by design)") if edge_skipped_photo else ""
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
             f"the frame edge — content likely cut off-frame{skipped}")})
+    # RUN rule: content at the SAME edge on 2+ CONSECUTIVE frames (3+ seconds held, not a
+    # slide-in passing the edge) is a defect a viewer sees, however clean the rest of the episode
+    # is. The rate rule above cannot see it on a long episode; this one names WHEN. "Same edge"
+    # matters: the first version chained any edge, and alternating L/R/RB frames (a camera pan)
+    # read as one long cut.
+    # PRECISION, measured 2026-10-11 by reading every flagged run's frames (44 runs, 6 census
+    # episodes, one adversary per episode): 27 cut content off-frame, 15 sat inside the 3% margin
+    # without cutting, 2 were pictures. So the message says "cut or inside the margin", and the
+    # finding is MAJOR (REVIEW, with the times for the adversary), not a BLOCKER.
+    runs = _runs(clipped, min_len=2)
+    if runs:
+        spans = ", ".join(f"{a * _FRAME_INTERVAL_MS // 1000}-{(b + 1) * _FRAME_INTERVAL_MS // 1000}s "
+                          f"({'/'.join(sorted(e))})" for a, b, e in runs)
+        issues.append({"sev": "MAJOR", "msg": (
+            f"EDGE-CLIP RUN: content held at the same frame edge on consecutive frames at {spans} "
+            f"({len(runs)} run(s), {sum(b - a + 1 for a, b, _ in runs)} frame(s)): cut off-frame "
+            "or inside the 3% margin")})
     return issues
+
+
+def _runs(clipped: list[tuple[int, frozenset]], min_len: int = 2) -> list[tuple[int, int, frozenset]]:
+    """Maximal runs of consecutive frames that keep at least one clipped edge in common, as
+    (first index, last index, the shared edges), keeping runs of `min_len` frames or more."""
+    runs: list[tuple[int, int, frozenset]] = []
+    start = prev = None
+    shared: frozenset = frozenset()
+    for i, edges in clipped:
+        if prev is not None and i == prev + 1 and shared & edges:
+            shared = shared & edges
+            prev = i
+            continue
+        if start is not None and prev - start + 1 >= min_len:
+            runs.append((start, prev, shared))
+        start = prev = i
+        shared = frozenset(edges)
+    if start is not None and prev - start + 1 >= min_len:
+        runs.append((start, prev, shared))
+    return runs
 
 
 def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
@@ -278,11 +323,16 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
 
     tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4")
     subprocess.run(["gsutil", "-q", "cp", url, tmp] if url.startswith("gs://")
-                   else ["curl", "-sL", "-o", tmp, url], check=False)
+                   else ["curl", "-fsSL", "-o", tmp, url], check=False)
     if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]}
     vw, vh, dur = _probe_dims(tmp)
+    if not (vw and vh):
+        # An error page or a truncated download saved under .mp4 has no video stream. Say so; never
+        # let it reach extraction and come back as zero frames.
+        return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
+                "issues": [{"sev": "BLOCKER", "msg": f"NOT A VIDEO: the fetched artifact has no video stream ({url})"}]}
     vertical = bool(vw and vh and vh > vw)
 
     # PROBE — invariant A: authored clip orientation must match the render target.

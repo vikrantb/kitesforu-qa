@@ -20,9 +20,11 @@ import pathlib
 
 import pytest
 
-np = pytest.importorskip("numpy")
-PIL_Image = pytest.importorskip("PIL.Image")
-PIL_ImageDraw = pytest.importorskip("PIL.ImageDraw")
+# Declared dependencies (pyproject: numpy, Pillow), so imported, never importorskip'd: a skip hid
+# that the qa venv had drifted without Pillow, and the gate then passed jobs it had not looked at.
+import numpy as np
+import PIL.Image as PIL_Image
+import PIL.ImageDraw as PIL_ImageDraw
 
 _GATE = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "acceptance_gate.py"
 
