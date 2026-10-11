@@ -26,10 +26,14 @@
 #   NOTHING WAS CREATED: 1 usage, pricing or auth refusal, or the api REJECTED the request (HTTP 4xx)
 #                        · 2 bad --on-behalf-of · 3 the founder ACK is needed
 #   A JOB MAY EXIST:     8 the POST's outcome is unknown (transport failure or timeout, HTTP 5xx, or no
-#                        job id in the reply). Check the owner's library before re-running.
+#                        job id in the reply), OR the script stopped for a reason it did not explain once the
+#                        POST had gone out (a failing command, or SIGTERM/SIGHUP/SIGINT). An owner short on
+#                        CREDITS lands here too: the api answers that refusal with HTTP 500, not a 4xx.
+#                        Check the owner's library before re-running.
 #   THE JOB WAS CREATED (its id is printed): 0 ok · 4 --wait ran out (NOT a result) · 5 ended with
 #                        nothing to grade · 6 the api stored LESS than asked · 7 the stored request could
 #                        not be read · 9 its status could not be read while waiting
+#   A signal BEFORE the POST exits 128+N, the shell's own convention: nothing was sent.
 #
 # Auth: TEST_API_KEY env var, or fetched from Secret Manager (kitesforu-dev).
 
@@ -40,26 +44,49 @@ ACK_FILE="/Users/vikrantbhosale/gitprojects/kitesforu/.claude/FOUNDER_SPEND_ACK"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # ONE EXIT TRAP. It removes the temporary workers tree, and once the POST has gone out it makes every exit
-# that did not explain itself say whether a job exists, so no path after the POST can leave a caller
-# guessing whether a retry buys the job twice (#175 round-5 code critic F3, latency L3). A deliberate
-# exit calls `finish`, which marks it explained.
+# that did not explain itself say whether a job exists AND exit 8, so no path after the POST can leave a caller
+# guessing whether a retry buys the job twice (#175 round-5 code critic F3, latency L3). A deliberate exit
+# calls `finish`, which marks it explained.
+#
+# THE CODE FOLLOWS THE STATE, NOT THE FAILING COMMAND (#175 round-6 critic F1). The trap used to `return 0`,
+# and an EXIT trap that does not call `exit` leaves the status alone. So an unexplained `set -e` stop after the
+# POST kept the failing command's own code: a `sleep` that exited 1, 2 or 3, or `job_status.py` exiting 1, read
+# as "NOTHING WAS CREATED" to a caller keying on the classes, while stderr said "do not re-run". It is exit 8
+# now, the "a job MAY exist" class, whatever stopped it.
+#
+# A SIGNAL IS A STOP TOO. On SIGTERM or SIGHUP, `$?` inside the EXIT trap is the last command's status, so a
+# --wait ended by a tool timeout or a closed terminal said nothing at all. TERM, HUP and INT are trapped, named
+# and routed through the same exit. The wait's sleep runs in the background under `wait`, so a signal is acted
+# on at once rather than after the sleep, and the trap stops that sleep.
 WORKERS_TREE=""
 POST_STATE="unsent"   # unsent | sent (outcome unknown) | rejected (HTTP 4xx) | created (JOB_ID known)
 JOB_ID=""
 EXPLAINED="false"
+SIGNALLED=""
+SLEEP_PID=""
 finish() { EXPLAINED="true"; exit "$1"; }
 on_exit() {
   local rc=$?
-  [[ -n "$WORKERS_TREE" ]] && rm -rf "$WORKERS_TREE"
-  if (( rc != 0 )) && [[ "$EXPLAINED" != "true" ]]; then
-    case "$POST_STATE" in
-      sent)    echo "Stopped (exit $rc) after the POST went out: a job MAY exist. Check the owner's library before re-running." >&2 ;;
-      created) echo "Stopped (exit $rc): job $JOB_ID WAS created. Do not re-run to retry it; read it instead." >&2 ;;
-    esac
-  fi
+  # `|| true`: a failing cleanup must not end the trap (errexit applies inside it) before the `exit 8` below.
+  [[ -n "$SLEEP_PID" ]] && { kill "$SLEEP_PID" 2>/dev/null || true; }
+  [[ -n "$WORKERS_TREE" ]] && { rm -rf "$WORKERS_TREE" || true; }
+  [[ "$EXPLAINED" == "true" ]] && return 0
+  (( rc != 0 )) || [[ -n "$SIGNALLED" ]] || return 0
+  local why="exit $rc"
+  [[ -n "$SIGNALLED" ]] && why="SIG$SIGNALLED"
+  case "$POST_STATE" in
+    sent)    echo "Stopped ($why) after the POST went out: a job MAY exist. Check the owner's library before re-running." >&2
+             exit 8 ;;
+    created) echo "Stopped ($why): job $JOB_ID WAS created. Do not re-run to retry it; read it instead." >&2
+             exit 8 ;;
+  esac
   return 0
 }
+on_signal() { SIGNALLED="$1"; exit "$2"; }
 trap on_exit EXIT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
+trap 'on_signal INT 130' INT
 # The kitesforu-workers checkout whose origin/main prices a purchased clip or still: its own
 # selector and catalog, read from a temporary `git archive`, never from the working tree (a lane's
 # feature branch is not what serves). Read only when the job buys clips. Same root as ACK_FILE.
@@ -190,34 +217,43 @@ if [[ "$PAID_STILLS_GIVEN" == "true" && "$MOTION_CLIPS" == "0" ]]; then
   exit 1
 fi
 
-# ---- The producer that prices a purchase: a temporary tree of kitesforu-workers origin/main ---
-# Only when the job buys clips (and the stills that ride with them). WORKERS_SRC=<tree>/src
-# overrides it, and the tree's ../config/model_catalog.csv is the catalog. A job that buys
-# nothing priced needs no tree, so the T3 default path reads no repo and runs no git.
+# ---- The producer: a temporary tree of kitesforu-workers origin/main, under the workers interpreter ---
+# Read when the job buys clips (and the stills that ride with them), to price them, and before a --wait for a
+# video, to read the producer's by-design no-video reasons. WORKERS_SRC=<tree>/src overrides it, and the
+# tree's ../config/model_catalog.csv is the catalog. A job that buys nothing priced and waits for no video
+# needs no tree, so the T3 default path reads no repo and runs no git.
 WORKERS_SRC_FOR_PLAN=""
 CATALOG_LABEL=""
-PLAN_PY="python3"
-if [[ "$MOTION_CLIPS" != "0" ]]; then
+# `ensure_workers_tree "<what it is for>"`: sets WORKERS_SRC_FOR_PLAN (and CATALOG_LABEL) once, or says why it
+# cannot and returns 1. It never exits, so each caller decides what a missing producer means: pricing refuses,
+# the wait warns and keeps the frontend's rule.
+ensure_workers_tree() {
+  local purpose="$1" _wsha _wdate
+  [[ -n "$WORKERS_SRC_FOR_PLAN" ]] && return 0
   if [[ ! -x "$WORKERS_PY" ]] || ! "$WORKERS_PY" -c 'import sys' >/dev/null 2>&1; then
-    echo "Refusing: cannot price the clips this job buys. The workers interpreter '$WORKERS_PY' is missing or" >&2
+    echo "Refusing: cannot $purpose. The workers interpreter '$WORKERS_PY' is missing or" >&2
     echo "does not run. Pricing imports the workers selector, so it runs under the workers venv: create it" >&2
-    echo "(kitesforu-workers/.venv) or set KFU_WORKERS_PYTHON. Nothing was sent." >&2
-    exit 1
+    echo "(kitesforu-workers/.venv) or set KFU_WORKERS_PYTHON." >&2
+    return 1
   fi
-  PLAN_PY="$WORKERS_PY"
   if [[ -n "${WORKERS_SRC:-}" ]]; then
     WORKERS_SRC_FOR_PLAN="$WORKERS_SRC"
     CATALOG_LABEL="WORKERS_SRC=$WORKERS_SRC (explicit)"
-  else
-    _wsha=$(git -C "$WORKERS_REPO" rev-parse --verify --quiet "origin/main^{commit}") \
-      || { echo "Refusing: cannot price the clips this job buys. No origin/main in $WORKERS_REPO (set KFU_WORKERS_REPO or WORKERS_SRC)." >&2; exit 1; }
-    _wdate=$(git -C "$WORKERS_REPO" log -1 --format=%cs "$_wsha")
-    WORKERS_TREE=$(mktemp -d "${TMPDIR:-/tmp}/kfu-verify-workers.XXXXXX")
-    git -C "$WORKERS_REPO" archive "$_wsha" -- src/workers config/model_catalog.csv | tar -x -C "$WORKERS_TREE" \
-      || { echo "Refusing: cannot price the clips this job buys. git archive of workers $_wsha failed." >&2; exit 1; }
-    WORKERS_SRC_FOR_PLAN="$WORKERS_TREE/src"
-    CATALOG_LABEL="kitesforu-workers origin/main ${_wsha:0:12} ($_wdate) select_provider + config/model_catalog.csv"
+    return 0
   fi
+  _wsha=$(git -C "$WORKERS_REPO" rev-parse --verify --quiet "origin/main^{commit}") \
+    || { echo "Refusing: cannot $purpose. No origin/main in $WORKERS_REPO (set KFU_WORKERS_REPO or WORKERS_SRC)." >&2; return 1; }
+  _wdate=$(git -C "$WORKERS_REPO" log -1 --format=%cs "$_wsha")
+  WORKERS_TREE=$(mktemp -d "${TMPDIR:-/tmp}/kfu-verify-workers.XXXXXX")
+  git -C "$WORKERS_REPO" archive "$_wsha" -- src/workers config/model_catalog.csv | tar -x -C "$WORKERS_TREE" \
+    || { echo "Refusing: cannot $purpose. git archive of workers $_wsha failed." >&2; return 1; }
+  WORKERS_SRC_FOR_PLAN="$WORKERS_TREE/src"
+  CATALOG_LABEL="kitesforu-workers origin/main ${_wsha:0:12} ($_wdate) select_provider + config/model_catalog.csv"
+}
+PLAN_PY="python3"
+if [[ "$MOTION_CLIPS" != "0" ]]; then
+  ensure_workers_tree "price the clips this job buys" || { echo "Nothing was sent." >&2; exit 1; }
+  PLAN_PY="$WORKERS_PY"
 fi
 
 # ---- The request, and the estimate and ACK decision computed FROM IT --------------------------
@@ -369,11 +405,12 @@ JOB_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); pri
 if [[ -z "$JOB_ID" ]]; then
   if [[ "$HTTP_CODE" =~ ^4[0-9][0-9]$ ]]; then
     # 4xx is decided before the job is written or any credit is charged: auth and validation before the
-    # handler runs, then the concurrency, quota and credit checks, all ahead of the charge and the job doc
-    # (kitesforu-api routes/podcasts/crud.py create_podcast_job; services/podcast_services.py create_job
-    # deducts and only then writes). A free owner's trial slot is reserved by the quota check, so a credit
-    # 429 after it has spent that slot, never credits. The one 4xx that can follow a create, the
-    # Idempotency-Key 409, needs a header this script does not send.
+    # handler runs, then the free-trial and quota checks (402 TrialExhausted, 429 QuotaExceeded), all ahead of
+    # the charge and the job doc (kitesforu-api routes/podcasts/crud.py create_podcast_job;
+    # services/podcast_services.py create_job deducts and only then writes). A paid owner SHORT ON CREDITS is
+    # not a 4xx: `check_user_quotas` raises InsufficientCreditsError, a bare Exception that create_podcast_job
+    # maps to HTTP 500, so it lands in exit 8 below, "a job MAY exist" (#175 round-6 claims 2). The one 4xx
+    # that can follow a create, the Idempotency-Key 409, needs a header this script does not send.
     POST_STATE="rejected"
     echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a job; nothing was charged. Response:" >&2
     echo "$RESP" >&2
@@ -437,22 +474,31 @@ if [[ "$WAIT" == "true" ]]; then
   # WHAT TO WAIT FOR: ONE readiness rule, the package's (kitesforu_qa.visual_readiness, #175 round 5).
   # `status` turns terminal when the AUDIO completes; visuals run on a parallel subscriber and finish
   # later. A run that asked for a video (the script's own --visuals / --visuals-auto / purchase, OR the
-  # doc's wants_visuals) is gradeable only when the video ladder says `ready` AND its clip array has
-  # settled: the clips_settled_at stamp is not cleared and the same clip fingerprint holds for the
-  # settled_clips window. Only that read's hero count is reported. A video that is NOT coming
-  # (video_status=failed_assembly, a terminal skip reason such as audio_only_no_clips, visual.status=failed)
-  # ends the wait with exit 5, naming the reason, once two reads a poll apart agree (workers say a retry
-  # can flip failed_assembly back to ready). It used to wait out the whole budget for that video.
+  # doc's wants_visuals) is gradeable only when the module says the read is `trustworthy` (the ladder is
+  # `ready` and the clips_settled_at stamp is not cleared) AND the same clip fingerprint holds for the
+  # settled_clips window across reads. Only that read's hero count is reported. A read the module calls
+  # `terminal` ends the wait with exit 5, naming the reason, once two reads a poll apart agree (workers say a
+  # retry can flip failed_assembly back to ready): video_status=failed_assembly, visual.status=failed, or one of
+  # the PRODUCER'S by-design reasons (audio_only_no_clips and three more, read once below from
+  # workers video_skip_reasons) with no video and no live lease. Any other reason beside a rendering or
+  # assembling ladder is a retry, and the wait keeps going (#175 round 6: round 5 exited 5 on
+  # `rendering` + `assembly_failed` about two minutes after the audio, during a retry).
+  # The shell branches on the module's verdicts (`terminal`, `trustworthy`) and does not re-derive them.
   #
   # HOW LONG, by wall clock (SECONDS), and never STARTING a poll whose sleep plus its probe's own
   # timeout would end past the budget, so the printed bound is the real ceiling (#175 round-5 latency
   # N2). The budgets are chosen, and the census beside each says how often a healthy job outlasts it.
   # Read-only census 2026-10-10, newest 600 podcast_jobs by created_at, video time = the GCS object
-  # time_created of visual.video_url (the job doc stamps no video time): see the PR body for the command.
+  # time_created of the compartment's video (the job doc stamps no video time). Command:
+  #   scripts/verification_job_census.py --population <ids file> --section timing
+  # (the ids are frozen in a file kept OUT of this public repo; --refresh-population writes a new one).
   #   audio-only, 1800s: created -> completed_at p99 1208s, max 2761s (n=591, the 2026-10-08 census)
   #   a video, no purchase, 5400s: created -> video, 18 of 443 jobs after 5400s (p95 3597s)
-  #   purchased clips, 10800s: created -> video, 3 of 21 jobs after 10800s (median 4280s, p90 12719s);
-  #     all 21 are ultra / motion_clips 3 / one owner, not a low-tier 2-clip run
+  #   purchased clips, 10800s: created -> video, 3 of 21 jobs after 10800s (median 4280s, p90 12719s)
+  # THE PURCHASED BUDGET IS NOT MEASURED ON WHAT THIS SCRIPT BUYS (#175 round-6 latency L6-2). All 21 jobs
+  # behind it are ultra / motion_clips 3 / one owner; no low-tier 1-2 clip purchase has ever been timed, so
+  # 10800s is a guess for that shape, in either direction.
+  #   FIRST PAID ROUND, created -> video: not yet run. Record its job id and time here when it is.
   # Running out is exit 4, never success: a paid --wait can run out while the job is healthy.
   # Once the audio is done, poll once a minute: a video is minutes away, and the clip array needs reads
   # a window apart. (The 60 s cadence used to be justified by a refund transaction each /status read ran;
@@ -470,6 +516,21 @@ if [[ "$WAIT" == "true" ]]; then
   MAX_CONSECUTIVE_PROBE_FAILURES=3
   EXPECT_VIDEO="no"
   [[ "$VISUALS" != "false" || "$MOTION_CLIPS" != "0" ]] && EXPECT_VIDEO="yes"
+  # THE PRODUCER'S BY-DESIGN NO-VIDEO REASONS, read once, imported and never copied (#175 round 6). Without
+  # them no skip reason ends the wait: the frontend's rule, which waits (to the budget, exit 4) rather than
+  # call a retry terminal.
+  NO_VIDEO_REASONS=""
+  if [[ "$EXPECT_VIDEO" == "yes" ]]; then
+    if ensure_workers_tree "read the producer's no-video reasons" \
+       && NO_VIDEO_REASONS=$("$WORKERS_PY" "$HERE/verification_job.py" no-video-reasons \
+                               "--workers-src=$WORKERS_SRC_FOR_PLAN"); then
+      echo "  a video ends the wait early only on the producer's by-design reasons: $NO_VIDEO_REASONS" >&2
+    else
+      NO_VIDEO_REASONS=""
+      echo "  ⚠️  the producer's no-video reasons could not be read (above). No skip reason will end this wait;" >&2
+      echo "      a job that will never make its video waits out the budget and exits 4." >&2
+    fi
+  fi
   probe_failures=0
   polls=0
   scheduled=0
@@ -489,10 +550,15 @@ if [[ "$WAIT" == "true" ]]; then
     # The scheduled sleep total bounds it too, so the bound holds even where time does not advance.
     (( SECONDS - wait_start + _interval + PROBE_TIMEOUT_S > _budget || scheduled + _interval > _budget )) && break
     polls=$(( polls + 1 ))
-    sleep "$_interval"
+    # In the background, under `wait`: a trapped signal is acted on at once, not after the sleep (on_exit).
+    sleep "$_interval" & SLEEP_PID=$!
+    wait "$SLEEP_PID"
+    SLEEP_PID=""
     scheduled=$(( scheduled + _interval ))
     RAW=$(curl -sS --connect-timeout 10 --max-time "$PROBE_TIMEOUT_S" "$API_BASE/v1/podcasts/$JOB_ID/status" "${HDR_ARGS[@]}" 2>/dev/null) || RAW=""
-    IFS='|' read -r STATUS _vexp _phase _reason _settle _fp _hero <<< "$(printf '%s' "$RAW" | python3 "$HERE/verification_job.py" status-fields --snapshot - --expect-video "$EXPECT_VIDEO")"
+    IFS='|' read -r STATUS _vexp _phase _reason _settle _fp _hero _terminal _trustworthy <<< "$(printf '%s' "$RAW" \
+      | python3 "$HERE/verification_job.py" status-fields --snapshot - --expect-video "$EXPECT_VIDEO" \
+          --no-video-reasons "$NO_VIDEO_REASONS")"
     if [[ -z "$STATUS" ]]; then
       probe_failures=$((probe_failures + 1))
       _why="${RAW:0:120}"; [[ -z "$RAW" ]] && _why="(no response: transport failure or timeout)"
@@ -513,24 +579,22 @@ if [[ "$WAIT" == "true" ]]; then
     in_list "$STATUS" "$FINISHED_STATUSES" || continue
     [[ -z "$AUDIO_DONE_AT" ]] && AUDIO_DONE_AT=$(( SECONDS - wait_start ))
     if [[ "$VIDEO_EXPECTED" != "yes" ]]; then RESULT="gradeable"; break; fi
-    case "$PHASE" in
-      failed|no_video)
-        FP=""; FP_STILL_S=0
-        if [[ "$PREV_ENDING" == "$PHASE:$REASON" ]]; then RESULT="no_video"; break; fi
-        PREV_ENDING="$PHASE:$REASON" ;;
-      ready)
-        PREV_ENDING=""
-        if [[ "$SETTLE" == "in_flight" ]]; then
-          FP=""; FP_STILL_S=0              # a pass is writing the array: no read of it counts
-        elif [[ "$_fp" != "$FP" ]]; then
-          FP="$_fp"; FP_STILL_S=0          # the array moved: start the window again
-        else
-          FP_STILL_S=$(( FP_STILL_S + _interval ))
-          if (( FP_STILL_S >= SETTLE_WINDOW_S )); then HERO="$_hero"; RESULT="gradeable"; break; fi
-        fi ;;
-      *)
-        PREV_ENDING=""; FP=""; FP_STILL_S=0 ;;
-    esac
+    # The module's two verdicts, as status-fields emits them; nothing here re-derives them from the phase.
+    if [[ "$_terminal" == "yes" ]]; then
+      FP=""; FP_STILL_S=0
+      if [[ "$PREV_ENDING" == "$PHASE:$REASON" ]]; then RESULT="no_video"; break; fi
+      PREV_ENDING="$PHASE:$REASON"
+    elif [[ "$_trustworthy" == "yes" ]]; then
+      PREV_ENDING=""
+      if [[ "$_fp" != "$FP" ]]; then
+        FP="$_fp"; FP_STILL_S=0          # the array moved: start the window again
+      else
+        FP_STILL_S=$(( FP_STILL_S + _interval ))
+        if (( FP_STILL_S >= SETTLE_WINDOW_S )); then HERO="$_hero"; RESULT="gradeable"; break; fi
+      fi
+    else
+      PREV_ENDING=""; FP=""; FP_STILL_S=0  # not ready, or a pass is writing the array: no read of it counts
+    fi
   done
   _waited=$(( SECONDS - wait_start ))
   case "$RESULT" in

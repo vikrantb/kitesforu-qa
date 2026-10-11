@@ -14,7 +14,15 @@ This repo held four answers to "are the visuals done", and they disagreed:
   that was never coming, and it counted purchased clips from one unsettled read.
 
 The frontend's answer, ``kitesforu-frontend lib/media/videoReadiness.ts`` ``resolveVideoDeliverable``, is
-the fifth. :meth:`VisualReadiness.video_phase` mirrors it, with one deviation stated where it happens.
+the fifth. :meth:`VisualReadiness.video_phase` mirrors it, with one deviation stated where it happens, and it
+reads the video only where the frontend does: ``visual.video_url`` / ``visual.video_burned_url`` (#175 round-6
+design D4 dropped a top-level ``video_url`` the frontend never reads).
+
+WHO READS IT (#175 round 6, design D2). The wait (``scripts/verification_job.py`` ``status-fields``), the
+artifact harness (``harness/artifact.py``), the acceptance gate's surfaced-master check and hero count
+(``scripts/acceptance_gate.py``), the fiction census's settle stamp (``scripts/post_deploy_fiction_census.py``)
+and the starved-measurement capture. ``tests/test_one_visual_readiness_rule.py`` scans ``scripts/`` and
+``src/`` for a reader that re-derives the stamp, the hero predicate or the ladder outside this module.
 
 WHAT ``visual.clips_settled_at`` MEANS. Two statements in this repo contradicted each other: "PREFER THE STAMP.
 It is authoritative" (``capture_starved_measurements``), and "it does not mean that: it is re-stamped by every
@@ -42,7 +50,7 @@ it with any ``python3``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import AbstractSet, Any, Optional
 
 from .settled_clips import DEFAULT_STABLE_SECONDS, clips_fingerprint
 
@@ -96,11 +104,31 @@ def is_delivered_hero_clip(clip: Any) -> bool:
 # ---- the video ladder ------------------------------------------------------------------------------
 
 #: ``visual.video_skip_reason`` values that mean the video IS still coming: the worker parks, NACKs and
-#: self-heals. The frontend's ``VIDEO_PENDING_SKIP_REASONS``, same two members. Every OTHER reason is
-#: terminal: ``audio_only_no_clips``, ``opted_out_no_visuals``, ``video_feature_disabled``,
-#: ``final_audio_missing``, ``assembly_failed``, ``fiction_or_undetermined_no_opt_in`` (workers
-#: ``stages/visuals/worker.py`` ``VIDEO_SKIP_*``, 66f5c4f1d).
+#: self-heals. The frontend's ``VIDEO_PENDING_SKIP_REASONS``, same two members.
+#:
+#: The reasons that mean NO video is coming are NOT listed here. They are the producer's
+#: ``workers.stages.visuals.video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``, the four the stranded-assembly
+#: watchdog never re-renders, and a caller passes them to :meth:`VisualReadiness.video_phase`. The wait imports
+#: them through the workers interpreter (``verification_job.py no-video-reasons``). Every other reason
+#: (``assembly_failed``, ``final_audio_missing``) is a failure the producer retries or stamps
+#: ``failed_assembly``, so it ends nothing by itself (#175 round 6: design D1, latency L6-1, critic F2).
 VIDEO_PENDING_SKIP_REASONS = frozenset({"final_audio_pending", "clip_timing_pending"})
+
+#: The two leases a visuals pass holds while it works (workers ``worker.py`` ``_VISUALS_STAGE_LEASE_FIELD``,
+#: ``_VIDEO_LEASE_FIELD``): ``{"owner": ..., "expires_at_ms": ...}`` on the visual compartment. An owned,
+#: unexpired lease is work in flight, and in-flight work is never an ending.
+_LEASE_KEYS = ("visuals_stage_lease", "video_assembly_lease")
+
+
+def _owned_lease_expiry_ms(lease: Any) -> Optional[int]:
+    """``expires_at_ms`` of a lease someone holds, ``None`` when there is no owned lease. An unreadable expiry
+    reads 0 (expired), the producer's own reading (``worker._lease_is_live``)."""
+    if not isinstance(lease, dict) or not lease.get("owner"):
+        return None
+    try:
+        return int(lease.get("expires_at_ms") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 #: The phases :meth:`VisualReadiness.video_phase` returns. ``failed`` and ``no_video`` are TERMINAL: no video
 #: is coming. ``rendering``, ``assembling`` and ``pending`` are not.
@@ -136,8 +164,16 @@ class VisualReadiness:
       2. NO clip left `pending` — every planned picture resolved;
       3. NO clip with an empty `asset_uri` — every resolved picture actually has bytes.
 
-    The fields after ``empty_asset_uris`` were added by #175 round 5 for the video ladder and the settle rule
-    (module docstring); they default, so every existing construction stays valid.
+    The fields after ``empty_asset_uris`` were added by #175 rounds 5-6 for the video ladder, the settle rule
+    and the leases (module docstring); they default, so every existing construction stays valid.
+
+    WHAT ``is_final`` DOES AND DOES NOT SAY (#175 round-6 design D3, decided). It is the STAGE's answer: the
+    stage finished, nothing is pending, every clip has bytes. It does NOT make a clip COUNT trustworthy. A
+    purchased hero clip can still be rendering when the stage says ``done`` (the terminal persist does not wait
+    for a Veo op), and the hot-swap pass then rewrites the array: ``video_status=rendering`` beside a final
+    stage is exactly that shape. A number taken from the delivered video's clips (a hero count, a clip count of
+    the master) needs :attr:`clip_count_trustworthy` on one read AND the same :attr:`clips_fingerprint` for
+    ``DEFAULT_STABLE_SECONDS`` across reads, which is what the verification wait checks.
     """
 
     status: str
@@ -150,9 +186,11 @@ class VisualReadiness:
     settle_stamp: str = STAMP_ABSENT
     hero_clips: int = 0
     clips_fingerprint: str = ""
+    stage_lease_expires_ms: Optional[int] = None
+    assembly_lease_expires_ms: Optional[int] = None
 
     @classmethod
-    def from_visual(cls, visual: Any, *, top_level_video_url: Any = None) -> VisualReadiness:
+    def from_visual(cls, visual: Any) -> VisualReadiness:
         """Classify a ``visual`` compartment: the Firestore doc's, or ``GET /status``'s (re-signed URLs).
 
         Pure and total: a malformed compartment reports as in-flight (0 clips) rather than raising, because an
@@ -168,11 +206,13 @@ class VisualReadiness:
             total_clips=len(clips),
             pending_clips=pending,
             empty_asset_uris=empty,
-            video_present=bool(v.get("video_url") or v.get("video_burned_url") or top_level_video_url),
+            video_present=bool(v.get("video_url") or v.get("video_burned_url")),
             video_skip_reason=str(v.get("video_skip_reason") or "").strip(),
             settle_stamp=_stamp_state_of(visual),
             hero_clips=sum(1 for c in clips if is_delivered_hero_clip(c)),
             clips_fingerprint=clips_fingerprint(raw_clips if isinstance(raw_clips, list) else []),
+            stage_lease_expires_ms=_owned_lease_expiry_ms(v.get(_LEASE_KEYS[0])),
+            assembly_lease_expires_ms=_owned_lease_expiry_ms(v.get(_LEASE_KEYS[1])),
         )
 
     @property
@@ -198,19 +238,44 @@ class VisualReadiness:
             out.append(f"{self.empty_asset_uris} clip(s) with an empty asset_uri")
         return out
 
-    def video_phase(self, *, expected: bool) -> tuple[str, str]:
+    def work_in_flight(self, now_ms: Optional[int]) -> bool:
+        """A pass is visibly working on this compartment: the settle stamp is cleared (a pass is mid-write), or
+        a stage or assembly lease is owned and unexpired at ``now_ms``. Without a clock (``now_ms=None``), any
+        owned lease counts as live: the direction that keeps waiting."""
+        if self.settle_stamp == STAMP_IN_FLIGHT:
+            return True
+        for expires in (self.stage_lease_expires_ms, self.assembly_lease_expires_ms):
+            if expires is not None and (now_ms is None or expires > now_ms):
+                return True
+        return False
+
+    def video_phase(self, *, expected: bool, no_video_reasons: AbstractSet[str] = frozenset(),
+                    now_ms: Optional[int] = None) -> tuple[str, str]:
         """``(phase, reason)``: what is happening to the video a job asked for.
 
         Mirrors the frontend's ``resolveVideoDeliverable``: a SET ladder (``visual.video_status``) wins over a
         present URL, because the api writes the URL before the status settles (``exports/continuous_video.py``);
         ``failed_assembly`` is terminal; an absent ladder falls back to the URL, then to the skip reason.
 
-        ONE DEVIATION, and why. The frontend lets a set, non-terminal ladder win over the skip reason, so job
-        ``e2bda0fa`` (``visual.status=partial``, ``video_status=rendering``, ``video_skip_reason=
-        audio_only_no_clips``, no clips, no video) reads as "rendering" forever. Workers write ``rendering`` at
-        the stage-lease claim and delete it at the release, so a ``rendering`` that outlives its pass is a pass
-        that died, not a render in progress; a terminal skip reason beside it, with no video, is the settled
-        answer. Here a terminal skip reason with no video is ``no_video`` whatever a non-``ready`` ladder says.
+        ONE DEVIATION, NARROWED TO THE PRODUCER'S OWN LIST (#175 round 6). The frontend lets a set, non-terminal
+        ladder win over the skip reason, so job ``e2bda0fa`` (``visual.status=partial``,
+        ``video_status=rendering``, ``video_skip_reason=audio_only_no_clips``, no clips, no video) reads as
+        "rendering" forever. Here a skip reason in ``no_video_reasons``, with no video and no work in flight, is
+        ``no_video`` whatever a non-``ready`` ladder says. ``no_video_reasons`` is the producer's
+        ``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``, passed in by a caller that imported it: the four
+        reasons the stranded-assembly watchdog never re-renders.
+
+        Round 5 applied the deviation to EVERY non-pending reason, and that was wrong. ``_claim_write`` sets
+        ``rendering`` without clearing ``video_skip_reason``, so ``rendering`` + ``assembly_failed`` is a retry
+        over a failure, which the watchdog re-triggers up to twice (workers ``worker.py`` ~:2136-2141). The wait
+        exited 5, "NO VIDEO is coming", about two minutes after the audio, while the retry rendered the video
+        the run had paid for (design D1, latency L6-1, critic F2). Such a reason now waits beside its ladder,
+        and the producer's terminal stamp, ``failed_assembly``, is what ends it.
+
+        Even a by-design reason is not an ending while :meth:`work_in_flight`: a cleared settle stamp, or an
+        owned and unexpired stage or assembly lease at ``now_ms``. A caller that could not import the producer's
+        names passes none, and then no skip reason ends anything, which is the frontend's own rule.
+
         A ``visual.status == "failed"`` is ``failed`` too: the frontend never reads it, the old wait loop did."""
         if not expected:
             return PHASE_NOT_EXPECTED, "no video was asked for"
@@ -224,23 +289,34 @@ class VisualReadiness:
             return PHASE_FAILED, "visual.status=failed"
         if not ladder and self.video_present:
             return PHASE_READY, "a video URL and no video_status ladder (a doc older than the ladder)"
-        if skip and skip not in VIDEO_PENDING_SKIP_REASONS and not self.video_present:
+        if skip and skip in no_video_reasons and not self.video_present and not self.work_in_flight(now_ms):
             return PHASE_NO_VIDEO, f"video_skip_reason={skip}" + (f", video_status={ladder}" if ladder else "")
         if ladder == "rendering":
-            return PHASE_RENDERING, "video_status=rendering"
+            return PHASE_RENDERING, "video_status=rendering" + (f", video_skip_reason={skip}" if skip else "")
         if ladder == "assembling":
-            return PHASE_ASSEMBLING, "video_status=assembling"
+            return PHASE_ASSEMBLING, "video_status=assembling" + (f", video_skip_reason={skip}" if skip else "")
         if ladder:
             # A member added upstream that this build does not know yet: fail toward NOT finished.
             return PHASE_PENDING, f"video_status={ladder} (unknown here; treated as not finished)"
-        return PHASE_PENDING, "no video yet" + (f" (video_skip_reason={skip}, transient)" if skip else "")
+        if not skip:
+            return PHASE_PENDING, "no video yet"
+        if skip in VIDEO_PENDING_SKIP_REASONS:
+            return PHASE_PENDING, f"no video yet (video_skip_reason={skip}, transient)"
+        if skip in no_video_reasons:
+            return PHASE_PENDING, f"no video yet (video_skip_reason={skip}, by design, but a pass is still working)"
+        return PHASE_PENDING, (f"no video yet (video_skip_reason={skip}: not a by-design reason, so the producer "
+                               "retries it or stamps failed_assembly)")
 
     @property
     def clip_count_trustworthy(self) -> bool:
         """The read a clip count may be taken from, ONE read's half of the rule: the ladder is ``ready`` (or,
         on a doc older than the ladder, a video exists) and no pass is mid-write (the stamp is set, or the doc
         predates it). The other half is time: the fingerprint must hold across ``DEFAULT_STABLE_SECONDS``,
-        which only a caller that reads twice can check."""
+        which only a caller that reads twice can check.
+
+        The wait reads THIS verdict: ``verification_job.py status-fields`` emits it as ``trustworthy`` and the
+        shell branches on it. Round 5 kept the property with no caller while the shell re-derived it from
+        ``phase`` and ``settle`` (#175 round-6 design D3, critic F3)."""
         phase, _ = self.video_phase(expected=True)
         return phase == PHASE_READY and self.settle_stamp != STAMP_IN_FLIGHT
 

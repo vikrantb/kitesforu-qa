@@ -5,11 +5,12 @@
 (``.claude/rules/03-money.md``). It owns the arguments, the ACK gate, auth, the POST and the poll.
 This module owns the things the script used to do inline, in places that drifted apart:
 
-``plan``           builds the request body, then computes the estimate and the ACK decision FROM IT;
-``check-stored``   compares what the api stored with what was requested;
-``status-fields``  reads one ``/status`` body through the package's ONE readiness rule
-                   (:mod:`kitesforu_qa.visual_readiness`) for the wait loop;
-``settle-window``  how long a clip array must hold still before it is counted (``settled_clips``).
+``plan``              builds the request body, then computes the estimate and the ACK decision FROM IT;
+``check-stored``      compares what the api stored with what was requested;
+``status-fields``     reads one ``/status`` body through the package's ONE readiness rule
+                      (:mod:`kitesforu_qa.visual_readiness`) for the wait loop;
+``no-video-reasons``  the producer's by-design no-video reasons, read once before a wait (workers venv);
+``settle-window``     how long a clip array must hold still before it is counted (``settled_clips``).
 
 THE ESTIMATE AND THE PAYLOAD COME FROM ONE EXPRESSION (kitesforu-qa #175 rounds 2-3)
 -------------------------------------------------------------------------------------
@@ -22,32 +23,43 @@ the shape. :func:`plan` serializes the body ONCE. The estimate and the ACK decis
 computed by parsing THOSE BYTES, the same string curl sends, so they cannot describe a different
 request.
 
-WHERE THE PRICES COME FROM: the producer's functions, called, never copied (#175 round 5, design D2)
------------------------------------------------------------------------------------------------------
+WHERE THE PRICES COME FROM: the producer's functions, called (#175 round 5 design D2, round 6)
+------------------------------------------------------------------------------------------------
 Round 4 rebuilt ``veo_hero``'s purchase question here through seven private workers names. A copy fails
 OPEN on drift: every import still resolves, so the quote stays plausible and wrong. Every number now comes
-from a PUBLIC workers function or constant that the pass itself uses (kitesforu-workers PR "a purchased hero
-clip is quoted by the code that selects it", branch ``feat/a-purchase-is-quoted-by-the-code-that-selects-it``;
-this module refuses to price a purchase from a tree without it):
+from a PUBLIC workers function or constant that the producer itself reads (kitesforu-workers PR #3280, "a
+purchased hero clip is quoted by the code that selects it", branch
+``feat/a-purchase-is-quoted-by-the-code-that-selects-it``; this module refuses to price a purchase from a tree
+without it). Two image-side bounds are RESTATEMENTS of producer rules, and :class:`ImageQuote` names them.
 
-* **A purchased clip**: ``hero_clip_choice.quote_hero_clip``, the function ``veo_hero`` selects and prices
-  with, on the budget ``policy.policy_for_job`` builds from THIS body (``visual_options.motion_clips > 0``
-  -> the purchased arm), over the rows ``video.catalog.video_models()`` loads. Four cells: plain or
-  anchored, with the fal key bound or not. SELECTION ONLY: no ``submit``, ``poll`` or ``generate``. The fal
-  key is a dummy, set inside this process for the "bound" cells. ``MODEL_CATALOG_SHEET_ID`` is cleared first,
-  so the loader reads the CSV the way ``kitesforu-worker-visuals`` does (that env is absent there).
+* **A purchased clip**: ``hero_clip_choice.quote_hero_clip``. It composes the four functions ``veo_hero`` calls
+  for each beat, the row (``choose_hero_provider``), the route (``hero_clip_route``), the price
+  (``hero_clip_price``) and the spend gates (``hero_clip_gate``), and adds no decision of its own (#3280's fix
+  round moved the route there; round 5's text said "the function veo_hero selects and prices with", and veo_hero
+  never called it). Asked on the budget AND the arm ``policy.policy_for_job`` builds from THIS body
+  (``hero_budget``, ``motion_purchased``), over the rows ``video.catalog.video_models()`` loads. Six cells:
+  three beat shapes (:data:`CLIP_SHAPES`: plain, anchored, and the plain beat of an anchored pass) with the fal
+  key bound or not. A cell the pass would refuse is $0 and says which gate refused it; a selection that raised
+  is a refusal to price. SELECTION ONLY: no ``submit``, ``poll`` or ``generate``. The fal key is a dummy, set
+  inside this process for the "bound" cells. ``MODEL_CATALOG_SHEET_ID`` is cleared first, so the loader reads
+  the CSV the way ``kitesforu-worker-visuals`` does (that env is absent there). A quote covers each beat's FIRST
+  submit: the reference-fallback resubmit, made when Vertex refuses a reference op, is not added (the refused op
+  generated nothing, so the beat still has one billable clip).
 
   THE SERVING CELL IS THE EXPECTED PRICE (#175 round-5 cost F3). The serving visuals worker carries
   ``FAL_KEY`` (``gcloud run services describe kitesforu-worker-visuals``, read 2026-10-08 by the round-5 cost
   and claims lenses), so a clip is the fal-bound cell, and every non-zero ``costs.visuals_veo`` they read was
   exactly that price per clip. The no-key cells are the FAILOVER range, reachable when fal is unavailable,
-  and they set the high end. An ANCHORED cell needs a character plate, and a plate needs paid generation
-  (workers ``scene_budget`` passes ``allow_paid=real_images``), so with ``--paid-stills off`` only the plain
-  cells are reachable.
+  and they set the high end. A cell whose PASS is anchored needs a character plate, and a plate needs paid
+  generation (workers ``scene_budget`` passes ``allow_paid=real_images``), so with ``--paid-stills off`` only the
+  plain cells are reachable.
 * **One plan's paid pictures** (#175 round-5 cost F1, claims D1). Workers book paid images at five dispatch
   sites (``image_cost_ledger``). This bounds the three a non-short purchase reaches, per PLAN:
   * scene stills, ``max_images`` of them: cheapest enabled, unretired ``per image`` row x1 up to the dearest
-    x2 (one scene-verify regen per beat). A verify REJECT can add a render on another row; not bounded;
+    x(1 + ``verify.regen_policy.SCENE_VERIFY_REGENS_PER_BEAT``). That high end is a DOLLAR ceiling, not a render
+    count: a job can book more renders on cheaper rows (round-6 cost C2: 072c32c4 booked 8 on a grant of 3, all
+    at $0.039). A verify REJECT can add a render on another row; not bounded. The scene-verify vision judge
+    (one check per paid still and clip, well under $0.01 per run, not booked under ``costs.*``) is not added;
   * relimage bases: ``scene_budget.relimage_cap(max_images, allow_paid)`` of them, at
     ``image_cost_ledger.price_of(RELIMAGE)``, the price the ledger books them at;
   * character reference plates: up to ``character_anchors.ANCHOR_PLATE_BUDGET`` new plates per plan, drawn on
@@ -61,9 +73,12 @@ this module refuses to price a purchase from a tree without it):
   MEASURED band, not a bound: :data:`_AUTHORS_BAND`. It applies whenever the body lets visuals render
   without the legacy band (``visual_options`` present, or ``--visuals-auto``); the legacy ``--visuals`` band
   already covers it.
-* **The audio base** is the measured per-tier band (``COST_CHANGELOG.md`` 2026-09-06 and the T3 measurement).
-  Not a catalog fact, and not re-derived here. Its duration basis is recorded where it is known: the low
-  tier's $0.025 is a 10 s job, so a longer low run scales its high end linearly (#175 round-5 cost NIT-1).
+* **The audio base** is the measured per-tier band (``COST_CHANGELOG.md`` 2026-09-06 and the T3 measurement),
+  widened to the census tail (:data:`_AUDIO_TAIL`). Not a catalog fact. Its duration basis is recorded where it is
+  known: the low tier's $0.025 is a 10 s job, so a longer low run scales its high end linearly (#175 round-5 cost
+  NIT-1). That job ran no blueprint ``architect`` stage and no ``music`` bed, and the census shows low-tier jobs
+  that ran both: the costliest low 1-min job's non-visual cost was $0.298, against $0.15 for the scaled band
+  (round-6 claims 1). So the high end is the larger of the two.
 
 A purchased clip lands on the PURCHASED arm only. ``policy_for_job`` replaces the hero budget when
 ``vo_motion > 0`` and sizes the entitlement allowance only when ``vo_motion == 0``. So a job that
@@ -81,6 +96,7 @@ import io
 import json
 import os
 import sys
+import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +107,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from kitesforu_qa.visual_readiness import (  # noqa: E402
     DEFAULT_STABLE_SECONDS,
+    TERMINAL_PHASES,
     VisualReadiness,
 )
 
@@ -104,9 +121,10 @@ from kitesforu_qa.visual_readiness import (  # noqa: E402
 #:
 #: The api charges 1 credit per ``max_images`` UPFRONT (``option_pricing.py`` CREDITS_PER_IMAGE).
 #: On a ``completed`` job it refunds the stills charged but never rendered
-#: (``visual_refund.maybe_refund_unrendered_visuals``, run by ``GET /status``). It does NOT refund
-#: on ``needs_review`` / ``failed_qa`` (#175 round-3 claims D4). So the count should be one the job
-#: can RENDER. What can render is workers ``scene_budget.resolve_ceiling``, executed 2026-09-12 on
+#: (``visual_refund.maybe_refund_unrendered_visuals``, run from the api's watchdog sweep,
+#: ``routes/admin/watchdog.py``, since api #867; ``GET /status`` does not run it, #175 round-6 cost C3).
+#: It does NOT refund on ``needs_review`` / ``failed_qa`` (#175 round-3 claims D4). So the count should be
+#: one the job can RENDER. What can render is workers ``scene_budget.resolve_ceiling``, executed 2026-09-12 on
 #: workers bdc3b0d2 with ``vo_present=True, real_images=True, max_images > 0`` (#175 round-3,
 #: three lenses reproduced it):
 #:   * quality ``low``: 3 for every subscription (``is_cheapest_mode`` clamps to
@@ -246,6 +264,29 @@ _BASE_BANDS: Dict[str, Tuple[float, float, str, Optional[float]]] = {
     "medium": (0.15, 0.15, "~$0.15", None),
     "high": (1.0, 2.25, "~$1.0-1.3 (non-story topic) / ~$1.55-2.25 (story topic)", None),
 }
+
+#: THE MEASURED TAIL THE BANDS LEAVE OUT (#175 round-6 claims 1). The T3 measurement is a 10 s job that ran
+#: neither a blueprint ``architect`` stage nor a ``music`` bed, and some low-tier jobs run both: up to
+#: ~$0.17 architect and ~$0.12 music in one job. So the band alone under-priced the 1-min visuals run this
+#: script is used for. Each entry is the largest non-visual cost of one FINISHED job (``completed``,
+#: ``needs_review``, ``failed_qa``): every ``costs.<stage>.total_cost_usd`` summed except ``visuals_images``,
+#: ``visuals_veo`` and the four author stages, which are priced separately below.
+#:
+#: Read-only census 2026-10-10, the frozen ``population.txt`` of the newest 600 ``podcast_jobs`` (it holds 2
+#: string-dated 2026-01 docs; see the census script). Command:
+#: ``scripts/verification_job_census.py --population <ids> --section audio``.
+#: ``(tier, duration_min) -> (max, n)`` for each cell the census measured, and ``(tier, None)`` for the whole
+#: tier, which an unmeasured duration falls back to. An observed maximum is not a bound: a future job can
+#: exceed it. The audio term's high end is the larger of the band and the tail.
+_AUDIO_TAIL: Dict[Tuple[str, Optional[float]], Tuple[float, int]] = {
+    ("low", 0.167): (0.165, 194), ("low", 0.5): (0.169, 189), ("low", 1.0): (0.298, 31),
+    ("low", 1.5): (0.197, 8), ("low", 2.0): (0.002, 17), ("low", 5.0): (0.279, 7), ("low", None): (0.298, 446),
+    ("medium", 0.167): (0.146, 6), ("medium", 1.0): (0.508, 13), ("medium", 1.5): (0.021, 1),
+    ("medium", 2.0): (0.345, 19), ("medium", 3.0): (0.181, 1), ("medium", 5.0): (0.389, 9),
+    ("medium", 10.0): (0.239, 12), ("medium", None): (0.508, 61),
+    ("high", 0.167): (0.471, 1), ("high", 0.5): (0.032, 5), ("high", 1.5): (0.667, 5), ("high", 5.0): (0.025, 1),
+    ("high", None): (0.667, 12),
+}
 #: The legacy tier-driven visuals band, for ``wants_visuals: true`` with NO ``visual_options``
 #: (the ``--visuals`` path, which buys the tier's own stills and, on a paid premium tier, the
 #: entitlement hero clip). Unchanged from the script's earlier print. It never applies alongside
@@ -257,8 +298,9 @@ _LEGACY_VISUALS_BAND = (0.10, 0.50, "visuals (~$0.10-0.50; a story band already 
 #: figure_author, geometry_author, visuals_art_director). A MEASUREMENT, not a bound. Read-only census
 #: 2026-10-10, newest 600 ``podcast_jobs`` by ``created_at`` (ids frozen in the round-5 evidence
 #: ``census/population.txt``), the 471 jobs with a visual compartment and at least one author stage:
-#: median $0.064, p95 $0.126, max $0.152. Command: ``census/r5_census.py`` section 4. The low end is $0 because
-#: a run can author nothing (a 10 s ``--visuals-auto`` run authors no blueprint, job 9725a85c).
+#: median $0.064, p95 $0.126, max $0.152. Command: ``scripts/verification_job_census.py --section costs``.
+#: The low end is $0 because a run can author nothing (a 10 s ``--visuals-auto`` run usually authors no
+#: blueprint: job 9725a85c; 4 of 194 low-tier 10 s jobs in the same census did book an ``architect`` stage).
 _AUTHORS_BAND = (0.0, 0.152, "visuals authors ~$0-0.15 (measured: max $0.152, 471 jobs, 2026-10-10)")
 
 
@@ -272,13 +314,28 @@ def _span(lo: float, hi: float) -> str:
     return _usd(lo) if abs(hi - lo) < 1e-9 else f"{_usd(lo)}-{_usd(hi)[1:]}"
 
 
+#: The three beat shapes a purchased pass can buy, as ``(label, pass_anchored, beat_anchored)``. The workers seam
+#: takes the two anchor facts separately because the pass reads them separately (workers #3280 round 1): the
+#: PASS selects its row on "some beat has plates", and each BEAT is routed on its own plates. A mixed-anchor
+#: pass's establishing beat (no character on screen) is the third shape, the anchored pass's row sent
+#: first-frame, and a single ``anchored`` flag priced it on the plain pass's row instead.
+CLIP_SHAPES: Tuple[Tuple[str, bool, bool], ...] = (
+    ("plain", False, False),
+    ("anchored", True, True),
+    ("plain-beat-of-anchored-pass", True, False),
+)
+
+
 @dataclass(frozen=True)
 class ClipCell:
     fal_bound: bool
-    anchored: bool
-    model_id: Optional[str]   # None: nothing fits the budget, so no clip is made (parallax)
+    shape: str                # a CLIP_SHAPES label
+    pass_anchored: bool       # the pass's row needs a character plate, so paid stills, to be reachable
+    model_id: Optional[str]   # None: the pass buys no clip here (nothing fits, or a gate refuses it): $0
     seconds: int
     usd: float
+    seed_mode: str = ""       # the route the pass sends it on: first_frame or reference
+    skipped: str = ""         # why no clip: the seam's reason (no_row, clip_cap, job_cap, clip_count)
     provider: str = ""        # the catalog row's provider ("fal", "google"), so a reader can tell the cells apart
 
 
@@ -286,11 +343,11 @@ class ClipCell:
 class ClipQuote:
     cells: Tuple[ClipCell, ...]
     cap_usd: float
-    clip_seconds: int
+    budget_seconds: int
 
     def reachable(self, *, anchors_possible: bool) -> Tuple[ClipCell, ...]:
-        """The cells this body can reach. An anchored cell needs a plate, and a plate needs paid generation."""
-        return tuple(c for c in self.cells if anchors_possible or not c.anchored)
+        """The cells this body can reach. An anchored PASS needs a plate, and a plate needs paid generation."""
+        return tuple(c for c in self.cells if anchors_possible or not c.pass_anchored)
 
     def serving_low(self, *, anchors_possible: bool) -> float:
         """The serving worker's price: the fal-bound cells (the serving visuals worker carries FAL_KEY)."""
@@ -303,15 +360,20 @@ class ClipQuote:
         """The failover ceiling: the dearest reachable cell, fal bound or not."""
         return max(c.usd for c in self.reachable(anchors_possible=anchors_possible))
 
+    def longest_seconds(self, *, anchors_possible: bool) -> int:
+        """The longest clip a reachable cell buys. A Veo reference clip is 8 s whatever the budget's own length,
+        so the budget's ``max_seconds`` under-counts an anchored cell (workers #3280 round-1 design D6)."""
+        return max([c.seconds for c in self.reachable(anchors_possible=anchors_possible)] or [self.budget_seconds])
+
     def detail(self, *, anchors_possible: bool) -> List[str]:
         def cell(c: ClipCell) -> str:
-            shape = "anchored" if c.anchored else "plain"
+            off = "" if (anchors_possible or not c.pass_anchored) else " (unreachable: no paid stills, so no plate)"
             if c.model_id is None:
-                return f"{shape} none fits (no clip)"
-            off = "" if (anchors_possible or not c.anchored) else " (unreachable: no paid stills, so no plate)"
-            return f"{shape} {c.model_id} {c.seconds}s ${c.usd:.3f}{off}"
-        lines = [f"clips: purchased arm (cap ${self.cap_usd:.2f}, {self.clip_seconds}s), "
-                 "kitesforu-workers hero_clip_choice.quote_hero_clip (what veo_hero selects and prices), one row per cell:"]
+                return f"{c.shape} no clip ({c.skipped or 'nothing fits'}){off}"
+            return f"{c.shape} {c.model_id} {c.seed_mode} {c.seconds}s ${c.usd:.3f}{off}"
+        lines = [f"clips: purchased arm (cap ${self.cap_usd:.2f}, {self.budget_seconds}s), kitesforu-workers "
+                 "hero_clip_choice.quote_hero_clip, which asks the row, route, price and gate functions veo_hero "
+                 "calls for each beat; one row per beat shape:"]
         for bound in (True, False):
             row = [cell(c) for c in self.cells if c.fal_bound is bound]
             label = "fal bound (SERVING)" if bound else "no fal key (failover)"
@@ -321,12 +383,18 @@ class ClipQuote:
 
 @dataclass(frozen=True)
 class ImageQuote:
-    """One plan's paid pictures, priced from the producer: stills, relimage bases, character plates."""
+    """One plan's paid pictures, priced from the producer: stills, relimage bases, character plates.
+
+    Three numbers are the producer's own, imported: ``relimage_cap``, ``plate_budget`` and ``regens``. Two bounds
+    are RESTATEMENTS of producer rules, named here because a restatement drifts silently (#175 round-6 design
+    D6). :attr:`dearest_plate_row` restates ``character_anchors._anchor_provider``'s row rule
+    (reference-capable, else any). :func:`quote_paid_images` restates the IMAGE-row filter (enabled, unretired,
+    priced per image). Both are bounds, not selections: drift moves a range, never a choice."""
     rows: Tuple[Tuple[str, float, bool], ...]   # (model_id, usd per image, supports reference images)
     relimage_usd: float                          # image_cost_ledger.price_of(RELIMAGE)
     relimage_cap: Callable[[int, bool], int]     # scene_budget.relimage_cap
     plate_budget: int                            # character_anchors.ANCHOR_PLATE_BUDGET
-    regens: int = 1                              # scene-verify regens allowed per beat (renderer.py)
+    regens: int                                  # verify.regen_policy.SCENE_VERIFY_REGENS_PER_BEAT
 
     @property
     def cheapest(self) -> Tuple[str, float]:
@@ -348,7 +416,7 @@ class ImageQuote:
         return self.cheapest[1]
 
     @property
-    def high(self) -> float:  # one still at the dearest row with its regen
+    def high(self) -> float:  # one still's dollar ceiling: the dearest row, times its render and its regen(s)
         return self.dearest[1] * (1 + self.regens)
 
     def terms(self, n_stills: int) -> List[Tuple[float, float, str]]:
@@ -356,7 +424,7 @@ class ImageQuote:
         n_rel = int(self.relimage_cap(n_stills, n_stills > 0))
         rel_hi = n_rel * self.relimage_usd
         plate_hi = self.plate_budget * self.dearest_plate_row[1] if n_stills > 0 else 0.0
-        out = [(lo_still, hi_still, f"up to {n_stills} paid still(s) {_span(lo_still, hi_still)}")]
+        out = [(lo_still, hi_still, f"up to {n_stills} paid still(s) {_span(lo_still, hi_still)} (a dollar ceiling)")]
         if n_rel:
             out.append((0.0, rel_hi, f"up to {n_rel} relimage base(s) {_span(0.0, rel_hi)}"))
         if plate_hi:
@@ -370,13 +438,17 @@ class ImageQuote:
         n_rel = int(self.relimage_cap(n_stills, n_stills > 0))
         return [
             f"stills: {len(self.rows)} enabled IMAGE rows, {lo_id} ${lo:.3f} x1 .. {hi_id} ${hi:.3f} "
-            f"x{1 + self.regens} (one scene-verify regen); a verify REJECT can add a render on another row",
+            f"x{1 + self.regens} (SCENE_VERIFY_REGENS_PER_BEAT={self.regens}). A DOLLAR ceiling at the dearest row, "
+            "not a render count: a job can book more renders on cheaper rows (072c32c4 booked 8 on a grant of "
+            "3, all at $0.039), and a verify REJECT can add a render on another row",
             f"relimage: scene_budget.relimage_cap({n_stills}, allow_paid) = {n_rel} at ${self.relimage_usd:.3f} "
             "(image_cost_ledger.price_of(RELIMAGE)); $0 when no beat takes one",
             f"plates: up to {self.plate_budget} new per plan (character_anchors.ANCHOR_PLATE_BUDGET) at most "
             f"{p_id} ${p:.3f}; $0 with no named character",
             "ONE PLAN: a re-planned pass (mux_gate.REPLAN_CAP) can buy stills, relimage and plates again, and a "
             "changed character can be redrawn once; this estimate does not add those",
+            "not added: the scene-verify vision judge (one check per paid still and clip, ~300-500 vision tokens, "
+            "well under $0.01 per run, not booked under costs.*)",
         ]
 
 
@@ -393,15 +465,25 @@ def _audio_term(tier: str, duration_min: float) -> Tuple[Optional[float], Option
     if band is None:
         return None, None, "unknown"
     lo, hi, text, basis = band
-    if basis is not None:
-        if duration_min <= basis + 1e-9:
-            return lo, hi, text
+    if basis is not None and duration_min > basis + 1e-9:
         scale = duration_min / basis
         hi = hi * scale
-        return lo, hi, f"~{_span(lo, hi)} ({text[1:]} measured at 10 s; x{scale:.1f} for {duration_min:g} min is the high end)"
-    if abs(duration_min - _T3_DURATION_MIN) < 1e-9:
-        return lo, hi, text
-    return lo, hi, f"{text} (per episode; no duration basis recorded, so NOT scaled to {duration_min:g} min)"
+        text = f"~{_span(lo, hi)} ({text[1:]} measured at 10 s; x{scale:.1f} for {duration_min:g} min)"
+    elif basis is None and abs(duration_min - _T3_DURATION_MIN) > 1e-9:
+        text = f"{text} (per episode; no duration basis recorded, so NOT scaled to {duration_min:g} min)"
+    cell = round(float(duration_min), 3)
+    tail = _AUDIO_TAIL.get((tier, cell))
+    where = f"{tier} jobs at {duration_min:g} min"
+    if tail is None:
+        tail = _AUDIO_TAIL.get((tier, None))
+        where = f"{tier} jobs of any length (none measured at {duration_min:g} min)"
+    if tail is not None and tail[0] > hi:
+        hi = tail[0]
+        # Only the low tier's tail was read stage by stage (architect, music); the others name no driver.
+        driver = ", an architect stage and sometimes a music bed" if tier == "low" else ""
+        text = (f"~{_span(lo, hi)} (band {text.lstrip('~')}; the high end is the census tail, the costliest of "
+                f"{tail[1]} {where}: ${tail[0]:.3f}{driver})")
+    return lo, hi, text
 
 
 def _visuals_may_render(body: Dict[str, Any]) -> bool:
@@ -472,26 +554,36 @@ def _fal_key(bound: bool):
 
 #: The workers module that makes a quote ask what the pass asks. A tree without it predates the seam.
 _SEAM_MODULE = "workers.stages.visuals.hero_clip_choice"
+#: The workers module that names the reasons no video is coming (workers #3280's fix round). A tree without it
+#: predates the move, and the wait then ends on no skip reason at all.
+_SKIP_REASONS_MODULE = "workers.stages.visuals.video_skip_reasons"
 
 
-def _workers(workers_src: str):
-    """Import the producer's public selection and pricing functions from ``workers_src``. Fails closed with
-    the reason, and names the interpreter, because the import needs the workers dependencies (#175 round-5
-    design D3: the shell runs this under kitesforu-workers/.venv/bin/python)."""
+def _producer_on_path(workers_src: str, module: str, *, label: str) -> None:
+    """Put ``workers_src`` first on ``sys.path`` for an import of ``module``. Fails closed with the reason.
+
+    The live visuals worker routes from the CSV (MODEL_CATALOG_SHEET_ID is absent on kitesforu-worker-visuals).
+    With it set here the loader would reach Google Sheets, a network call, and could read a different catalog
+    than the one that serves, so it is cleared."""
     if not os.path.isdir(os.path.join(workers_src, "workers")):
         raise PricingUnavailable(f"no `workers` package under {workers_src}")
-    # The live visuals worker routes from the CSV (MODEL_CATALOG_SHEET_ID is absent on
-    # kitesforu-worker-visuals). With it set here the loader would reach Google Sheets, a network
-    # call, and could read a different catalog than the one that serves.
     os.environ.pop("MODEL_CATALOG_SHEET_ID", None)
     if workers_src not in sys.path:
         sys.path.insert(0, workers_src)
-    seam = os.path.join(workers_src, *_SEAM_MODULE.split(".")) + ".py"
-    if not os.path.isfile(seam):
-        raise PricingUnavailable(
-            f"the workers tree at {workers_src} predates the quote seam ({_SEAM_MODULE}). kitesforu-qa #175 "
-            "depends on the kitesforu-workers PR that adds it (branch "
-            "feat/a-purchase-is-quoted-by-the-code-that-selects-it): merge it, or set WORKERS_SRC to a tree that has it")
+    if not os.path.isfile(os.path.join(workers_src, *module.split(".")) + ".py"):
+        raise PricingUnavailable(f"the workers tree at {workers_src} predates {label} ({module}). {_NEEDS_3280}")
+
+
+_NEEDS_3280 = ("kitesforu-qa #175 depends on the kitesforu-workers PR that adds it (branch "
+               "feat/a-purchase-is-quoted-by-the-code-that-selects-it): merge it, or set WORKERS_SRC to a tree "
+               "that has it")
+
+
+def _workers(workers_src: str):
+    """Import the producer's public selection and pricing functions from ``workers_src``. Fails closed with the reason,
+    and names the interpreter, because the import needs the workers dependencies (#175 round-5 design D3: the
+    shell runs this under kitesforu-workers/.venv/bin/python)."""
+    _producer_on_path(workers_src, _SEAM_MODULE, label="the quote seam")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -499,17 +591,37 @@ def _workers(workers_src: str):
             from workers.common.pricing import iter_model_rows
             from workers.stages.visuals import image_cost_ledger
             from workers.stages.visuals.character_anchors import ANCHOR_PLATE_BUDGET
-            from workers.stages.visuals.hero_clip_choice import quote_hero_clip
+            from workers.stages.visuals.hero_clip_choice import SKIP_SELECT_FAILED, quote_hero_clip
             from workers.stages.visuals.policy import policy_for_job
             from workers.stages.visuals.scene_budget import relimage_cap
+            from workers.stages.visuals.verify.regen_policy import SCENE_VERIFY_REGENS_PER_BEAT
             from workers.stages.visuals.video.catalog import _truthy, video_models
     except Exception as exc:  # noqa: BLE001: any import failure means the producer moved
         raise PricingUnavailable(f"the workers selector did not import from {workers_src} under "
                                  f"{sys.executable}: {type(exc).__name__}: {exc}") from exc
     return dict(is_past_eol=is_past_eol, iter_model_rows=iter_model_rows, policy_for_job=policy_for_job,
-                quote_hero_clip=quote_hero_clip, truthy=_truthy, video_models=video_models,
-                relimage_cap=relimage_cap, plate_budget=ANCHOR_PLATE_BUDGET,
+                quote_hero_clip=quote_hero_clip, select_failed=SKIP_SELECT_FAILED, truthy=_truthy,
+                video_models=video_models, relimage_cap=relimage_cap, plate_budget=ANCHOR_PLATE_BUDGET,
+                regens=SCENE_VERIFY_REGENS_PER_BEAT,
                 relimage_usd=image_cost_ledger.price_of(image_cost_ledger.RELIMAGE))
+
+
+def producer_no_video_reasons(workers_src: str) -> List[str]:
+    """The producer's own by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``), the ONLY
+    skip reasons that end the wait beside a non-``ready`` ladder (#175 round 6: design D1, latency L6-1, critic
+    F2). Imported, never copied: a copy fails open on drift."""
+    _producer_on_path(workers_src, _SKIP_REASONS_MODULE, label="the no-video reasons")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from workers.stages.visuals.video_skip_reasons import BY_DESIGN_NO_VIDEO_REASONS
+    except Exception as exc:  # noqa: BLE001
+        raise PricingUnavailable(f"the producer's no-video reasons did not import from {workers_src} under "
+                                 f"{sys.executable}: {type(exc).__name__}: {exc}") from exc
+    reasons = sorted(str(r) for r in BY_DESIGN_NO_VIDEO_REASONS)
+    if not reasons:
+        raise PricingUnavailable("the producer's BY_DESIGN_NO_VIDEO_REASONS is empty")
+    return reasons
 
 
 def _row_provider(w: Dict[str, Any], model_id: str) -> str:
@@ -518,8 +630,12 @@ def _row_provider(w: Dict[str, Any], model_id: str) -> str:
 
 
 def quote_purchased_clips(w: Dict[str, Any], body: Dict[str, Any], *, aspect: str) -> ClipQuote:
-    """The four cells, each the clip ``veo_hero`` would buy, on the budget the producer builds from THIS body."""
-    budget = w["policy_for_job"](dict(body)).hero_budget
+    """Six cells, each the FIRST clip ``veo_hero`` would buy for one beat shape (:data:`CLIP_SHAPES`), with the fal
+    key bound and not, on the budget AND the arm the producer builds from THIS body: ``policy_for_job(body)``'s
+    ``hero_budget`` and ``motion_purchased``. The arm used to be a literal ``paid_opt_in=True`` beside the policy
+    object that carries it (#175 round-6 design D5)."""
+    policy = w["policy_for_job"](dict(body))
+    budget = policy.hero_budget
     cells: List[ClipCell] = []
     for fal_bound in (True, False):
         with _fal_key(fal_bound):
@@ -527,12 +643,17 @@ def quote_purchased_clips(w: Dict[str, Any], body: Dict[str, Any], *, aspect: st
             # provider on an empty catalog, which would price a catalog that failed to load as if it had.
             if not w["video_models"]():
                 raise PricingUnavailable("the workers catalog yielded no usable video row")
-            for anchored in (False, True):
-                q = w["quote_hero_clip"](budget, anchored=anchored, paid_opt_in=True, aspect_ratio=aspect)
-                cells.append(ClipCell(fal_bound, anchored, q.model_id, int(q.seconds), float(q.usd),
-                                      _row_provider(w, q.model_id) if q.model_id else ""))
-    return ClipQuote(cells=tuple(cells), cap_usd=float(budget.max_clip_usd),
-                     clip_seconds=int(budget.max_seconds))
+            for shape, pass_anchored, beat_anchored in CLIP_SHAPES:
+                q = w["quote_hero_clip"](budget, pass_anchored=pass_anchored, beat_anchored=beat_anchored,
+                                         paid_opt_in=bool(policy.motion_purchased), aspect_ratio=aspect)
+                # The seam fails open where the pass does: a selection that RAISED is "no clip" there. Here it is
+                # an unknown, and an approval must never price an unknown as $0.
+                if q.skipped == w["select_failed"]:
+                    raise PricingUnavailable(f"the workers selector raised for the {shape} cell: {q.detail}")
+                cells.append(ClipCell(fal_bound, shape, pass_anchored, q.model_id, int(q.seconds), float(q.usd),
+                                      seed_mode=str(q.seed_mode or ""), skipped=str(q.skipped or ""),
+                                      provider=_row_provider(w, q.model_id) if q.model_id else ""))
+    return ClipQuote(cells=tuple(cells), cap_usd=float(budget.max_clip_usd), budget_seconds=int(budget.max_seconds))
 
 
 def quote_paid_images(w: Dict[str, Any]) -> ImageQuote:
@@ -554,7 +675,7 @@ def quote_paid_images(w: Dict[str, Any]) -> ImageQuote:
     if not rows:
         raise PricingUnavailable("the workers catalog has no enabled IMAGE row priced per image")
     return ImageQuote(rows=tuple(rows), relimage_usd=float(w["relimage_usd"]),
-                      relimage_cap=w["relimage_cap"], plate_budget=int(w["plate_budget"]))
+                      relimage_cap=w["relimage_cap"], plate_budget=int(w["plate_budget"]), regens=int(w["regens"]))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -602,8 +723,9 @@ def clip_coverage_warning(body: Dict[str, Any], clip_seconds: int) -> List[str]:
     The old predicate fired only when the clips were LONGER than the episode, so
     ``--motion-clips 1`` at the 10 s default (6 s of video in a 10 s episode) said nothing. The
     advice it would have printed ("a paid-video T4 wants at least ~2.0 min") never reached the
-    cheapest wrong invocation (#175 round-2 design D7, latency NIT). The clip length is the
-    producer's ``_MOTION_CLIP_SECONDS``, not a copy of it."""
+    cheapest wrong invocation (#175 round-2 design D7, latency NIT). ``clip_seconds`` is the longest clip a
+    reachable quoted cell buys (``ClipQuote.longest_seconds``), not the budget's own length: a Veo reference
+    clip is 8 s on a 6 s budget (workers #3280 round-1 design D6)."""
     clips = ordered_clips(body)
     episode_s = float(body.get("duration_min") or 0) * 60
     video_s = clips * clip_seconds
@@ -611,15 +733,17 @@ def clip_coverage_warning(body: Dict[str, Any], clip_seconds: int) -> List[str]:
         return []
     return [
         f"⚠️  {clips} clip(s) is ~{video_s}s of video for a {episode_s:.0f}s episode: more than half of it.",
-        "    A short episode has too few beats for the hero ranker to choose among, and a 10 s run",
-        "    authors no blueprint (job 9725a85c, 2026-08-18). A paid-video T4 wants ~1-2 min: raise --duration.",
+        "    A short episode has too few beats for the hero ranker to choose among, and a 10 s run usually",
+        "    authors no blueprint (job 9725a85c; 4 of 194 low 10 s jobs in the 2026-10-10 census did).",
+        "    A paid-video T4 wants ~1-2 min: raise --duration.",
     ]
 
 
-def status_fields(snapshot: Dict[str, Any], *, expect_video: bool) -> List[str]:
+def status_fields(snapshot: Dict[str, Any], *, expect_video: bool, no_video_reasons: Sequence[str] = (),
+                  now_ms: Optional[int] = None) -> List[str]:
     """One ``/status`` body, read through the package's ONE readiness rule, as strings for the shell:
 
-        status | video_expected | phase | reason | settle | fingerprint | hero_clips
+        status | video_expected | phase | reason | settle | fingerprint | hero_clips | terminal | trustworthy
 
     Joined with ``|`` by the CLI (a tab is IFS whitespace, so an empty field would collapse and shift every
     field after it); a ``|`` inside the reason is replaced.
@@ -630,17 +754,21 @@ def status_fields(snapshot: Dict[str, Any], *, expect_video: bool) -> List[str]:
     the wait printed "Grade it" while the visuals it was run to exercise were still rendering (#175 round-5
     code critic F1).
 
-    ``phase``/``reason``: :meth:`VisualReadiness.video_phase`. ``failed`` and ``no_video`` are terminal; the
-    wait exits 5 on them, naming the reason, instead of waiting out its budget for a video that is not coming
-    (latency L1: ``failed_assembly`` and ``partial`` + ``audio_only_no_clips`` both waited 90 minutes).
+    ``phase``/``reason``: :meth:`VisualReadiness.video_phase`, given the producer's by-design reasons
+    (``no_video_reasons``, read once by ``no-video-reasons``) and this read's clock (``now_ms``, for the
+    leases). ``terminal``: the phase is in ``TERMINAL_PHASES`` (``failed``, ``no_video``); the wait exits 5 on
+    it, naming the reason, once two reads a poll apart agree, instead of waiting out its budget for a video
+    that is not coming (latency L1). ``trustworthy``: :attr:`VisualReadiness.clip_count_trustworthy`, the one
+    read's half of the clip-count rule. The shell branches on these two verdicts; it used to re-derive them
+    from ``phase`` and ``settle`` (#175 round-6 design D3, critic F3).
 
     ``settle``/``fingerprint``/``hero_clips``: a clip count is read only from a settled read (the ladder at
     ``ready``, the ``clips_settled_at`` stamp not cleared, and the same fingerprint for
     ``settled_clips.DEFAULT_STABLE_SECONDS``, which the wait checks across reads). ``hero_clips`` counts by the
     producer's predicate, ``modality == video_hero`` AND ``render_mode == video`` (critic F2)."""
-    r = VisualReadiness.from_visual(snapshot.get("visual"), top_level_video_url=snapshot.get("video_url"))
+    r = VisualReadiness.from_visual(snapshot.get("visual"))
     expected = bool(expect_video or snapshot.get("wants_visuals") is True)
-    phase, reason = r.video_phase(expected=expected)
+    phase, reason = r.video_phase(expected=expected, no_video_reasons=frozenset(no_video_reasons), now_ms=now_ms)
     return [
         str(snapshot.get("status") or ""),
         "yes" if expected else "no",
@@ -649,6 +777,8 @@ def status_fields(snapshot: Dict[str, Any], *, expect_video: bool) -> List[str]:
         r.settle_stamp,
         r.clips_fingerprint,
         str(r.hero_clips),
+        "yes" if phase in TERMINAL_PHASES else "no",
+        "yes" if r.clip_count_trustworthy else "no",
     ]
 
 
@@ -691,7 +821,8 @@ def _plan(args: argparse.Namespace) -> Dict[str, Any]:
     detail = list(est.detail)
     if detail and args.catalog_label:
         detail.insert(0, f"priced from {args.catalog_label}")
-    warn = clip_coverage_warning(sent, clip_quote.clip_seconds) if clip_quote else []
+    warn = (clip_coverage_warning(sent, clip_quote.longest_seconds(anchors_possible=ordered_stills(sent) > 0))
+            if clip_quote else [])
     return {"payload": payload, "est": est.text, "est_low": est.low, "est_high": est.high,
             "est_detail": detail, "needs_ack": needs_ack, "ack_reason": reason, "warnings": warn}
 
@@ -731,10 +862,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     c.add_argument("--snapshot", required=True, help="the GET /status JSON, or - for stdin")
 
     s = sub.add_parser("status-fields",
-                       help="status|video_expected|phase|reason|settle|fingerprint|hero_clips")
+                       help="status|video_expected|phase|reason|settle|fingerprint|hero_clips|terminal|trustworthy")
     s.add_argument("--snapshot", required=True, help="the GET /status JSON, or - for stdin")
     s.add_argument("--expect-video", default="no", choices=("yes", "no"),
                    help="the script asked for visuals itself (--visuals, --visuals-auto or a purchase)")
+    s.add_argument("--no-video-reasons", default="",
+                   help="comma-separated: the producer's by-design reasons (from `no-video-reasons`); empty ends "
+                        "the wait on no skip reason")
+
+    n = sub.add_parser("no-video-reasons",
+                       help="the producer's BY_DESIGN_NO_VIDEO_REASONS, comma-separated (run under the workers python)")
+    n.add_argument("--workers-src", required=True)
 
     sub.add_parser("settle-window", help="seconds a clip array must hold still before it is counted")
 
@@ -760,9 +898,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.cmd == "settle-window":
         print(int(DEFAULT_STABLE_SECONDS))
         return 0
+    if args.cmd == "no-video-reasons":
+        noise = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+                reasons = producer_no_video_reasons(args.workers_src)
+        except PricingUnavailable as exc:
+            print(f"cannot read the producer's no-video reasons: {exc}", file=sys.stderr)
+            return 1
+        print(",".join(reasons))
+        return 0
     snapshot = _read_snapshot(args.snapshot)
     print("|".join(status_fields(snapshot if isinstance(snapshot, dict) else {},
-                                 expect_video=args.expect_video == "yes")))
+                                 expect_video=args.expect_video == "yes",
+                                 no_video_reasons=[r for r in args.no_video_reasons.split(",") if r],
+                                 now_ms=int(time.time() * 1000))))
     return 0
 
 

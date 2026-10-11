@@ -7,21 +7,24 @@ is a dummy, so Secret Manager is never asked. The script under test is a COPY wh
 is ``ACK_FILE`` (asserted), pointed at a temp file. The real founder ACK file is never read or
 touched.
 
-A purchase is priced by the workers functions that select and price it (``hero_clip_choice`` and friends:
-#175 round 5 depends on the kitesforu-workers PR that adds them). The ``workers_src`` fixture extracts
-``src/workers`` + ``config/model_catalog.csv`` from the first of kitesforu-workers ``origin/main`` and the
-seam branch (``feat/a-purchase-is-quoted-by-the-code-that-selects-it``) that HAS the seam, once per session,
-and says which. Those tests SKIP only when no checkout has it. When the checkout imports but prices wrongly,
-they FAIL. Pricing runs under the workers venv's python (``KFU_WORKERS_PYTHON``), as the script does.
+A purchase is priced by the workers functions that select and price it (``hero_clip_choice`` and friends), and a
+wait ends early only on the workers' by-design no-video reasons (``video_skip_reasons``): #175 depends on the
+kitesforu-workers PR #3280 that adds them. The ``workers_src`` and ``producer_reasons`` fixtures
+(``tests/conftest.py``, helpers in ``tests/producer_tree.py``) extract ``src/workers`` + ``config/model_catalog.csv``
+from the first of kitesforu-workers ``origin/main`` and that PR's branch that HAS both, once per session, and say
+which. Those tests SKIP only when no checkout has them. When the checkout imports but prices wrongly, they FAIL.
+Pricing runs under the workers venv's python (``KFU_WORKERS_PYTHON``), as the script does.
 
 Offline and $0.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -33,68 +36,15 @@ import pytest
 QA = Path(__file__).resolve().parents[1]
 SCRIPTS = QA / "scripts"
 SCRIPT = SCRIPTS / "create_verification_job.sh"
-_WORKSPACE_DEFAULT = Path("/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers")
 DEAD = "http://127.0.0.1:9"
 
 sys.path.insert(0, str(SCRIPTS))
 import verification_job  # noqa: E402  (stdlib-only at import)
-
-
-# ---------------------------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------------------------
-
-def _workers_repo() -> Optional[Path]:
-    for cand in (os.environ.get("KFU_WORKERS_REPO"), QA.parent / "kitesforu-workers", _WORKSPACE_DEFAULT):
-        if cand and (Path(cand) / ".git").exists():
-            return Path(cand)
-    return None
-
-
-SEAM = "src/workers/stages/visuals/hero_clip_choice.py"
-SEAM_BRANCH = "feat/a-purchase-is-quoted-by-the-code-that-selects-it"
-
-
-def _ref_with_seam(repo: Path) -> Optional[str]:
-    """The first of origin/main and the seam branch whose tree carries the quote seam, as a full SHA."""
-    for ref in ("origin/main", SEAM_BRANCH, f"origin/{SEAM_BRANCH}"):
-        sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-                             capture_output=True, text=True).stdout.strip()
-        if sha and subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{sha}:{SEAM}"],
-                                  capture_output=True).returncode == 0:
-            return sha
-    return None
-
-
-@pytest.fixture(scope="session")
-def workers_src(tmp_path_factory) -> str:
-    explicit = os.environ.get("WORKERS_SRC")
-    if explicit:
-        return explicit
-    repo = _workers_repo()
-    if repo is None:
-        pytest.skip("no kitesforu-workers checkout (set KFU_WORKERS_REPO or WORKERS_SRC): SKIPPED, not "
-                    "passed. A purchase cannot be priced without the producer.")
-    sha = _ref_with_seam(repo)
-    if sha is None:
-        pytest.skip(f"no kitesforu-workers ref carries {SEAM} (#175 depends on that PR): SKIPPED, not passed. "
-                    f"Set WORKERS_SRC to a tree that has it.")
-    tree = tmp_path_factory.mktemp("workers-with-seam")
-    archive = subprocess.run(["git", "-C", str(repo), "archive", sha, "--", "src/workers",
-                              "config/model_catalog.csv"], check=True, capture_output=True).stdout
-    subprocess.run(["tar", "-x", "-C", str(tree)], input=archive, check=True)
-    assert (tree / "config" / "model_catalog.csv").stat().st_size > 10_000, "the extracted catalog is empty"
-    print(f"workers_src: priced from {sha[:12]}")
-    return str(tree / "src")
-
-
-def _workers_python() -> Optional[str]:
-    explicit = os.environ.get("KFU_WORKERS_PYTHON")
-    if explicit:
-        return explicit
-    repo = _workers_repo()
-    cand = repo / ".venv" / "bin" / "python" if repo else None
-    return str(cand) if cand and cand.exists() else None
+# The producer tree, the interpreter and the `workers_src` / `producer_reasons` fixtures are shared with the
+# readiness tests: tests/producer_tree.py and tests/conftest.py.
+from producer_tree import SEAM, SKIP_REASONS  # noqa: E402
+from producer_tree import workers_python as _workers_python  # noqa: E402
+from producer_tree import workers_repo as _workers_repo  # noqa: E402
 
 
 @pytest.fixture
@@ -147,7 +97,8 @@ class Harness:
         self.ack.write_text("")
         os.utime(self.ack, None)
 
-    def run(self, *args: str, env: Optional[Dict[str, str]] = None, timeout: int = 180) -> subprocess.CompletedProcess:
+    def env(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """The environment every run gets: stubs first on PATH, dead endpoints, a dummy key."""
         full = {
             "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": os.environ.get("HOME", ""),
@@ -161,8 +112,11 @@ class Harness:
         wpy = _workers_python()
         if wpy:
             full["KFU_WORKERS_PYTHON"] = wpy
-        full.update(env or {})
-        return subprocess.run(["/bin/bash", str(self.script), *args], env=full, capture_output=True,
+        full.update(extra or {})
+        return full
+
+    def run(self, *args: str, env: Optional[Dict[str, str]] = None, timeout: int = 180) -> subprocess.CompletedProcess:
+        return subprocess.run(["/bin/bash", str(self.script), *args], env=self.env(env), capture_output=True,
                               text=True, timeout=timeout)
 
     def calls(self, prefix: str = "") -> List[List[str]]:
@@ -207,7 +161,7 @@ def snap(status: str, *, wants_visuals: bool = False, video: bool = False, hero:
          visual_status: Optional[str] = None, quality_tier: str = "low",
          visual_options: Optional[dict] = None, video_status: Optional[str] = None,
          skip: Optional[str] = None, settle: str = "set", stills_as_hero: int = 0, salt: str = "",
-         signed: bool = False, top_level_video: bool = True) -> str:
+         signed: bool = False, top_level_video: bool = True, visual_extra: Optional[dict] = None) -> str:
     """A ``GET /status`` body. The visual compartment is the shape the api surfaces (the whole stored
     compartment, re-signed): ``hero`` clips by the producer's predicate (``video_hero`` + ``render_mode
     video``), ``stills_as_hero`` reclaimed stills stamped ``video_hero`` (code critic F2), the ladder
@@ -240,6 +194,7 @@ def snap(status: str, *, wants_visuals: bool = False, video: bool = False, hero:
             visual["clips_settled_at"] = "2026-10-10T10:00:00+00:00"
         elif settle == "null":
             visual["clips_settled_at"] = None
+        visual.update(visual_extra or {})
         doc["visual"] = visual
     return json.dumps(doc)
 
@@ -314,12 +269,17 @@ def test_the_estimate_counts_exactly_what_the_body_buys(harness, workers_src, ti
         assert abs(lows - lo_total) < 0.011 and abs(highs - hi_total) < 0.011, ("the total is not the sum", est)
 
 
+_SHAPE_RE = r"(plain-beat-of-anchored-pass|anchored|plain) (\S+) (first_frame|reference) (\d+)s \$([\d.]+)"
+
+
 def _clip_cells(stderr: str) -> Dict[str, float]:
+    """``{side:shape:model:seconds: usd}`` for the six priced cells: three beat shapes (the workers seam's
+    ``pass_anchored`` x ``beat_anchored``, #3280 round 1) with the fal key bound or not."""
     cells = {}
     for line in stderr.splitlines():
-        for shape, model, secs, usd in re.findall(r"(plain|anchored) (\S+) (\d+)s \$([\d.]+)", line):
+        for shape, model, _route, secs, usd in re.findall(_SHAPE_RE, line):
             cells[f"{'fal' if 'fal bound (SERVING)' in line else 'nofal'}:{shape}:{model}:{secs}"] = float(usd)
-    assert len(cells) == 4, f"expected 4 priced clip cells, got {cells}\n{stderr}"
+    assert len(cells) == 6, f"expected 6 priced clip cells, got {cells}\n{stderr}"
     return cells
 
 
@@ -500,7 +460,8 @@ def test_the_still_quote_drops_disabled_and_retired_rows_itself():
     w = {"iter_model_rows": lambda: rows,
          "truthy": lambda v: str(v).strip().lower() in {"true", "1", "yes"},
          "is_past_eol": lambda row: bool(row.get("eol_date")) and row["eol_date"] <= "2026-10-08",
-         "relimage_usd": 0.039, "relimage_cap": lambda n, paid: min(4, n) if paid else 0, "plate_budget": 4}
+         "relimage_usd": 0.039, "relimage_cap": lambda n, paid: min(4, n) if paid else 0, "plate_budget": 4,
+         "regens": 1}   # the producer's SCENE_VERIFY_REGENS_PER_BEAT, which `_workers()` reads
     quote = verification_job.quote_paid_images(w)
     assert quote.cheapest == ("flux-schnell", 0.003)
     assert quote.dearest == ("pro-image", 0.134), "a disabled, retired or non-per-image row priced a still"
@@ -793,13 +754,19 @@ def test_help_documents_what_the_script_does(harness):
     assert "--short" in lines[caveat - 1], "the short-form caveat is attached to the wrong example"
 
 
-@pytest.mark.parametrize("clips,duration,warns", [("1", "0.167", True), ("1", "0.3", False),
-                                                  ("2", "0.3", True), ("3", "2.0", False),
-                                                  # exactly half (6 s of 12 s) does not warn: the
-                                                  # boundary is "more than half" (critic F4 X8)
-                                                  ("1", "0.2", False)])
-def test_the_clip_warning_fires_when_clips_cover_over_half_the_episode(harness, workers_src, clips, duration, warns):
-    r = harness.run("--dry-run", "--motion-clips", clips, "--duration", duration, env={"WORKERS_SRC": workers_src})
+@pytest.mark.parametrize("clips,duration,stills,warns", [
+    ("1", "0.167", "on", True), ("1", "0.3", "on", False), ("2", "0.3", "on", True), ("3", "2.0", "on", False),
+    # exactly half (6 s of 12 s) does not warn: the boundary is "more than half" (critic F4 X8). Clips only, so
+    # no anchored cell is reachable and the longest clip is the plain 6 s one.
+    ("1", "0.2", "off", False),
+    # the same episode WITH stills: an anchored no-key cell is an 8 s Veo reference clip, more than half of 12 s
+    # (workers #3280 round-1 design D6: the warning used the budget's 6 s)
+    ("1", "0.2", "on", True),
+])
+def test_the_clip_warning_fires_when_clips_cover_over_half_the_episode(harness, workers_src, clips, duration, stills,
+                                                                       warns):
+    r = harness.run("--dry-run", "--motion-clips", clips, "--duration", duration, "--paid-stills", stills,
+                    env={"WORKERS_SRC": workers_src})
     assert r.returncode == 0, r.stderr
     assert ("more than half of it" in r.stderr) is warns, r.stderr
 
@@ -850,9 +817,11 @@ def test_visuals_auto_waits_for_the_video_it_was_run_to_exercise(harness):
     ({"visual_status": "done", "skip": "fiction_or_undetermined_no_opt_in"},
      "video_skip_reason=fiction_or_undetermined_no_opt_in"),
 ])
-def test_a_video_that_is_not_coming_ends_the_wait_with_exit_5_naming_why(harness, shape, reason):
+def test_a_video_that_is_not_coming_ends_the_wait_with_exit_5_naming_why(harness, workers_src, shape, reason):
+    """The producer's by-design reasons, read through the workers interpreter, end the wait; so does the ladder's
+    own terminal stamp."""
     harness.statuses([snap("running", wants_visuals=True), snap("completed", wants_visuals=True, **shape)])
-    r = harness.run("--visuals-auto", "--wait")
+    r = harness.run("--visuals-auto", "--wait", env={"WORKERS_SRC": workers_src})
     assert r.returncode == 5, (r.returncode, r.stderr)
     assert "NO VIDEO is coming" in r.stderr and reason in r.stderr
     assert harness.gets() == 3, "it waited instead of ending on the second agreeing read"
@@ -964,14 +933,17 @@ def test_a_post_without_a_job_id_says_whether_a_job_may_exist(harness, http, bod
     assert r.returncode == rc and needle in r.stderr, (r.returncode, r.stderr)
 
 
-def test_an_unexpected_stop_after_the_job_exists_names_it(harness):
-    """Every path after the POST names the job. A failing `sleep` mid-wait is a stop nobody wrote a
-    message for; the exit trap still says the job WAS created."""
-    harness._stub("sleep", '#!/bin/bash\necho "sleep $*" >> "$STUB_LOG"\nexit 42\n')
+@pytest.mark.parametrize("code", [1, 2, 3])
+def test_an_unexpected_stop_after_the_job_exists_is_exit_8_and_names_it(harness, code):
+    """#175 round-6 critic F1. Every path after the POST names the job AND exits in the "a job MAY exist" class.
+    The trap used to `return 0`, so the failing command's own code survived: a `sleep` that exits 1, 2 or 3 read
+    as "NOTHING WAS CREATED" to a caller keying on the classes, and it retried. Round 5's pin used 42, the one
+    code that overlaps no class, so it could not see this."""
+    harness._stub("sleep", f'#!/bin/bash\necho "sleep $*" >> "$STUB_LOG"\nexit {code}\n')
     harness.statuses([snap("running")])
     r = harness.run("--wait")
-    assert r.returncode == 42
-    assert "job job_test_1 WAS created. Do not re-run to retry it" in r.stderr
+    assert r.returncode == 8, (r.returncode, r.stderr)
+    assert f"Stopped (exit {code}): job job_test_1 WAS created. Do not re-run to retry it" in r.stderr
 
 
 def test_nothing_sent_and_job_exists_never_share_an_exit_code(harness):
@@ -1030,8 +1002,15 @@ def test_the_quote_never_reads_a_sheet_catalog(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("args,needle", [
-    (("--duration", "1.0"), "audio ~$0.025-0.15 ($0.025 measured at 10 s; x6.0 for 1 min is the high end)"),
-    (("--tier", "medium", "--duration", "1.0"), "audio ~$0.15 (per episode; no duration basis recorded, so NOT scaled to 1 min)"),
+    # #175 round-6 claims 1: the scaled band ($0.15 at 1 min) sat below the census tail ($0.298, 31 low 1-min
+    # jobs), so the high end is the tail and says where it came from.
+    (("--duration", "1.0"), "audio ~$0.025-0.30 (band $0.025-0.15 ($0.025 measured at 10 s; x6.0 for 1 min); "
+                            "the high end is the census tail, the costliest of 31 low jobs at 1 min: $0.298"),
+    (("--tier", "medium", "--duration", "1.0"), "audio ~$0.15-0.51 (band $0.15 (per episode; no duration basis "
+                                                "recorded, so NOT scaled to 1 min); the high end is the census tail, "
+                                                "the costliest of 13 medium jobs at 1 min: $0.508)"),
+    # a duration the census never measured falls back to the tier's costliest job of any length
+    (("--duration", "3.0"), "audio ~$0.025-0.45 ($0.025 measured at 10 s; x18.0 for 3 min)"),
 ])
 def test_the_audio_band_follows_the_duration_where_its_basis_is_known(harness, workers_src, args, needle):
     r = harness.run("--dry-run", "--motion-clips", "1", *args, env={"WORKERS_SRC": workers_src})
@@ -1056,9 +1035,13 @@ def test_visuals_auto_prices_the_authors_it_runs():
     auto = verification_job.estimate(verification_job.build_body(
         topic="t", duration="0.167", tier="low", style="Explainer", visuals="auto", fmt="", content_rating="",
         source_writeup="", language="en-US", motion_clips=0, paid_stills="on"))
-    assert "visuals authors ~$0-0.15" in auto.text and auto.high == pytest.approx(0.025 + 0.152)
+    # The audio high end at 10 s is the census tail of low 10 s jobs ($0.165 over 194), not the T3 job's $0.025
+    # (#175 round-6 claims 1: 4 of 194 such jobs booked an architect stage).
+    assert "visuals authors ~$0-0.15" in auto.text and auto.high == pytest.approx(0.165 + 0.152)
     t3 = verification_job.estimate(json.loads(EXPECTED_DEFAULT_BODY))
-    assert t3.text == "~$0.025"
+    assert t3.text.startswith("~$0.025-0.17 (band $0.025; the high end is the census tail, the costliest of 194 "
+                              "low jobs at 0.167 min: $0.165"), t3.text
+    assert (t3.low, t3.high) == pytest.approx((0.025, 0.165))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1089,3 +1072,207 @@ def test_the_read_back_retries_a_failed_read(harness, workers_src):
     r = harness.run("--motion-clips", "2", env={"WORKERS_SRC": workers_src})
     assert r.returncode == 0, (r.returncode, r.stderr)
     assert harness.gets() == 2 and "read back: the api stored the requested" in r.stderr
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 6: only the producer's by-design reasons end a wait (design D1, latency L6-1, critic F2)
+# ---------------------------------------------------------------------------------------------
+
+_LIVE_LEASE = {"owner": "pass-2", "expires_at_ms": 32503680000000}   # year 3000: unexpired at any clock here
+
+
+def test_a_retry_over_a_failed_assembly_is_waited_out_not_called_terminal(harness, workers_src):
+    """The lenses' own sequence. The first mux fails (``failed_assembly``); the watchdog's retry claims the stage
+    (``rendering``, the stale ``assembly_failed`` kept, a live lease, the stamp cleared), muxes (``assembling``)
+    and delivers. Round 5 exited 5, "NO VIDEO is coming", on the third read, about two minutes after the audio.
+    The producer's reasons are read (WORKERS_SRC), and ``assembly_failed`` is not among them."""
+    retry = dict(wants_visuals=True, skip="assembly_failed", settle="null")
+    harness.statuses(
+        [snap("completed", wants_visuals=True, video_status="failed_assembly", skip="assembly_failed")]
+        + [snap("completed", video_status="rendering", visual_extra={"visuals_stage_lease": _LIVE_LEASE}, **retry)] * 3
+        + [snap("completed", video_status="assembling", visual_extra={"video_assembly_lease": _LIVE_LEASE},
+                **retry)] * 2
+        + [snap("completed", wants_visuals=True, video=True, video_status="ready")] * 5)
+    r = harness.run("--visuals-auto", "--wait", env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "NO VIDEO is coming" not in r.stderr and "Video ready and its clip array settled" in r.stdout
+    assert "a video ends the wait early only on the producer's by-design reasons: " in r.stderr
+    assert harness.gets() == 1 + 3 + 2 + 3, "the wait ended before the retry delivered, or overran the settle"
+
+
+def test_without_the_producers_reasons_no_skip_reason_ends_the_wait(harness):
+    """A wait that cannot read the producer's names keeps the frontend's rule: it waits (exit 4 at its budget)
+    rather than calling anything terminal on a skip reason, and it says so once."""
+    harness.statuses([snap("completed", wants_visuals=True, visual_status="partial", video_status="rendering",
+                           skip="audio_only_no_clips")])
+    r = harness.run("--visuals-auto", "--wait", env={"KFU_WORKERS_PYTHON": "/nonexistent/python"})
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "the producer's no-video reasons could not be read" in r.stderr and "NO VIDEO" not in r.stderr
+
+
+def test_the_wait_branches_on_the_modules_verdict_not_its_own(harness):
+    """#175 round-6 design D3 / critic F3: the shell used to re-derive `trustworthy` from `phase` and `settle`, so
+    the module's rule could change and the wait would not. Break the module's verdict in the harness's COPY of
+    the package: the wait must follow it. The control is the same reads on an unbroken copy."""
+    reads = [snap("completed", wants_visuals=True, video=True, video_status="ready")]
+    harness.statuses(reads)
+    ok = harness.run("--visuals-auto", "--wait")
+    assert ok.returncode == 0, (ok.returncode, ok.stderr)
+    (harness.root / "broken").mkdir()
+    broken = Harness(harness.root / "broken")
+    module = broken.root / "src" / "kitesforu_qa" / "visual_readiness.py"
+    rule = "return phase == PHASE_READY and self.settle_stamp != STAMP_IN_FLIGHT"
+    assert module.read_text().count(rule) == 1, "the rule's line moved; this test must follow it"
+    module.write_text(module.read_text().replace(rule, "return False"))
+    broken.statuses(reads)
+    r = broken.run("--visuals-auto", "--wait")
+    assert r.returncode == 4, "the wait counted a read the module calls untrustworthy"
+
+
+def test_status_fields_emits_the_modules_two_verdicts():
+    ready = json.loads(snap("completed", wants_visuals=True, video=True, video_status="ready"))
+    fields = verification_job.status_fields(ready, expect_video=True)
+    assert len(fields) == 9 and fields[7:] == ["no", "yes"], fields
+    dead = json.loads(snap("completed", wants_visuals=True, video_status="failed_assembly"))
+    assert verification_job.status_fields(dead, expect_video=True)[7:] == ["yes", "no"]
+    writing = json.loads(snap("completed", wants_visuals=True, video=True, video_status="ready", settle="null"))
+    assert verification_job.status_fields(writing, expect_video=True)[7:] == ["no", "no"]
+
+
+def test_a_top_level_video_url_alone_is_not_a_video(harness):
+    """#175 round-6 design D4: the frontend reads the compartment's own video fields only (`hasComposedVideo`,
+    strict). A doc whose only URL is top-level is not ready; the compartment URL is."""
+    doc = json.loads(snap("completed", wants_visuals=True, visual_status="done"))
+    doc["video_url"] = "https://storage.googleapis.com/b/v.mp4?X-Goog-Signature=abc"
+    assert verification_job.status_fields(doc, expect_video=True)[2] == "pending"
+    doc["visual"]["video_url"] = doc["video_url"]
+    assert verification_job.status_fields(doc, expect_video=True)[2] == "ready", "control"
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 6: an unexplained stop or a signal after the POST is exit 8 (critic F1)
+# ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("sig,name", [(signal.SIGTERM, "SIGTERM"), (signal.SIGHUP, "SIGHUP"),
+                                      (signal.SIGINT, "SIGINT")])
+def test_a_signal_during_the_wait_says_the_job_exists_and_exits_8(harness, sig, name):
+    """A --wait ended by a tool timeout or a closed terminal used to end silently: `$?` in the EXIT trap is the
+    last command's status, not the signal's. The sleep runs under `wait`, so the signal is acted on at once."""
+    harness._stub("sleep", '#!/bin/bash\necho "sleep $*" >> "$STUB_LOG"\nexec /bin/sleep 30\n')
+    harness.statuses([snap("running")])
+    env = harness.env()
+    proc = subprocess.Popen(["/bin/bash", str(harness.script), "--wait"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 30
+        while not any(c[0] == "sleep" for c in harness.calls()) and time.time() < deadline:
+            time.sleep(0.05)
+        assert any(c[0] == "sleep" for c in harness.calls()), "the wait never reached its sleep"
+        started = time.time()
+        proc.send_signal(sig)
+        out, err = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 8, (proc.returncode, err)
+    assert time.time() - started < 10, "the signal waited out the sleep"
+    assert f"Stopped ({name}): job job_test_1 WAS created. Do not re-run to retry it" in err
+
+
+# ---------------------------------------------------------------------------------------------
+# Round 6: the quote asks every beat shape, on the arm the policy says (design D5, workers #3280 round 1)
+# ---------------------------------------------------------------------------------------------
+
+def test_the_plain_beat_of_an_anchored_pass_is_priced_on_that_passs_row(harness, workers_src):
+    """Workers #3280 round-1 critic 1: the plain beat of an anchored pass goes out first-frame on the anchored
+    pass's row, at the budget's own length. Round 5 could only price it as a plain pass's clip."""
+    r = harness.run("--dry-run", "--motion-clips", "2", env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, r.stderr
+    cells = _clip_cells(r.stderr)
+    for side in ("fal", "nofal"):
+        anchored = next(k for k in cells if k.startswith(f"{side}:anchored:"))
+        mixed = next(k for k in cells if k.startswith(f"{side}:plain-beat-of-anchored-pass:"))
+        assert anchored.split(":")[2] == mixed.split(":")[2], "the plain beat left the anchored pass's row"
+        assert mixed.endswith(":6"), "a first-frame clip is the budget's own 6 s"
+    rows = re.findall(_SHAPE_RE, r.stderr)
+    assert {route for shape, _, route, _, _ in rows if shape == "plain-beat-of-anchored-pass"} == {"first_frame"}
+
+
+class _Policy:
+    def __init__(self, motion_purchased: bool):
+        from types import SimpleNamespace
+        self.hero_budget = SimpleNamespace(max_clip_usd=0.65, max_seconds=6)
+        self.motion_purchased = motion_purchased
+
+
+def _fake_producer(quote):
+    return {"policy_for_job": lambda body: _Policy(bool((body.get("visual_options") or {}).get("motion_clips"))),
+            "video_models": lambda: [object()], "quote_hero_clip": quote, "select_failed": "select_failed",
+            "iter_model_rows": lambda: {"m": {"provider": "fal"}}}
+
+
+def test_the_quote_asks_the_arm_the_policy_built():
+    """#175 round-6 design D5: `paid_opt_in` came from a literal True beside the policy object that carries it."""
+    from types import SimpleNamespace
+    asked = []
+
+    def quote(budget, **kw):
+        asked.append(kw)
+        return SimpleNamespace(model_id="m", seconds=6, usd=0.36, seed_mode="first_frame", skipped="", detail="")
+
+    verification_job.quote_purchased_clips(_fake_producer(quote), {"visual_options": {"motion_clips": 2}}, aspect="16:9")
+    verification_job.quote_purchased_clips(_fake_producer(quote), {"visual_options": {}}, aspect="16:9")
+    assert {a["paid_opt_in"] for a in asked[:6]} == {True} and {a["paid_opt_in"] for a in asked[6:]} == {False}
+    assert {(a["pass_anchored"], a["beat_anchored"]) for a in asked[:6]} == {(False, False), (True, True), (True, False)}
+
+
+def test_a_selection_that_raised_is_a_refusal_to_price_never_a_free_clip():
+    from types import SimpleNamespace
+
+    def quote(budget, **kw):
+        return SimpleNamespace(model_id=None, seconds=0, usd=0.0, seed_mode="", skipped="select_failed",
+                               detail="RuntimeError: catalog unreadable")
+
+    with pytest.raises(verification_job.PricingUnavailable, match="catalog unreadable"):
+        verification_job.quote_purchased_clips(_fake_producer(quote), {"visual_options": {"motion_clips": 1}},
+                                               aspect="16:9")
+
+
+def test_a_cell_the_pass_refuses_is_zero_and_says_which_gate():
+    from types import SimpleNamespace
+
+    def quote(budget, **kw):
+        if kw["beat_anchored"]:
+            return SimpleNamespace(model_id=None, seconds=0, usd=0.0, seed_mode="", skipped="clip_cap", detail="x")
+        return SimpleNamespace(model_id="m", seconds=6, usd=0.36, seed_mode="first_frame", skipped="", detail="")
+
+    q = verification_job.quote_purchased_clips(_fake_producer(quote), {"visual_options": {"motion_clips": 1}},
+                                               aspect="16:9")
+    refused = [c for c in q.cells if c.shape == "anchored"]
+    assert refused and all(c.usd == 0.0 and c.skipped == "clip_cap" for c in refused)
+    assert "anchored no clip (clip_cap)" in "\n".join(q.detail(anchors_possible=True))
+
+
+def test_the_clip_warning_counts_the_longest_clip_a_cell_buys(harness, workers_src):
+    """Workers #3280 round-1 design D6: the warning used `budget.max_seconds` (6 s); a no-key anchored cell is a
+    Veo reference clip, 8 s. A 15 s episode with one clip: 8 s is more than half, 6 s is not."""
+    r = harness.run("--dry-run", "--motion-clips", "1", "--duration", "0.25", env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, r.stderr
+    assert any(k.endswith(":8") for k in _clip_cells(r.stderr)), "control: no 8 s cell on this catalog"
+    assert "1 clip(s) is ~8s of video for a 15s episode" in r.stderr, r.stderr
+
+
+def test_the_still_regen_multiplier_is_the_producers():
+    """#175 round-6 cost C1: `regens` was a hand copy (`= 1`) of a renderer literal. It is the producer's
+    SCENE_VERIFY_REGENS_PER_BEAT now, with no default here, and the dollar ceiling follows it."""
+    fields = {f.name: f for f in dataclasses.fields(verification_job.ImageQuote)}
+    assert fields["regens"].default is dataclasses.MISSING, "a default would be a copy of the producer's number"
+    q = verification_job.ImageQuote(rows=(("a", 0.039, True), ("b", 0.134, False)), relimage_usd=0.039,
+                                    relimage_cap=lambda n, paid: 0, plate_budget=4, regens=2)
+    assert q.high == pytest.approx(0.134 * 3)
+
+
+def test_the_dry_run_names_the_producers_regen_bound(harness, workers_src):
+    r = harness.run("--dry-run", "--motion-clips", "1", env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, r.stderr
+    assert "x2 (SCENE_VERIFY_REGENS_PER_BEAT=1). A DOLLAR ceiling at the dearest row, not a render count" in r.stderr

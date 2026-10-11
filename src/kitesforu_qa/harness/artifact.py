@@ -279,16 +279,21 @@ class Artifact:
         an unreadable doc is exactly the case where a confident number is most dangerous.
         """
         doc = self.doc if isinstance(self.doc, dict) else {}
-        return VisualReadiness.from_visual(
-            doc.get("visual"),
-            top_level_video_url=doc.get("video_url") or _g(doc, "outputs", "video_url"),
-        )
+        # The compartment's own video fields only, as the frontend reads them (#175 round-6 design D4).
+        return VisualReadiness.from_visual(doc.get("visual"))
 
     def assert_visual_final(self) -> VisualReadiness:
-        """Raise unless the visual stage finished. Use this to GATE a claim, not to decorate one.
+        """Raise unless the visual STAGE finished. Use this to GATE a claim, not to decorate one.
 
         The whole point is that it is louder than a comment: a probe that calls this cannot quietly
         report a mid-run number, which is how a lowered ceiling got shipped on a snapshot.
+
+        WHAT IT GATES, decided in #175 round 6 (design D3): a claim about the STAGE (it finished, nothing
+        pending, every clip has bytes). It does NOT gate a clip COUNT taken from the delivered video. A
+        hot-swap still pending (``video_status=rendering`` beside a finished stage) passes this gate, and the
+        hot-swap pass then rewrites the array. A count needs ``VisualReadiness.clip_count_trustworthy`` plus
+        the same ``clips_fingerprint`` for ``settled_clips.DEFAULT_STABLE_SECONDS``, which is what the
+        verification wait checks (``scripts/verification_job.py``).
         """
         r = self.visual_readiness
         if not r.is_final:
