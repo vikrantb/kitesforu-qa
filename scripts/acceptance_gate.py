@@ -99,9 +99,16 @@ _FOOTAGE_MODALITIES = frozenset({"scene_image", "video_hero"})
 
 
 def _is_footage(clip: dict | None) -> bool:
+    """True when the clip's pixels are a picture. A picture reframed into a card slot keeps
+    `modality: diagram` and `ai_generated: False`, but its `visual_register` says "photo": 11 of
+    the 393 census clips are diagram/photo, and the one RUN on them (33ae4811 123-129 s, a
+    full-bleed office scene) was a false positive. No real cut or margin touch in the census sits
+    on a photo-register clip. "cartoon" is NOT exempt: diagram/cartoon clips exist and none was
+    examined."""
     if not clip:
         return False
-    return clip.get("modality") in _FOOTAGE_MODALITIES or clip.get("ai_generated") is True
+    return (clip.get("modality") in _FOOTAGE_MODALITIES or clip.get("ai_generated") is True
+            or clip.get("visual_register") == "photo")
 
 
 def _clip_at(clips: list[dict] | None, ts_ms: int) -> dict | None:
@@ -120,13 +127,6 @@ def _clip_at(clips: list[dict] | None, ts_ms: int) -> dict | None:
         if dur > 0 and start <= ts_ms < start + dur:
             return c
     return None
-
-
-def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
-    """The authored modality of the clip covering ``ts_ms``, or None when unknown."""
-    c = _clip_at(clips, ts_ms)
-    m = (c or {}).get("modality")
-    return m if isinstance(m, str) and m else None
 
 
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
@@ -261,18 +261,23 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
             f"the frame edge — content likely cut off-frame{skipped}")})
-    # RUN rule: content cut at the SAME edge on 2+ CONSECUTIVE frames (3+ seconds held, not a
+    # RUN rule: content at the SAME edge on 2+ CONSECUTIVE frames (3+ seconds held, not a
     # slide-in passing the edge) is a defect a viewer sees, however clean the rest of the episode
     # is. The rate rule above cannot see it on a long episode; this one names WHEN. "Same edge"
     # matters: the first version chained any edge, and alternating L/R/RB frames (a camera pan)
     # read as one long cut.
+    # PRECISION, measured 2026-10-11 by reading every flagged run's frames (44 runs, 6 census
+    # episodes, one adversary per episode): 27 cut content off-frame, 15 sat inside the 3% margin
+    # without cutting, 2 were pictures. So the message says "cut or inside the margin", and the
+    # finding is MAJOR (REVIEW, with the times for the adversary), not a BLOCKER.
     runs = _runs(clipped, min_len=2)
     if runs:
         spans = ", ".join(f"{a * _FRAME_INTERVAL_MS // 1000}-{(b + 1) * _FRAME_INTERVAL_MS // 1000}s "
                           f"({'/'.join(sorted(e))})" for a, b, e in runs)
         issues.append({"sev": "MAJOR", "msg": (
-            f"EDGE-CLIP RUN: content cut at the same frame edge on consecutive frames at {spans} "
-            f"({len(runs)} run(s), {sum(b - a + 1 for a, b, _ in runs)} frame(s))")})
+            f"EDGE-CLIP RUN: content held at the same frame edge on consecutive frames at {spans} "
+            f"({len(runs)} run(s), {sum(b - a + 1 for a, b, _ in runs)} frame(s)): cut off-frame "
+            "or inside the 3% margin")})
     return issues
 
 

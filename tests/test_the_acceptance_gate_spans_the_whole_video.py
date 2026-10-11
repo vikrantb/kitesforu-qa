@@ -18,13 +18,12 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 
-import pytest
-
 # Declared dependencies (pyproject: numpy, Pillow), so imported, never importorskip'd: a skip hid
 # that the qa venv had drifted without Pillow, and the gate then passed jobs it had not looked at.
-import numpy as np
+import numpy  # noqa: F401  (declared dependency: a drifted venv must fail here, not skip)
 import PIL.Image as PIL_Image
 import PIL.ImageDraw as PIL_ImageDraw
+import pytest
 
 _GATE = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "acceptance_gate.py"
 _W, _H = 960, 540
@@ -105,6 +104,8 @@ def test_the_same_edge_held_is_a_run(frames):
     {"modality": "scene_image"},
     {"modality": "video_hero"},
     {"modality": "motion", "ai_generated": True},
+    # A picture reframed into a card slot: modality says diagram, the register says photo.
+    {"modality": "diagram", "ai_generated": False, "visual_register": "photo"},
 ])
 def test_footage_is_exempt_whatever_its_label(frames, footage):
     """A photo, an illustration or a Veo clip bleeds to the edge by design. The first version
@@ -139,11 +140,11 @@ def test_frames_are_ordered_by_number_not_by_string(tmp_path):
 
 def test_runs_are_maximal_share_an_edge_and_respect_the_minimum():
     gate = _load_gate()
-    L, R = frozenset({"left"}), frozenset({"right"})
-    LR = frozenset({"left", "right"})
-    assert gate._runs([(3, L), (4, L), (9, LR), (10, R), (11, R), (20, L)]) == [(3, 4, L), (9, 11, R)]
-    assert gate._runs([(5, L), (6, R)]) == []
-    assert gate._runs([(5, L)]) == []
+    left, right = frozenset({"left"}), frozenset({"right"})
+    both = frozenset({"left", "right"})
+    assert gate._runs([(3, left), (4, left), (9, both), (10, right), (11, right), (20, left)]) == [(3, 4, left), (9, 11, right)]
+    assert gate._runs([(5, left), (6, right)]) == []
+    assert gate._runs([(5, left)]) == []
     assert gate._runs([]) == []
 
 
