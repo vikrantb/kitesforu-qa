@@ -231,7 +231,7 @@ ensure_workers_tree() {
   local purpose="$1" _wsha _wdate
   [[ -n "$WORKERS_SRC_FOR_PLAN" ]] && return 0
   if [[ ! -x "$WORKERS_PY" ]] || ! "$WORKERS_PY" -c 'import sys' >/dev/null 2>&1; then
-    echo "Refusing: cannot $purpose. The workers interpreter '$WORKERS_PY' is missing or" >&2
+    echo "Cannot $purpose: the workers interpreter '$WORKERS_PY' is missing or" >&2
     echo "does not run. Pricing imports the workers selector, so it runs under the workers venv: create it" >&2
     echo "(kitesforu-workers/.venv) or set KFU_WORKERS_PYTHON." >&2
     return 1
@@ -242,17 +242,18 @@ ensure_workers_tree() {
     return 0
   fi
   _wsha=$(git -C "$WORKERS_REPO" rev-parse --verify --quiet "origin/main^{commit}") \
-    || { echo "Refusing: cannot $purpose. No origin/main in $WORKERS_REPO (set KFU_WORKERS_REPO or WORKERS_SRC)." >&2; return 1; }
+    || { echo "Cannot $purpose: no origin/main in $WORKERS_REPO (set KFU_WORKERS_REPO or WORKERS_SRC)." >&2; return 1; }
   _wdate=$(git -C "$WORKERS_REPO" log -1 --format=%cs "$_wsha")
   WORKERS_TREE=$(mktemp -d "${TMPDIR:-/tmp}/kfu-verify-workers.XXXXXX")
   git -C "$WORKERS_REPO" archive "$_wsha" -- src/workers config/model_catalog.csv | tar -x -C "$WORKERS_TREE" \
-    || { echo "Refusing: cannot $purpose. git archive of workers $_wsha failed." >&2; return 1; }
+    || { echo "Cannot $purpose: git archive of workers $_wsha failed." >&2; return 1; }
   WORKERS_SRC_FOR_PLAN="$WORKERS_TREE/src"
   CATALOG_LABEL="kitesforu-workers origin/main ${_wsha:0:12} ($_wdate) select_provider + config/model_catalog.csv"
 }
 PLAN_PY="python3"
 if [[ "$MOTION_CLIPS" != "0" ]]; then
-  ensure_workers_tree "price the clips this job buys" || { echo "Nothing was sent." >&2; exit 1; }
+  ensure_workers_tree "price the clips this job buys" \
+    || { echo "Refusing the purchase: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
 fi
 
