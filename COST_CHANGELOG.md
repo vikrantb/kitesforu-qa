@@ -2,14 +2,15 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
-## 2026-10-10 — the verification job buys paid clips and stills on a QA identity, and its estimate is computed from the body it sends and priced by the code that buys it (opt-in `--motion-clips` only: ~$0.75-2.91 per `--tier low --motion-clips 2` run at 10 s; $0 change on every run without a purchase)
+## 2026-10-10 — the verification job buys paid clips and stills on a QA identity, and its estimate is computed from the body it sends and priced by the code that buys it (opt-in `--motion-clips` only: ~$0.75-3.05 per `--tier low --motion-clips 2` run at 10 s, ~$0.75-3.19 at 1 min; $0 change on every run without a purchase)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py` (new),
 `src/kitesforu_qa/visual_readiness.py` (new), `src/kitesforu_qa/job_status.py` (new),
 `src/kitesforu_qa/settled_clips.py`, `src/kitesforu_qa/harness/artifact.py`, `scripts/canary_loop.py`,
 `scripts/narration_sync_audit.py`, `scripts/capture_starved_measurements.py`,
-`src/kitesforu_qa/integrations/kitesforu_api.py`, `src/kitesforu_qa/cli.py`, the tests, this entry. PR #175,
-all five rounds. The status and readiness files change WHEN a poller stops, never what a job buys.
+`src/kitesforu_qa/integrations/kitesforu_api.py`, `src/kitesforu_qa/cli.py`, `scripts/acceptance_gate.py`,
+`scripts/post_deploy_fiction_census.py`, `scripts/verification_job_census.py` (new, read-only), the tests, this
+entry. PR #175, all six rounds. The status and readiness files change WHEN a poller stops, never what a job buys.
 
 **This is the record #175 owed since round 2.** Round 1 added `--motion-clips N`
 (`visual_options.motion_clips`). Round 2 (`212ee49`) also began sending `real_images: true,
@@ -37,13 +38,13 @@ from kitesforu-workers at the seam PR's head (the same catalog as origin/main `6
 
 | term | range | how |
 |---|---|---|
-| audio | ~$0.025 | the T3 band, measured on a 10 s job. A longer `--duration` scales its high end linearly; medium/high bands record no duration basis and say they are not scaled |
+| audio | ~$0.025-0.17 at 10 s, ~$0.025-0.30 at 1 min | the T3 band, measured on a 10 s job, widened to the census tail in round 6 (claims 1). That job ran no blueprint `architect` stage and no `music` bed; some low jobs run both, so the high end is the larger of the scaled band and the costliest finished job's non-visual cost for that tier and duration: $0.165 over 194 low 10 s jobs, $0.298 over 31 low 1-min jobs (read-only census 2026-10-10, `scripts/verification_job_census.py --section audio`). An observed maximum, not a bound |
 | visuals authors | $0-0.15 | the visuals pass's LLM stages (diagram/figure/geometry author, art director). MEASURED, not a bound: read-only census 2026-10-10, newest 600 `podcast_jobs` by `created_at`, the 471 with a visual compartment and an author stage: median $0.064, p95 $0.126, max $0.152. Also on `--visuals-auto` runs, which run these stages and used to print $0.025 |
-| 2 purchased clips | $0.72-1.28 | `hero_clip_choice.quote_hero_clip`, which `veo_hero` selects and prices with, on the budget `policy_for_job` builds from this body. **Serving (fal bound; `FAL_KEY` is set on the serving visuals worker):** $0.36 on both cells, minimax/h3/image-to-video (plain) and minimax/h3/reference-to-video (anchored). **Failover (no fal key):** veo-3.1-lite $0.18 (6 s, plain), veo-3.1-fast $0.64 (8 s reference, anchored). Low end = serving, high end = the dearest reachable cell. Round 4 took the min over all four cells, $0.36 below what the serving worker pays per clip. With `--paid-stills off` the anchored cells are unreachable (a plate needs paid generation) |
-| up to 3 paid stills | $0.009-0.80 | the enabled, unretired `per image` IMAGE rows: flux-schnell $0.003 x1 up to gemini-3-pro-image $0.134 x2 (one scene-verify regen per beat). A verify REJECT can add a render on another row; not bounded |
+| 2 purchased clips | $0.72-1.28 | `hero_clip_choice.quote_hero_clip`, which composes the row, route, price and gate functions `veo_hero` calls (workers #3280's fix round), on the budget AND the arm `policy_for_job` builds from this body. Six cells, three beat shapes x fal bound or not. **Serving (fal bound; `FAL_KEY` is set on the serving visuals worker):** $0.36 on all three, minimax/h3/image-to-video (plain), minimax/h3/reference-to-video (anchored, reference route) and the same row first-frame (the plain beat of an anchored pass). **Failover (no fal key):** veo-3.1-lite $0.18 (6 s, plain), veo-3.1-fast $0.64 (8 s reference, anchored), veo-3.1-fast $0.48 (6 s first-frame, the plain beat of an anchored pass; round 5 priced that beat at the plain pass's $0.18). Low end = serving, high end = the dearest reachable cell. With `--paid-stills off` the anchored-pass cells are unreachable (a plate needs paid generation). A cell the pass would refuse is $0 and names the gate; a selection that raised refuses to price |
+| up to 3 paid stills | $0.009-0.80 | the enabled, unretired `per image` IMAGE rows: flux-schnell $0.003 x1 up to gemini-3-pro-image $0.134 x(1 + the producer's `SCENE_VERIFY_REGENS_PER_BEAT`, 1). A DOLLAR ceiling at the dearest row, not a render count: 072c32c4 booked 8 renders on a grant of 3, all at $0.039 (round-6 cost C2). A verify REJECT can add a render on another row; not bounded. The scene-verify vision judge (well under $0.01 per run, not booked under `costs.*`) is not added |
 | up to 3 relimage bases | $0-0.12 | `scene_budget.relimage_cap(3, allow_paid)` at `image_cost_ledger.price_of(RELIMAGE)` ($0.039), what the ledger books them at |
 | up to 4 character plates | $0-0.54 | `character_anchors.ANCHOR_PLATE_BUDGET` new plates per plan, each at most the dearest reference-capable row (gemini-3-pro-image $0.134). A fiction run is the likeliest to draw them; the term is priced for every purchase |
-| **total** | **~$0.75-2.91** | the sum |
+| **total** | **~$0.75-3.05 at 10 s; ~$0.75-3.19 at 1 min** | the sum, as the dry-run prints it (`... --motion-clips 2 --visuals-auto --dry-run`, with and without `--duration 1.0`). Round 5 printed ~$0.75-2.91 at 10 s: the +$0.14 is the audio tail. At 10 s the coverage warning fires; 1 min is the shape a paid T4 should use |
 
 **What one plan does NOT bound, named on the printed line:** a re-planned pass (the mux's script-moved
 refusal, `mux_gate.REPLAN_CAP` = 3) can buy stills, relimage bases and plates again; a character whose
@@ -51,7 +52,7 @@ description changed can be redrawn once; a born-short (`--short`) also reaches `
 `concrete_referent_images`, which print as NOT BOUNDED.
 
 **Both arms of the plates/relimage fix, on the purchased population.** Census 2026-10-10 (command:
-`census/r5_census.py`, section 5), the 22 purchased jobs that booked `costs.visuals_images` (all ultra,
+`scripts/verification_job_census.py --section images`), the 22 purchased jobs that booked `costs.visuals_images` (all ultra,
 `max_images` 6, `motion_clips` 3): the round-4 still-only bound (6 x $0.134 x 2 = $1.608) is exceeded by 2
 (44eca8ae $1.742, cb90e9c5 $1.825); the round-5 one-plan bound ($1.608 + 4 x $0.039 + 4 x $0.134 = $2.30)
 by 0. Those docs predate the 2026-10-01 ledger rework, so `scenes` may count showings, not renders.
@@ -86,7 +87,11 @@ up to 720 times (10800 / 15) on a purchase; a run whose audio completes reads ~9
 Round 4 said "at most ~90 extra"; that covered only the post-audio phase (round-5 cost NIT-2). Each read
 is a GET: api #867 moved the refund transaction off this poll. Census 2026-10-10: created -> video object,
 18 of 443 non-purchased jobs after 5400 s, 3 of 21 purchased jobs after 10800 s; a paid `--wait` can still
-run out while the job is healthy (exit 4).
+run out while the job is healthy (exit 4). ROUND 6 WAITS LONGER IN ONE CASE, on purpose: a failure reason
+beside a `rendering`/`assembling` ladder (a retry the producer's watchdog makes or owes) used to end the wait
+after two reads with exit 5; it is now waited out to the producer's terminal stamp or the budget, up to ~180
+more reads on a purchase. Only the producer's four by-design reasons, imported from workers
+`video_skip_reasons`, still end it early.
 
 **Pricing-page implication:** none. This is QA tooling, and user prices are unchanged.
 
