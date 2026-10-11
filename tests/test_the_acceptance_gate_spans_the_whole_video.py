@@ -1,125 +1,117 @@
-"""The acceptance gate must score the FULL duration, not the first half of it.
+"""The acceptance gate must look at EVERY frame, so a short defect anywhere in the episode is found.
 
-`.claude/rules/02-done.md` relies on this gate precisely because it "scores every frame across the
-full duration rather than one hero frame". It did not.
+`.claude/rules/02-done.md` relies on this gate because it "scores every frame across the full
+duration rather than one hero frame". Its first version scored a PREFIX (floor division took the
+first twelve frames of a 13..23-frame video); the fix spread twelve samples across the video. That
+still left it blind to anything short: twelve samples of a 138-frame episode miss a defect that
+lasts a few seconds, and the edge rule only fired when a THIRD of the samples clipped.
 
-`step = max(1, len(frames) // 12)` FLOORS to 1 for any frame count in 13..23, and `[::1][:12]` then
-takes the FIRST twelve. Measured 2026-09-02, before the fix::
+Measured 2026-10-11 (frame census, job 04c014a2, 138 frames): kinetic text cut at the frame edge
+at 54-57 s and 63-66 s, gate verdict PASS_DETERMINISTIC. The first adversary to read the frames
+saw it at once. The gate now inspects every frame and names WHEN content is cut.
 
-    frames   step   window    coverage
-      18      1     0..11       67%
-      22      1     0..11       55%
-      23      1     0..11       52%
-      24      2     0..22       96%    <- only once the floor reaches 2
-
-At the `fps=1/3` extraction the gate uses, that band is roughly 39-69 second videos — squarely
-where real episodes land.
-
-HOW IT WAS FOUND, because the method is the reusable part: job `0082f988` carries `maps_sequence`
-at beats 6-7, which occupy 57.9-66.6s = frames 19..22 of 22. The gate returned a MAJOR edge-clip
-verdict on that job — and that verdict said nothing whatever about the map frames, because they
-were outside the sampled window. Correlating the finding back to the clip that authored it is what
-exposed the gap; the verdict alone looked like a real answer.
+The fixtures are generated, never committed (synthetic frames; this repository is public).
 """
-
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import importlib.util
+import pathlib
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+# Declared dependencies (pyproject: numpy, Pillow), so imported, never importorskip'd: a skip hid
+# that the qa venv had drifted without Pillow, and the gate then passed jobs it had not looked at.
+import numpy as np
+import PIL.Image as PIL_Image
+import PIL.ImageDraw as PIL_ImageDraw
+
+_GATE = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "acceptance_gate.py"
+_W, _H = 960, 540
 
 
-def _window(n: int):
-    """The frames `_pixel_invariants` actually inspects — from the REAL function.
-
-    An earlier version recomputed the stride here, which meant reverting the source left every
-    parametrised case green: it tested a copy of the rule rather than the rule. Calling
-    `_sample_indices` is the difference between a test and a restatement.
-    """
-    from acceptance_gate import _sample_indices
-
-    return _sample_indices(n)
+def _load_gate():
+    spec = importlib.util.spec_from_file_location("acceptance_gate", _GATE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-@pytest.mark.parametrize("n", [12, 13, 18, 22, 23, 24, 36, 48, 100, 240])
-def test_the_sample_spans_at_least_90_percent_of_the_video(n: int):
-    w = _window(n)
-    coverage = (w[-1] + 1) / n
-    assert coverage >= 0.90, (
-        f"{n} frames -> checks {w[0]}..{w[-1]} = {coverage:.0%} of the video. The gate is scoring "
-        f"a prefix, so anything in the tail — a cut-off close, a late map, a final card — is "
-        f"invisible to it."
-    )
+@pytest.fixture()
+def frames(tmp_path):
+    clean = PIL_Image.new("L", (_W, _H), 18)
+    PIL_ImageDraw.Draw(clean).rectangle([200, 190, 750, 350], fill=235)
+    clipped = PIL_Image.new("L", (_W, _H), 18)
+    dr = PIL_ImageDraw.Draw(clipped)
+    dr.rectangle([-60, 190, 150, 350], fill=235)
+    for i in range(6):
+        dr.rectangle([-50, 210 + i * 20, 130, 220 + i * 20], fill=30)
+    made = {}
+    for name, im in (("clean", clean), ("clipped", clipped)):
+        p = tmp_path / f"{name}.png"
+        im.save(p)
+        made[name] = str(p)
+    return made
 
 
-@pytest.mark.parametrize("n", [13, 18, 22, 23])
-def test_the_band_that_was_broken_is_the_one_that_regressed(n: int):
-    """The specific counts where the old floor-division took only the first twelve frames.
-
-    Kept separate from the sweep above so a future regression names the band rather than a generic
-    coverage number.
-    """
-    old = list(range(n))[::max(1, n // 12)][:12]   # the FLOOR-division sampling, restated on purpose
-    new = _window(n)
-    assert old[-1] < n - 1, "premise: the OLD sampling really did stop short on this count"
-    assert new[-1] > old[-1], f"{n} frames: sampling still stops at {new[-1]} of {n - 1}"
+def _issues(gate, paths, clips=None, tag="EDGE-CLIP RUN"):
+    return [i for i in gate._pixel_invariants(paths, clips) if tag in i["msg"]]
 
 
-# `test_the_source_uses_ceiling_division` used to live here, asserting that
-# `"-(-len(frames) // 12)"` appeared in `_pixel_invariants`' source text. Deleted 2026-09-02:
-# once the arithmetic moved into `_sample_indices` and the sweep above began calling it, the
-# source test was both redundant AND wrong (it inspected the function the code had left). Two
-# review lanes flagged the same shape on a sibling PR the same day — a source-text assertion pins
-# the SPELLING, not the behaviour, and goes red on the legitimate refactor it exists to protect.
+def test_a_short_run_at_the_very_end_of_a_long_episode_is_found_with_its_time(frames):
+    gate = _load_gate()
+    paths = [frames["clean"]] * 238 + [frames["clipped"]] * 2
+    runs = _issues(gate, paths)
+    assert runs, "two clipped frames at the end of a 240-frame episode were not seen"
+    assert "714-717s" in runs[0]["msg"], f"the run must name its time; got {runs[0]['msg']!r}"
+    # The rate rule alone would never have fired: 2 of 240 is far below a third.
+    assert not [i for i in gate._pixel_invariants(paths) if i["msg"].startswith("EDGE-CLIP:")]
 
 
-# ══════════════════════════════════════════════════════════════════════════════════════════════
-# THE HOLE THE #172 CODE-CRITIC LENS FOUND, and the reason it mattered.
-#
-# Every test above reads only `w[-1]` — how FAR the sample reaches. None reads how MANY frames it
-# returns or whether they are spread. The reviewer proved it by mutating `_sample_indices` to
-# `return sorted({0, n - 1})`: two frames for a 240-frame video, and all 14 tests stayed green.
-# That is the very defect this file exists to catch — a gate that LOOKS like it observed the video
-# and did not — reintroduced one axis over.
-#
-# It is not hypothetical: it is exactly what the first fix did. A ceiling stride reaches the end of
-# the array but thins the sample to 7 frames of 13, and because both verdict thresholds derive from
-# `len(samp)`, a thinner sample also makes the gate more trigger-happy. Coverage alone cannot see
-# that. These two assert the axis the coverage tests are blind to.
-# ══════════════════════════════════════════════════════════════════════════════════════════════
-
-_WANT = 12
+def test_the_04c014a2_shape_two_short_runs_mid_episode(frames):
+    """Clipped at 54-57 s and 63-66 s of a 138-frame episode, clean everywhere else."""
+    gate = _load_gate()
+    clipped = {18, 19, 21, 22}
+    paths = [frames["clipped"] if i in clipped else frames["clean"] for i in range(138)]
+    runs = _issues(gate, paths)
+    assert runs and "54-57s" in runs[0]["msg"] and "63-66s" in runs[0]["msg"], runs
 
 
-@pytest.mark.parametrize("n", list(range(1, 65)) + [80, 120, 199, 240])
-def test_the_sample_never_declines_the_budget_it_asks_for(n: int):
-    """A sample thinner than `want` is a gate inspecting less than it claims — and it drags
-    `max(2, len(samp) // 2)` and `max(2, edge_checked // 3)` down with it. Goes red on the ceiling
-    stride at n=13 (7 frames) and on any degenerate `{0, n-1}` sampler."""
-    from acceptance_gate import _sample_indices
-
-    w = _sample_indices(n, _WANT)
-    assert len(w) == min(n, _WANT), (
-        f"{n} frames -> only {len(w)} inspected of a {_WANT}-frame budget"
-    )
+def test_a_single_clipped_frame_is_not_a_run(frames):
+    """A slide-in crossing the edge for one sampled frame is motion, not a held cut."""
+    gate = _load_gate()
+    paths = [frames["clean"]] * 30 + [frames["clipped"]] + [frames["clean"]] * 30
+    assert not _issues(gate, paths)
 
 
-@pytest.mark.parametrize("n", list(range(2, 65)) + [80, 120, 199, 240])
-def test_the_sample_is_spread_and_not_clustered(n: int):
-    """Reaching the last frame is not the same as covering the middle. `[0, n-1]` scores 100% on
-    every coverage test above while inspecting two frames; this fails it. The largest permitted gap
-    is one full stride — anything wider means a run of the video no frame represents."""
-    from acceptance_gate import _sample_indices
+def test_a_run_on_photo_beats_is_exempt(frames):
+    gate = _load_gate()
+    paths = [frames["clean"]] * 10 + [frames["clipped"]] * 3 + [frames["clean"]] * 10
+    clips = [{"start_ms": i * 3000, "duration_ms": 3000,
+              "modality": "scene_image" if 10 <= i < 13 else "diagram"} for i in range(23)]
+    assert not _issues(gate, paths, clips), "a photo bleeds to the edge by design"
 
-    w = _sample_indices(n, _WANT)
-    assert w == sorted(set(w)), f"{n} frames -> sample is not strictly increasing: {w}"
-    # Even spacing across n-1 gaps in want-1 hops, so the widest step is ceil((n-1)/(want-1)) —
-    # NOT ceil(n/want), which is the STRIDE's bound and is too tight here (n=240 gives 22, not 21).
-    allowed = 1 if n <= _WANT else -(-(n - 1) // (_WANT - 1))
-    widest = max(b - a for a, b in zip(w, w[1:]))
-    assert widest <= allowed, (
-        f"{n} frames -> widest gap {widest} > {allowed} between inspected frames; clustered"
-    )
+
+def test_runs_are_maximal_and_respect_the_minimum():
+    gate = _load_gate()
+    assert gate._runs([3, 4, 9, 10, 11, 20], min_len=2) == [(3, 4), (9, 11)]
+    assert gate._runs([5], min_len=2) == []
+    assert gate._runs([], min_len=2) == []
+    assert gate._runs([1, 2, 3], min_len=3) == [(1, 3)]
+
+
+def test_a_gate_that_cannot_look_does_not_pass(frames, monkeypatch):
+    """Without Pillow the invariants used to return [] and the verdict read PASS_DETERMINISTIC."""
+    import builtins
+
+    gate = _load_gate()
+    real_import = builtins.__import__
+
+    def _no_pil(name, *args, **kwargs):
+        if name == "PIL" or name.startswith("PIL."):
+            raise ImportError("No module named 'PIL'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_pil)
+    issues = gate._pixel_invariants([frames["clean"]] * 3)
+    assert issues and issues[0]["sev"] == "BLOCKER", issues
+    assert "PIXEL INVARIANTS DID NOT RUN" in issues[0]["msg"]

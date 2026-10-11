@@ -91,38 +91,6 @@ def _clip_modality_at(clips: list[dict] | None, ts_ms: int) -> str | None:
     return None
 
 
-def _sample_indices(n: int, want: int = 12) -> list[int]:
-    """The frame indices `_pixel_invariants` inspects — EXTRACTED so a test can exercise the real
-    arithmetic instead of restating it.
-
-    That distinction is the reason this function exists. The first test written for this fix
-    recomputed the stride itself, so reverting the source left it green: it tested a copy of the
-    rule, not the rule. Anything that re-derives the logic under test is not testing it.
-
-    THE ORIGINAL DEFECT. Plain `n // want` FLOORS to 1 for any n in 13..23 and `[::1][:12]` then
-    takes the FIRST twelve frames, so a 22-frame video was scored on its first 36 seconds.
-    Measured 2026-09-01 with `(max(f)-min(f)+1)/n` over `_sample_indices`: 18 frames -> 67%,
-    22 -> 55%, 23 -> 52%.
-
-    WHY NOT A CEILING STRIDE. The first fix used `step = max(1, -(-n // want))`, which spans the
-    array but returns `ceil(n/step)` frames — BELOW the 12 it asks for on 55 of the 229 counts in
-    12..240, bottoming out at 7 of 13. The #172 code-critic lens caught it; re-derived here with
-    `len([n for n in range(12,241) if len(_sample_indices(n)) < min(n,12)]) == 55`. That also drags
-    both verdict thresholds down with it, since `max(2, len(samp)//2)` and `max(2, edge//3)` are
-    derived from the sample size — the gate would have become thinner AND more trigger-happy.
-
-    Even spacing wins both axes at once: exactly `min(n, want)` indices, first and last frame
-    always included (`i*(n-1)//(want-1)` lands on `n-1` at `i == want-1`, which a stride misses at
-    n=14,16,18,20,22,...), so coverage is 100% at every n. Verified 2026-09-01 across n in 2..240:
-    never short, never clustered, last index always `n-1`.
-    """
-    if n <= 0:
-        return []
-    if n <= want:
-        return list(range(n))
-    return [i * (n - 1) // (want - 1) for i in range(want)]
-
-
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
     """PROBE invariants B (persistent letterbox band) + C (content clipped at frame edge),
     measured on the REAL extracted frames. Deterministic, $0 — catches the classes the vision
@@ -158,35 +126,27 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     try:
         import numpy as np
         from PIL import Image
-    except ImportError:
-        return issues
+    except ImportError as exc:
+        # LOUD, never an empty list. Returning no issues here made the gate say PASS_DETERMINISTIC
+        # without looking at a single pixel: the 2026-10-11 frame census ran in a venv that had
+        # drifted from the declared `Pillow>=10`, and all 8 "passes" were this branch.
+        return [{"sev": "BLOCKER", "msg": (
+            f"PIXEL INVARIANTS DID NOT RUN: {exc}. Install the declared dependencies "
+            "(pip install -e . in kitesforu-qa); a gate that cannot look must not pass.")}]
     if not frames:
         return issues
-    # SPAN THE WHOLE VIDEO. `len(frames) // 12` FLOORS to 1 for any count in 13..23, and
-    # `[::1][:12]` then takes the FIRST twelve frames — so a 22-frame video (about 66s at the
-    # fps=1/3 extraction above) was scored on its first 36 seconds and the rest was never looked
-    # at. Measured 2026-09-02::
-    #
-    #     frames  old step  old window   coverage
-    #        18       1       0..11         67%
-    #        22       1       0..11         55%
-    #        23       1       0..11         52%
-    #        24       2       0..22         96%   <- only once the floor reaches 2
-    #
-    # Found by correlating a real job: `0082f988` carries `maps_sequence` at beats 6-7, which
-    # occupy 57.9-66.6s = frames 19..22 — entirely outside the sampled window, so a MAJOR
-    # edge-clip verdict on that job said nothing whatever about its map frames.
-    #
-    # This is the gate `.claude/rules/02-done.md` relies on precisely because it "scores every
-    # frame across the full duration rather than one hero frame". For a whole band of realistic
-    # durations it scored the first half. `-(-n // 12)` is ceiling division, so the stride always
-    # spans the array.
-    # Keep the ORIGINAL index alongside the path — it is the only thing that maps a frame back to
-    # a timestamp, and therefore to the clip that authored it.
-    samp = [(i, frames[i]) for i in _sample_indices(len(frames))]
+    # EVERY FRAME, not a sample. The gate used to inspect 12 evenly spaced frames and flag edge-clip
+    # only when a third of them clipped. A defect that lasts a few seconds was invisible to it by
+    # construction: on job 04c014a2 (138 frames) kinetic text sits cut at the frame edge at 54-57s and
+    # 63-66s, the gate said PASS_DETERMINISTIC, and the first frame-reading adversary saw it at once
+    # (2026-10-11 frame census). A frame costs milliseconds here, so there is nothing to save by
+    # sampling. The ORIGINAL index stays with each path: it is the only thing that maps a frame back
+    # to a timestamp, and so to the clip that authored it.
+    samp = list(enumerate(frames))
     letterbox = edge_clip = 0
     edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (photos are skipped)
     edge_skipped_photo = 0
+    clipped_at: list[int] = []  # frame indices that clipped, in order (for the RUN rule below)
     for idx, fp in samp:
         try:
             im = np.asarray(Image.open(fp).convert("L"), dtype=float)
@@ -239,6 +199,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             if (_vsteps(im[:, :mw]) >= 12 or _vsteps(im[:, -mw:]) >= 12
                     or _hsteps(im[:mh, :]) >= 12 or _hsteps(im[-mh:, :]) >= 12):
                 edge_clip += 1
+                clipped_at.append(idx)
     if letterbox >= max(2, len(samp) // 2):
         issues.append({"sev": "MAJOR", "msg": (
             f"LETTERBOX: {letterbox}/{len(samp)} frames show a persistent dark band — content "
@@ -253,7 +214,32 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP: {edge_clip}/{edge_checked} checked frames have bright/text pixels hugging "
             f"the frame edge — content likely cut off-frame{skipped}")})
+    # RUN rule: content cut at the edge on 2+ CONSECUTIVE frames (3+ seconds held, not a slide-in
+    # passing the edge) is a defect a viewer sees, however short the rest of the episode keeps it
+    # clean. The rate rule above cannot see it on a long episode; this one names WHEN.
+    runs = _runs(clipped_at, min_len=2)
+    if runs:
+        spans = ", ".join(f"{a * _FRAME_INTERVAL_MS // 1000}-{b * _FRAME_INTERVAL_MS // 1000}s" for a, b in runs)
+        issues.append({"sev": "MAJOR", "msg": (
+            f"EDGE-CLIP RUN: content cut at the frame edge on consecutive frames at {spans} "
+            f"({len(runs)} run(s), {sum(b - a + 1 for a, b in runs)} frame(s))")})
     return issues
+
+
+def _runs(indices: list[int], min_len: int = 2) -> list[tuple[int, int]]:
+    """Maximal runs of consecutive frame indices, as (first, last), keeping those of `min_len`+."""
+    runs: list[tuple[int, int]] = []
+    start = prev = None
+    for i in indices:
+        if prev is not None and i == prev + 1:
+            prev = i
+            continue
+        if start is not None and prev - start + 1 >= min_len:
+            runs.append((start, prev))
+        start = prev = i
+    if start is not None and prev - start + 1 >= min_len:
+        runs.append((start, prev))
+    return runs
 
 
 def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
