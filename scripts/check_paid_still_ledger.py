@@ -79,17 +79,28 @@ UNIT_CHANGED = ("delivered_billing_counted",)
 
 
 def _unit_note(ledger) -> str:
-    """Which unit a ledger's billing count is in, when the doc can say. Main wrote
-    ``billing_undercount`` only when its two per-clip counts differed and #3279 writes it never, so a
-    ledger carrying it is per clip; its absence proves nothing."""
-    if isinstance(ledger, dict) and "billing_undercount" in ledger:
+    """Which unit a ledger's billing count is in, when the doc can say.
+
+    Main wrote ``billing_undercount`` EXACTLY when its two per-clip counts differed, and #3279 never
+    writes it. So: a ledger carrying it is per clip; a ledger whose counts differ WITHOUT it was
+    written by #3279 or later and counts pictures; a ledger with ``delivered_billing_counted`` and no
+    ``ai_clips`` predates workers #3239 and is per clip. Only equal counts with no marker are
+    ambiguous, and only there is the hedge printed (#188 round 2, critic 3)."""
+    if not isinstance(ledger, dict):
+        return "   (clips before workers #3279, paid pictures since: see the recount)"
+    if "billing_undercount" in ledger:
         return "   (per clip: a ledger carrying billing_undercount was written before workers #3279)"
+    if "delivered_billing_counted" in ledger and "ai_clips" not in ledger:
+        return "   (per clip: a ledger without ai_clips predates workers #3239)"
+    if "ai_clips" in ledger and ledger.get("ai_clips") != ledger.get("delivered_billing_counted"):
+        return "   (paid pictures: unequal counts with no billing_undercount were written by workers #3279 or later)"
     return "   (clips before workers #3279, paid pictures since: see the recount)"
 
 
 def _stamped(doc: dict, key: str) -> str:
-    """A stamped field as read, telling a MISSING key from a null one."""
-    return "(absent)" if key not in doc else repr(doc[key]) if doc[key] is None else str(doc[key])
+    """A stamped field as read, telling a MISSING key from a null one, and the string ``'None'``
+    from ``None`` (``repr`` for every present value: ``'3'`` is not ``3``)."""
+    return "(absent)" if key not in doc else repr(doc[key])
 
 
 def stamp_lines(visual: dict) -> list:

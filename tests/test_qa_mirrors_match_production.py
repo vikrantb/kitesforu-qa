@@ -339,8 +339,14 @@ def _run_reader(monkeypatch, capsys, visual: dict[str, Any], *, no_workers: bool
     monkeypatch.setattr(reader, "_entry_count", lambda job_id: "(stubbed)")
     monkeypatch.setattr(sys, "argv", ["check_paid_still_ledger.py", "deadbeef-synthetic"])
     if no_workers:
-        monkeypatch.setitem(sys.modules, "workers.stages.visuals.renderer", None)
-    assert reader.main() == 0
+        # Scoped to THIS call. On the test's own monkeypatch the blocked import lasted until
+        # teardown, so the later "pre" case, which declares workers available, ran with the
+        # renderer import still halted (#188 round 2, critic 1).
+        with monkeypatch.context() as scoped:
+            scoped.setitem(sys.modules, "workers.stages.visuals.renderer", None)
+            assert reader.main() == 0
+    else:
+        assert reader.main() == 0
     return capsys.readouterr().out
 
 
@@ -358,6 +364,9 @@ def test_the_reader_prints_the_stamp_and_why_it_is_missing(monkeypatch, capsys):
     assert "stamped rendered_paid_images (absent)" in out, out
     assert "rendered_paid_images_error   TypeError: synthetic failure" in out, out
     assert "stamped rendered_motion_clips 0" in out, out
+    # The unit label on the refund-input line, POSITIVELY: with no ledger the doc cannot say which
+    # unit the stamp is in, and the line must say so (deleting the label passed every test before).
+    assert "(the api's refund input)   (clips before workers #3279, paid pictures since: see the recount)" in out, out
     out = _run_reader(monkeypatch, capsys, {**failed, "rendered_paid_images": None})
     assert "stamped rendered_paid_images None" in out and "(absent)" not in out.split("motion")[0], out
     out = _run_reader(monkeypatch, capsys, {"status": "done", "clips": [dict(still)],
@@ -369,6 +378,14 @@ def test_the_reader_prints_the_stamp_and_why_it_is_missing(monkeypatch, capsys):
                                  "billing_undercount": 1}}
     out = _run_reader(monkeypatch, capsys, pre)
     assert "delivered_billing_counted  3   (per clip: a ledger carrying billing_undercount" in out, out
+    assert "paid pictures since: see the recount" not in out, out
+    assert "recount unavailable" not in out, "the no_workers patch leaked out of the earlier call"
+    # A ledger #3279 wrote: unequal counts with NO billing_undercount. Main wrote the undercount
+    # marker exactly when its counts differed, so this shape is pictures, and the hedge is wrong.
+    post = {"status": "done", "clips": [dict(still)] * 5, "rendered_paid_images": 2,
+            "paid_still_ledger": {"granted": 6, "delivered": 2, "ai_clips": 5, "delivered_billing_counted": 2}}
+    out = _run_reader(monkeypatch, capsys, post)
+    assert "(paid pictures: unequal counts with no billing_undercount" in out, out
     assert "paid pictures since: see the recount" not in out, out
 
 
