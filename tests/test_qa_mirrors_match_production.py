@@ -235,6 +235,24 @@ def test_the_ledger_checker_reads_a_block_the_producer_wrote_by_its_parts():
     assert "free (shown, not paid) 1" in text, text
 
 
+def test_the_ledger_recount_counts_the_refund_input_in_both_units():
+    """Workers #3279 changed ``delivered_billing_counted`` and ``rendered_paid_images`` from CLIPS
+    carrying a ``model_id`` to distinct PAID pictures, under the same names. The checker's recount
+    prints both, the second by the producer's own ``paid_pictures_delivered``: one paid still shown
+    three times and a relimage (a paid picture with no ``model_id``) are 3 clips and 2 pictures."""
+    sys.modules.pop("check_paid_still_ledger", None)
+    recount = need("check_paid_still_ledger", "billing_recount_lines")
+    paid_pictures_delivered = need("workers.stages.visuals.image_cost_ledger", "paid_pictures_delivered")
+    still = {"content_hash": "s1", "model_id": FLUX, "modality": "scene_image", "ai_generated": True}
+    relimage = {"content_hash": "r1", "modality": "diagram", "ai_generated": True,
+                "diagram_debug": {"kind": "relimage"}}
+    clips = [dict(still), dict(still), dict(still), relimage]
+    assert paid_pictures_delivered(clips, None, {}) == 2  # the producer's own count
+    lines = recount(clips, {})
+    assert lines[0].split()[-1] == "3", lines
+    assert "paid pictures (the unit since #3279)" in lines[1] and " 2   (no receipt" in lines[1], lines
+
+
 def test_the_provider_census_reads_a_block_the_producer_wrote_as_booked():
     """#181 round-2 claims S2: the post-deploy instrument had never been seen to find a stamp. The
     witness's 5 accepted fal renders and 5 success lines, plus the unnamed still's 1, against the 6

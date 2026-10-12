@@ -70,6 +70,37 @@ def describe_rollup(rollup) -> list:
     return out
 
 
+#: The two fields whose UNIT changed under the same name in workers #3279 (2026-10): until then each
+#: counted CLIPS carrying a ``model_id``; from the first pass of a revision with #3279 they count
+#: distinct PAID PICTURES (``image_cost_ledger.paid_pictures_delivered``). Nothing on the doc says
+#: which unit it holds: main wrote ``billing_undercount`` only when its two counts differed, so the
+#: key's absence proves nothing. Read them against ``visual.clips_settled_at`` and the deploy time,
+#: or against the recount below.
+UNIT_CHANGED = ("delivered_billing_counted", "rendered_paid_images")
+
+
+def billing_recount_lines(clips: list, job: dict) -> list:
+    """The refund input recounted from ``clips`` in BOTH units, so the stamp is checked and not
+    trusted, whichever revision wrote it:
+
+    * per CLIP carrying a ``model_id`` (the rule before workers #3279);
+    * distinct PAID pictures, by the producer's own ``image_cost_ledger.paid_pictures_delivered``
+      over the ``costs.visuals_images.meta`` earlier passes booked (``booked_meta``). The pass's
+      receipt is gone offline, so a picture only that pass marked free is counted: an UPPER bound.
+
+    A workers tree that predates #3279 has no ``paid_pictures_delivered``; that line says so."""
+    out = [f"      with a model_id (per clip, the unit before #3279)  "
+           f"{sum(1 for c in clips if isinstance(c, dict) and c.get('model_id'))}"]
+    try:
+        from workers.stages.visuals.image_cost_ledger import booked_meta, paid_pictures_delivered
+    except ImportError:
+        out.append("      paid pictures (the unit since #3279)  (the workers src on the path predates #3279)")
+        return out
+    out.append(f"      paid pictures (the unit since #3279)               "
+               f"{paid_pictures_delivered(clips, None, booked_meta(job))}   (no receipt offline: an upper bound)")
+    return out
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -97,7 +128,11 @@ def main() -> int:
         for k in ("requested", "granted", "delivered", "delivered_billing_counted",
                   "billing_undercount", "shortfall"):
             if k in ledger:
-                print(f"      {k:26s} {ledger[k]}")
+                note = ("   (clips before workers #3279, paid pictures since: see the recount)"
+                        if k in UNIT_CHANGED else
+                        "   (per clip; workers #3279 no longer writes it)" if k == "billing_undercount"
+                        else "")
+                print(f"      {k:26s} {ledger[k]}{note}")
         extra = {k: x for k, x in ledger.items() if k.startswith("scene_")}
         if extra:
             print(f"      {'budget chain':26s} {extra}")
@@ -117,7 +152,10 @@ def main() -> int:
         print("\n  RECOUNT from clips (SSOT detector), not the ledger:")
         print(f"      clips                      {len(clips)}")
         print(f"      AI pictures                {len(ai)}   kinds={kinds}")
-        print(f"      with a model_id (billing)  {sum(1 for c in clips if c.get('model_id'))}")
+        print(f"      stamped rendered_paid_images {v.get('rendered_paid_images')}   "
+              f"(the api's refund input; unit as above)")
+        for line in billing_recount_lines(clips, j):
+            print(line)
     except Exception as exc:  # noqa: BLE001
         print(f"  (recount unavailable: {str(exc)[:80]})")
 
