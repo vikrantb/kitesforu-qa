@@ -70,13 +70,40 @@ def describe_rollup(rollup) -> list:
     return out
 
 
-#: The two fields whose UNIT changed under the same name in workers #3279 (2026-10): until then each
-#: counted CLIPS carrying a ``model_id``; from the first pass of a revision with #3279 they count
-#: distinct PAID PICTURES (``image_cost_ledger.paid_pictures_delivered``). Nothing on the doc says
-#: which unit it holds: main wrote ``billing_undercount`` only when its two counts differed, so the
-#: key's absence proves nothing. Read them against ``visual.clips_settled_at`` and the deploy time,
-#: or against the recount below.
-UNIT_CHANGED = ("delivered_billing_counted", "rendered_paid_images")
+#: Workers #3279 (2026-10) changed the UNIT of ``visual.rendered_paid_images`` and of this ledger
+#: field under the same names: until then each counted CLIPS carrying a ``model_id``; from the first
+#: pass of a revision with #3279 they count distinct PAID PICTURES
+#: (``image_cost_ledger.paid_pictures_delivered``). The ledger loop below labels this one; the stamped
+#: refund input is labelled where it is printed (:func:`stamp_lines`).
+UNIT_CHANGED = ("delivered_billing_counted",)
+
+
+def _unit_note(ledger) -> str:
+    """Which unit a ledger's billing count is in, when the doc can say. Main wrote
+    ``billing_undercount`` only when its two per-clip counts differed and #3279 writes it never, so a
+    ledger carrying it is per clip; its absence proves nothing."""
+    if isinstance(ledger, dict) and "billing_undercount" in ledger:
+        return "   (per clip: a ledger carrying billing_undercount was written before workers #3279)"
+    return "   (clips before workers #3279, paid pictures since: see the recount)"
+
+
+def _stamped(doc: dict, key: str) -> str:
+    """A stamped field as read, telling a MISSING key from a null one."""
+    return "(absent)" if key not in doc else repr(doc[key]) if doc[key] is None else str(doc[key])
+
+
+def stamp_lines(visual: dict) -> list:
+    """The refund inputs the worker STAMPED, as plain doc reads (no workers import, so they print
+    whatever the recount below can do). ``rendered_paid_images_error`` is the reason a count is
+    missing: since workers #3279 a count that fails writes no ``rendered_paid_images`` and stamps that
+    marker, and the api, reading no count, refunds nothing for the job."""
+    out = [f"      stamped rendered_paid_images {_stamped(visual, 'rendered_paid_images')}   "
+           f"(the api's refund input){_unit_note(visual.get('paid_still_ledger'))}"]
+    if "rendered_paid_images_error" in visual:
+        out.append(f"      rendered_paid_images_error   {visual.get('rendered_paid_images_error')}   "
+                   "(the picture count failed, so it was not written: the api refunds nothing here)")
+    out.append(f"      stamped rendered_motion_clips {_stamped(visual, 'rendered_motion_clips')}")
+    return out
 
 
 def billing_recount_lines(clips: list, job: dict) -> list:
@@ -85,10 +112,18 @@ def billing_recount_lines(clips: list, job: dict) -> list:
 
     * per CLIP carrying a ``model_id`` (the rule before workers #3279);
     * distinct PAID pictures, by the producer's own ``image_cost_ledger.paid_pictures_delivered``
-      over the ``costs.visuals_images.meta`` earlier passes booked (``booked_meta``). The pass's
-      receipt is gone offline, so a picture only that pass marked free is counted: an UPPER bound.
+      over the ``costs.visuals_images.meta`` the passes booked (``booked_meta``). The pass's
+      receipt is gone offline, but the rollup books its free marks into ``meta.free``, so on a job
+      whose rollup wrote this reads what the producer's own count read.
 
-    A workers tree that predates #3279 has no ``paid_pictures_delivered``; that line says so."""
+    BOTH READ THE DELIVERED ARRAY, AND THE STAMP DID NOT. The worker counts the rows as its pass
+    RENDERED them (``author_uploads.rows_as_rendered``). Where an author's upload covers a paid
+    render, the stamp counted the render and this recount sees the upload; and a step that rewrites
+    rows after the count (a born-short re-cut) changed this array and not the stamp. So a recount can
+    differ from the stamp in EITHER direction. The upload-row count printed beside them says when the
+    first applies. A workers tree that predates #3279 has no ``paid_pictures_delivered``; that line
+    says so. The producer's count raises rather than guess, and a fault is printed in its place, with
+    the per-clip line kept."""
     out = [f"      with a model_id (per clip, the unit before #3279)  "
            f"{sum(1 for c in clips if isinstance(c, dict) and c.get('model_id'))}"]
     try:
@@ -96,8 +131,20 @@ def billing_recount_lines(clips: list, job: dict) -> list:
     except ImportError:
         out.append("      paid pictures (the unit since #3279)  (the workers src on the path predates #3279)")
         return out
-    out.append(f"      paid pictures (the unit since #3279)               "
-               f"{paid_pictures_delivered(clips, None, booked_meta(job))}   (no receipt offline: an upper bound)")
+    try:
+        n = paid_pictures_delivered(clips, None, booked_meta(job))
+    except Exception as exc:  # noqa: BLE001 — the producer raises on a real fault; say which count
+        out.append(f"      paid pictures (the unit since #3279)  (the producer's count failed: "
+                   f"{type(exc).__name__}: {str(exc)[:80]})")
+    else:
+        out.append(f"      paid pictures (the unit since #3279)               {n}")
+    try:
+        from workers.stages.visuals.render_contract import is_user_upload
+    except ImportError:
+        return out
+    uploads = sum(1 for c in clips if isinstance(c, dict) and is_user_upload(c))
+    out.append(f"      author-upload rows                                 {uploads}"
+               "   (each may cover a paid render the stamp counted and these lines do not)")
     return out
 
 
@@ -128,8 +175,7 @@ def main() -> int:
         for k in ("requested", "granted", "delivered", "delivered_billing_counted",
                   "billing_undercount", "shortfall"):
             if k in ledger:
-                note = ("   (clips before workers #3279, paid pictures since: see the recount)"
-                        if k in UNIT_CHANGED else
+                note = (_unit_note(ledger) if k in UNIT_CHANGED else
                         "   (per clip; workers #3279 no longer writes it)" if k == "billing_undercount"
                         else "")
                 print(f"      {k:26s} {ledger[k]}{note}")
@@ -138,6 +184,11 @@ def main() -> int:
             print(f"      {'budget chain':26s} {extra}")
         if ledger.get("shortfall"):
             print(f"      ⚠️  SHORTFALL {ledger['shortfall']} — granted more than was delivered")
+
+    # The worker's stamps are plain doc reads: printed before the recount, which needs workers.
+    print("\n  STAMPED by the worker (the api's refund inputs):")
+    for line in stamp_lines(v):
+        print(line)
 
     # Independent recount from the clips, so the ledger is checked and not trusted.
     try:
@@ -152,8 +203,6 @@ def main() -> int:
         print("\n  RECOUNT from clips (SSOT detector), not the ledger:")
         print(f"      clips                      {len(clips)}")
         print(f"      AI pictures                {len(ai)}   kinds={kinds}")
-        print(f"      stamped rendered_paid_images {v.get('rendered_paid_images')}   "
-              f"(the api's refund input; unit as above)")
         for line in billing_recount_lines(clips, j):
             print(line)
     except Exception as exc:  # noqa: BLE001
