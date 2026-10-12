@@ -316,23 +316,23 @@ def test_a_failed_producer_count_keeps_the_per_clip_line(monkeypatch):
 class _OneDoc:
     """``firestore.Client`` for :func:`check_paid_still_ledger.main`: one job doc, read once."""
 
-    def __init__(self, data: Dict[str, Any]) -> None:
+    def __init__(self, data: dict[str, Any]) -> None:
         self._data = data
 
-    def __call__(self, project: Any = None) -> "_OneDoc":
+    def __call__(self, project: Any = None) -> _OneDoc:
         return self
 
-    def collection(self, _n: str) -> "_OneDoc":
+    def collection(self, _n: str) -> _OneDoc:
         return self
 
-    def document(self, _d: str) -> "_OneDoc":
+    def document(self, _d: str) -> _OneDoc:
         return self
 
     def get(self) -> Any:
         return type("Snap", (), {"exists": True, "to_dict": lambda _s, d=self._data: dict(d)})()
 
 
-def _run_reader(monkeypatch, capsys, visual: Dict[str, Any], *, no_workers: bool = False) -> str:
+def _run_reader(monkeypatch, capsys, visual: dict[str, Any], *, no_workers: bool = False) -> str:
     sys.modules.pop("check_paid_still_ledger", None)
     reader = importlib.import_module("check_paid_still_ledger")
     monkeypatch.setattr(reader.firestore, "Client", _OneDoc({"status": "completed", "visual": visual}))
