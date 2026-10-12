@@ -61,7 +61,10 @@ without it). Two image-side bounds are RESTATEMENTS of producer rules, and :clas
     at $0.039). A verify REJECT can add a render on another row; not bounded. The scene-verify vision judge
     (one check per paid still and clip, well under $0.01 per run, not booked under ``costs.*``) is not added;
   * relimage bases: ``scene_budget.relimage_cap(max_images, allow_paid)`` of them, at
-    ``image_cost_ledger.price_of(RELIMAGE)``, the price the ledger books them at;
+    ``image_cost_ledger.price_of(RELIMAGE)``, the price the ledger books them at. Since workers #3279 a
+    relimage draws on the same grant as a scene still, so one pass KEEPS at most ``max_images`` paid
+    pictures, relimages included; adding the bases on top of the stills keeps the dearer price of a
+    relimage inside the DOLLAR ceiling, and is not a count of what one pass keeps;
   * character reference plates: up to ``character_anchors.ANCHOR_PLATE_BUDGET`` new plates per plan, drawn on
     a reference-capable row (cheapest first), priced at the dearest such row.
   The low end of relimage and plates is $0: both depend on the content. A RE-PLANNED pass can buy again (the
@@ -442,7 +445,9 @@ class ImageQuote:
             "not a render count: a job can book more renders on cheaper rows (072c32c4 booked 8 on a grant of "
             "3, all at $0.039), and a verify REJECT can add a render on another row",
             f"relimage: scene_budget.relimage_cap({n_stills}, allow_paid) = {n_rel} at ${self.relimage_usd:.3f} "
-            "(image_cost_ledger.price_of(RELIMAGE)); $0 when no beat takes one",
+            "(image_cost_ledger.price_of(RELIMAGE)); $0 when no beat takes one. A relimage spends the same "
+            f"grant as a still since workers #3279, so one pass keeps at most {n_stills} paid picture(s) in all: "
+            "this term is a dollar ceiling, not a count",
             f"plates: up to {self.plate_budget} new per plan (character_anchors.ANCHOR_PLATE_BUDGET) at most "
             f"{p_id} ${p:.3f}; $0 with no named character",
             "ONE PLAN: a re-planned pass (mux_gate.REPLAN_CAP) can buy stills, relimage and plates again, and a "
