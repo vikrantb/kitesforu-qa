@@ -235,6 +235,160 @@ def test_the_ledger_checker_reads_a_block_the_producer_wrote_by_its_parts():
     assert "free (shown, not paid) 1" in text, text
 
 
+def test_the_ledger_recount_counts_the_refund_input_in_both_units():
+    """Workers #3279 changed ``delivered_billing_counted`` and ``rendered_paid_images`` from CLIPS
+    carrying a ``model_id`` to distinct PAID pictures, under the same names. The checker's recount
+    prints both, the second by the producer's own ``paid_pictures_delivered``: one paid still shown
+    three times and a relimage (a paid picture with no ``model_id``) are 3 clips and 2 pictures."""
+    sys.modules.pop("check_paid_still_ledger", None)
+    recount = need("check_paid_still_ledger", "billing_recount_lines")
+    paid_pictures_delivered = need("workers.stages.visuals.image_cost_ledger", "paid_pictures_delivered")
+    still = {"content_hash": "s1", "model_id": FLUX, "modality": "scene_image", "ai_generated": True}
+    relimage = {"content_hash": "r1", "modality": "diagram", "ai_generated": True,
+                "diagram_debug": {"kind": "relimage"}}
+    clips = [dict(still), dict(still), dict(still), relimage]
+    assert paid_pictures_delivered(clips, None, {}) == 2  # the producer's own count
+    lines = recount(clips, {})
+    assert lines[0].split()[-1] == "3", lines
+    assert "paid pictures (the unit since #3279)" in lines[1] and lines[1].split()[-1] == "2", lines
+    assert "upper bound" not in "\n".join(lines), "the recount is not a bound on the stamp (#188 round 1)"
+    assert lines[2].split()[:3] == ["author-upload", "rows", "0"], lines
+
+
+def test_the_ledger_recount_reads_the_meta_the_passes_booked():
+    """#188 round 1, critic 2. The test above hands the recount ``job={}``, so it could not tell
+    whether ``booked_meta(job)`` was read at all. On :func:`produced_job` (the REAL ``roll_up_images``
+    output, one cross-job cache hit booked into ``meta.free``) the right read gives 2 paid pictures,
+    the producer's own count with the pass's receipt; reading the whole job, or nothing, gives 3."""
+    sys.modules.pop("check_paid_still_ledger", None)
+    recount = need("check_paid_still_ledger", "billing_recount_lines")
+    icl = importlib.import_module("workers.stages.visuals.image_cost_ledger")
+    job = produced_job()
+    assert job["costs"]["visuals_images"]["meta"].get("free") == ["cached-elsewhere"], "premise"
+    lines = recount(produced_clips(), job)
+    assert lines[0].split()[-1] == "5", lines
+    assert lines[1].split()[-1] == "2", lines
+    assert icl.paid_pictures_delivered(produced_clips(), None, job) == 3, "control: the whole job as meta"
+    assert icl.paid_pictures_delivered(produced_clips(), None, {}) == 3, "control: no meta read"
+
+
+def test_an_upload_over_a_paid_render_is_counted_beside_the_recount():
+    """#188 round 1, critic 1. The stamp counts the rows AS RENDERED (``rows_as_rendered``: a row an
+    author's upload took counts as the paid render it covered) and the recount reads the delivered
+    array, so on an upload the recount reads one fewer than the stamp, under either rule. That is not
+    an over-count by the stamp, and the reader now says why: it counts the upload rows. Built with the
+    producer's own ``as_upload_row``; every value is synthetic."""
+    sys.modules.pop("check_paid_still_ledger", None)
+    recount = need("check_paid_still_ledger", "billing_recount_lines")
+    as_upload_row = need("workers.stages.visuals.author_uploads", "as_upload_row")
+    rows_as_rendered = need("workers.stages.visuals.author_uploads", "rows_as_rendered")
+    paid_pictures_delivered = need("workers.stages.visuals.image_cost_ledger", "paid_pictures_delivered")
+    a = {"content_hash": "a1", "model_id": FLUX, "modality": "scene_image", "ai_generated": True,
+         "beat_index": 0, "start_ms": 0}
+    b = {"content_hash": "b1", "model_id": FLUX, "modality": "scene_image", "ai_generated": True,
+         "beat_index": 1, "start_ms": 5000}
+    upload = as_upload_row({"beat_index": 1, "start_ms": 5000, "asset_uri": "https://example.invalid/u.png"})
+    delivered = [a, upload]
+    # ``KeptUploads.covered`` keys the covered render by the upload's ``asset_uri`` (in memory only).
+    stamp = paid_pictures_delivered(rows_as_rendered(delivered, {upload["asset_uri"]: b}), None, {})
+    assert stamp == 2, "premise: the stamp counts the covered render"
+    lines = recount(delivered, {})
+    assert lines[1].split()[-1] == "1", lines
+    assert lines[2].split()[:3] == ["author-upload", "rows", "1"], lines
+
+
+def test_a_failed_producer_count_keeps_the_per_clip_line(monkeypatch):
+    """#188 round 1, critic 5. The producer's count raises on a real fault by design; the reader
+    used to lose the per-clip line it had already built and print only the exception."""
+    sys.modules.pop("check_paid_still_ledger", None)
+    recount = need("check_paid_still_ledger", "billing_recount_lines")
+    icl = importlib.import_module("workers.stages.visuals.image_cost_ledger")
+
+    def _boom(*_a: Any, **_k: Any) -> int:
+        raise ValueError("synthetic count fault")
+
+    monkeypatch.setattr(icl, "paid_pictures_delivered", _boom)
+    lines = recount([{"model_id": FLUX, "content_hash": "s1"}], {})
+    assert lines[0].split()[-1] == "1", lines
+    assert "the producer's count failed: ValueError: synthetic count fault" in lines[1], lines
+
+
+class _OneDoc:
+    """``firestore.Client`` for :func:`check_paid_still_ledger.main`: one job doc, read once."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    def __call__(self, project: Any = None) -> _OneDoc:
+        return self
+
+    def collection(self, _n: str) -> _OneDoc:
+        return self
+
+    def document(self, _d: str) -> _OneDoc:
+        return self
+
+    def get(self) -> Any:
+        return type("Snap", (), {"exists": True, "to_dict": lambda _s, d=self._data: dict(d)})()
+
+
+def _run_reader(monkeypatch, capsys, visual: dict[str, Any], *, no_workers: bool = False) -> str:
+    sys.modules.pop("check_paid_still_ledger", None)
+    reader = importlib.import_module("check_paid_still_ledger")
+    monkeypatch.setattr(reader.firestore, "Client", _OneDoc({"status": "completed", "visual": visual}))
+    monkeypatch.setattr(reader, "_entry_count", lambda job_id: "(stubbed)")
+    monkeypatch.setattr(sys, "argv", ["check_paid_still_ledger.py", "deadbeef-synthetic"])
+    if no_workers:
+        # Scoped to THIS call. On the test's own monkeypatch the blocked import lasted until
+        # teardown, so the later "pre" case, which declares workers available, ran with the
+        # renderer import still halted (#188 round 2, critic 1).
+        with monkeypatch.context() as scoped:
+            scoped.setitem(sys.modules, "workers.stages.visuals.renderer", None)
+            assert reader.main() == 0
+    else:
+        assert reader.main() == 0
+    return capsys.readouterr().out
+
+
+def test_the_reader_prints_the_stamp_and_why_it_is_missing(monkeypatch, capsys):
+    """#188 round 1, critics 3, 4 and 6. Since workers #3279 a count that fails writes no
+    ``rendered_paid_images`` and stamps ``rendered_paid_images_error``. The reader printed neither:
+    the error was never shown, and a missing key read as ``None``. The stamp is a plain doc read, so
+    it prints even when the recount cannot import workers. A ledger carrying ``billing_undercount``
+    was written before #3279, so its billing count is labelled per clip, not with the two-way note."""
+    need("workers.stages.visuals.image_cost_ledger", "paid_pictures_delivered")
+    still = {"content_hash": "s1", "model_id": FLUX, "modality": "scene_image", "ai_generated": True}
+    failed = {"status": "done", "clips": [dict(still)], "rendered_motion_clips": 0,
+              "rendered_paid_images_error": "TypeError: synthetic failure"}
+    out = _run_reader(monkeypatch, capsys, failed)
+    assert "stamped rendered_paid_images (absent)" in out, out
+    assert "rendered_paid_images_error   TypeError: synthetic failure" in out, out
+    assert "stamped rendered_motion_clips 0" in out, out
+    # The unit label on the refund-input line, POSITIVELY: with no ledger the doc cannot say which
+    # unit the stamp is in, and the line must say so (deleting the label passed every test before).
+    assert "(the api's refund input)   (clips before workers #3279, paid pictures since: see the recount)" in out, out
+    out = _run_reader(monkeypatch, capsys, {**failed, "rendered_paid_images": None})
+    assert "stamped rendered_paid_images None" in out and "(absent)" not in out.split("motion")[0], out
+    out = _run_reader(monkeypatch, capsys, {"status": "done", "clips": [dict(still)],
+                                            "rendered_paid_images": 1}, no_workers=True)
+    assert "stamped rendered_paid_images 1" in out, out
+    assert "(recount unavailable" in out, "premise: the workers import failed"
+    pre = {"status": "done", "clips": [dict(still)] * 3, "rendered_paid_images": 3,
+           "paid_still_ledger": {"granted": 6, "delivered": 1, "delivered_billing_counted": 3,
+                                 "billing_undercount": 1}}
+    out = _run_reader(monkeypatch, capsys, pre)
+    assert "delivered_billing_counted  3   (per clip: a ledger carrying billing_undercount" in out, out
+    assert "paid pictures since: see the recount" not in out, out
+    assert "recount unavailable" not in out, "the no_workers patch leaked out of the earlier call"
+    # A ledger #3279 wrote: unequal counts with NO billing_undercount. Main wrote the undercount
+    # marker exactly when its counts differed, so this shape is pictures, and the hedge is wrong.
+    post = {"status": "done", "clips": [dict(still)] * 5, "rendered_paid_images": 2,
+            "paid_still_ledger": {"granted": 6, "delivered": 2, "ai_clips": 5, "delivered_billing_counted": 2}}
+    out = _run_reader(monkeypatch, capsys, post)
+    assert "(paid pictures: unequal counts with no billing_undercount" in out, out
+    assert "paid pictures since: see the recount" not in out, out
+
+
 def test_the_provider_census_reads_a_block_the_producer_wrote_as_booked():
     """#181 round-2 claims S2: the post-deploy instrument had never been seen to find a stamp. The
     witness's 5 accepted fal renders and 5 success lines, plus the unnamed still's 1, against the 6
