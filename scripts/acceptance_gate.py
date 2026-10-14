@@ -36,10 +36,40 @@ _EDU_KEYS = ("explain", "educat", "understand", "how ", "what is", "concept",
             "informational", "tutorial", "guide", "why do", "why does")
 
 
+class JobNotResolved(LookupError):
+    """The id names no single ``podcast_jobs`` document: a LOOKUP failure, never a verdict on content.
+
+    A missing doc used to come back as ``{}`` and grade as "NOT SURFACED: visual.video_url empty", a BLOCKER
+    naming the producer, for a job whose artifact was fine (a truncated 8-character id, 2026-09-06). "The job
+    was not found" and "the producer never surfaced a video" are opposite diagnoses with opposite fixes."""
+
+    def __init__(self, job_id: str, candidates: list[str]) -> None:
+        self.job_id = job_id
+        self.candidates = candidates
+        super().__init__(f"{job_id!r} matches {len(candidates)} podcast_jobs document(s)")
+
+
 def _fetch_job(job_id: str) -> dict[str, Any]:
+    """The job's doc, with ``job_id`` stamped. An exact id wins; otherwise the id is read as a PREFIX (jobs are
+    quoted by their first 8 characters) and must match exactly one doc. Raises ``JobNotResolved`` otherwise."""
     from google.cloud import firestore  # lazy: keeps the CLI importable without creds
     db = firestore.Client(project=os.environ.get("GCP_PROJECT", "kitesforu-dev"))
-    return (db.collection("podcast_jobs").document(job_id).get().to_dict()) or {}
+    jobs = db.collection("podcast_jobs")
+    if not job_id.strip():
+        raise JobNotResolved(job_id, [])
+    snap = jobs.document(job_id).get()
+    if snap.exists:
+        doc = snap.to_dict() or {}
+        doc.setdefault("job_id", job_id)
+        return doc
+    hits = [s.id for s in jobs.where(filter=firestore.FieldFilter("__name__", ">=", jobs.document(job_id)))
+            .where(filter=firestore.FieldFilter("__name__", "<", jobs.document(job_id + "\uf8ff")))
+            .limit(3).select([]).stream()]
+    if len(hits) != 1:
+        raise JobNotResolved(job_id, hits)
+    doc = jobs.document(hits[0]).get().to_dict() or {}
+    doc["job_id"] = hits[0]
+    return doc
 
 
 def _probe_dims(path: str) -> tuple[int, int, float]:
@@ -302,7 +332,18 @@ def _runs(clipped: list[tuple[int, frozenset]], min_len: int = 2) -> list[tuple[
 
 
 def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = None) -> dict[str, Any]:
-    d = _fetch_job(job_id)
+    try:
+        d = _fetch_job(job_id)
+    except JobNotResolved as exc:
+        if exc.candidates:
+            why = (f"{len(exc.candidates)} podcast_jobs documents start with {job_id!r} "
+                   f"({', '.join(exc.candidates)}); pass more of the id")
+        else:
+            why = f"no podcast_jobs document has the id {job_id!r} or starts with it"
+        return {"job_id": job_id, "verdict": "AMBIGUOUS_ID" if exc.candidates else "NOT_FOUND",
+                "candidates": exc.candidates,
+                "issues": [{"sev": "BLOCKER", "msg": f"NOT RESOLVED: {why}. A lookup failure, not a content defect."}]}
+    requested_id, job_id = job_id, str(d.get("job_id") or job_id)
     topic = d.get("topic") or d.get("title") or ""
     vis = d.get("visual") or {}
     clips = vis.get("clips") or []
@@ -360,7 +401,8 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
-    return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
+    return {"job_id": job_id, **({"requested_id": requested_id} if requested_id != job_id else {}),
+            "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
             "persona": persona or None,
@@ -469,6 +511,8 @@ def main() -> int:
         load_persona(a.persona)
     res = run_gate(a.job_id, a.frames_dir, a.persona or None)
     print(json.dumps(res, indent=2))
+    if res["verdict"] in ("NOT_FOUND", "AMBIGUOUS_ID"):
+        return 2  # the gate never looked at an artifact: not a FAIL (1) about one
     return 0 if res["verdict"] in ("PASS_DETERMINISTIC", "REVIEW") else 1
 
 
