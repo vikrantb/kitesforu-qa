@@ -155,6 +155,9 @@ while [[ $# -gt 0 ]]; do
                     # (deterministic diagrams/cards, NO paid images). Use this to exercise the
                     # visual PLANNING path — info-figure routing, figure adoption — without
                     # tripping the T4 paid-visuals gate. `--visuals` remains T4 (real images).
+                    # FICTION-BLIND: the fiction path refuses video without an opt-in
+                    # (`video_skip_reason: fiction_or_undetermined_no_opt_in`), so this arm
+                    # never exercises fiction video. Use `--visuals` for a story ask.
                     #
                     # ⚠️ REQUIRES A LONGER DURATION — it does NOTHING at the 0.167min default.
                     # MEASURED 2026-08-18, job 9725a85c (~$0.025, wasted): a 10s run authors no
