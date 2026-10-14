@@ -11,7 +11,8 @@ Proven: on the real broken job 85ec6fc9 (topic "systematic discrimination", rend
 
 Usage:
   python acceptance_gate.py --job-id <id> [--frames-dir DIR]
-Exit 0 = deterministic PASS (still run the vision/adversary step); non-zero = deterministic FAIL.
+Exit 0 = deterministic PASS (still run the vision/adversary step); 1 = deterministic FAIL; 2 = the id names no
+single job (NOT_FOUND / AMBIGUOUS_ID), so nothing was graded.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def _fetch_job(job_id: str) -> dict[str, Any]:
         return doc
     hits = [s.id for s in jobs.where(filter=firestore.FieldFilter("__name__", ">=", jobs.document(job_id)))
             .where(filter=firestore.FieldFilter("__name__", "<", jobs.document(job_id + "\uf8ff")))
-            .limit(3).select([]).stream()]
+            .limit(4).select([]).stream()]  # a 4th hit only says "more than 3"
     if len(hits) != 1:
         raise JobNotResolved(job_id, hits)
     doc = jobs.document(hits[0]).get().to_dict() or {}
@@ -336,14 +337,23 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
         d = _fetch_job(job_id)
     except JobNotResolved as exc:
         if exc.candidates:
-            why = (f"{len(exc.candidates)} podcast_jobs documents start with {job_id!r} "
-                   f"({', '.join(exc.candidates)}); pass more of the id")
+            shown = exc.candidates[:3]
+            count = "more than 3" if len(exc.candidates) > 3 else str(len(exc.candidates))
+            why = (f"{count} podcast_jobs documents start with {job_id!r} "
+                   f"({', '.join(shown)}{', ...' if len(exc.candidates) > 3 else ''}); pass more of the id")
         else:
             why = f"no podcast_jobs document has the id {job_id!r} or starts with it"
         return {"job_id": job_id, "verdict": "AMBIGUOUS_ID" if exc.candidates else "NOT_FOUND",
-                "candidates": exc.candidates,
+                "candidates": exc.candidates[:3],
                 "issues": [{"sev": "BLOCKER", "msg": f"NOT RESOLVED: {why}. A lookup failure, not a content defect."}]}
-    requested_id, job_id = job_id, str(d.get("job_id") or job_id)
+    resolved_id = str(d.get("job_id") or job_id)
+    res = _grade(resolved_id, d, frames_dir, persona)
+    if resolved_id != job_id:  # every verdict, early or late, says which doc a prefix resolved to
+        res = {"job_id": resolved_id, "requested_id": job_id, **{k: v for k, v in res.items() if k != "job_id"}}
+    return res
+
+
+def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str | None) -> dict[str, Any]:
     topic = d.get("topic") or d.get("title") or ""
     vis = d.get("visual") or {}
     clips = vis.get("clips") or []
@@ -401,8 +411,7 @@ def run_gate(job_id: str, frames_dir: str | None = None, persona: str | None = N
 
     verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
               ("REVIEW" if issues else "PASS_DETERMINISTIC")
-    return {"job_id": job_id, **({"requested_id": requested_id} if requested_id != job_id else {}),
-            "topic": topic, "dims": [vw, vh], "duration": dur,
+    return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
             "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
             "persona": persona or None,

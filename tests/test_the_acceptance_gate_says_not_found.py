@@ -18,6 +18,9 @@ _GATE = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "acceptance_ga
 _FULL_A = "aaaa1111-0000-4000-8000-000000000001"
 _FULL_B = "aaaa1111-0000-4000-8000-000000000002"   # shares the 8-character prefix with _FULL_A
 _FULL_C = "cccc3333-0000-4000-8000-000000000003"   # the only doc with its prefix
+_EXACT_SHORT = "bbbb2222"                              # a doc whose whole id is also another doc's prefix
+_LONG_B = "bbbb2222-0000-4000-8000-000000000004"
+_MANY = [f"dddd4444-0000-4000-8000-00000000001{i}" for i in range(5)]  # five docs share one prefix
 # A doc that resolves but is not ready, so grading stops at the readiness rule with no download.
 _NOT_READY = {"topic": "synthetic", "visual": {"video_status": "rendering"}}
 
@@ -90,7 +93,7 @@ class _Client:
 def gate(monkeypatch):
     from google.cloud import firestore
 
-    docs = {_FULL_A: dict(_NOT_READY), _FULL_B: dict(_NOT_READY), _FULL_C: dict(_NOT_READY)}
+    docs = {k: dict(_NOT_READY) for k in (_FULL_A, _FULL_B, _FULL_C, _EXACT_SHORT, _LONG_B, *_MANY)}
     monkeypatch.setattr(firestore, "Client", lambda project=None: _Client(docs))
     return _load_gate()
 
@@ -130,3 +133,33 @@ def test_an_unresolved_job_exits_2_and_a_fail_exits_1(gate, monkeypatch, capsys)
     monkeypatch.setattr(sys, "argv", ["acceptance_gate.py", "--job-id", _FULL_C])
     assert gate.main() == 1
     capsys.readouterr()
+
+
+def test_an_ambiguous_prefix_also_exits_2(gate, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["acceptance_gate.py", "--job-id", "aaaa1111"])
+    assert gate.main() == 2
+    capsys.readouterr()
+
+
+def test_more_than_three_matches_are_never_reported_as_three(gate) -> None:
+    out = gate.run_gate("dddd4444")
+    assert out["verdict"] == "AMBIGUOUS_ID"
+    assert "more than 3 podcast_jobs documents" in out["issues"][0]["msg"]
+    assert len(out["candidates"]) == 3
+
+
+def test_an_exact_id_wins_over_the_docs_it_prefixes(gate) -> None:
+    out = gate.run_gate(_EXACT_SHORT)
+    assert out["verdict"] == "FAIL"           # graded (not ready), not AMBIGUOUS_ID
+    assert out["job_id"] == _EXACT_SHORT
+    assert "requested_id" not in out
+
+
+def test_a_blank_id_is_NOT_FOUND(gate) -> None:
+    assert gate.run_gate("   ")["verdict"] == "NOT_FOUND"
+
+
+def test_every_verdict_on_a_resolved_prefix_names_the_requested_id(gate) -> None:
+    out = gate.run_gate("cccc3333")           # an EARLY return: the video is not ready
+    assert out["job_id"] == _FULL_C
+    assert out["requested_id"] == "cccc3333"
