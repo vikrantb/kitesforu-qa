@@ -6,6 +6,8 @@
 This module owns the things the script used to do inline, in places that drifted apart:
 
 ``plan``              builds the request body, then computes the estimate and the ACK decision FROM IT;
+``course-plan``       the same for ``--course``: the smallest course ``POST /v1/courses`` accepts, priced and gated
+                      as the episodes the api will create for it;
 ``check-stored``      compares what the api stored with what was requested;
 ``status-fields``     reads one ``/status`` body through the package's ONE readiness rule
                       (:mod:`kitesforu_qa.visual_readiness`) for the wait loop;
@@ -539,6 +541,67 @@ def estimate(body: Dict[str, Any], *, clips: Optional[ClipQuote] = None,
 
 
 # ---------------------------------------------------------------------------------------------
+# The course: the smallest one POST /v1/courses accepts, priced and gated as the episodes it creates
+# ---------------------------------------------------------------------------------------------
+
+#: The fewest episodes the api accepts: ``CreateCourseRequest.total_episodes`` is ``Field(ge=2)`` (kitesforu-schemas
+#: 2.85.0, the version the api locks). The workers initiator would take 1 (``limits.COURSE_MODULES_MIN``), but the
+#: api answers 1 with a 422 before it writes anything.
+COURSE_EPISODES = 2
+
+#: The quality tier each episode of a course created through ``POST /v1/courses`` runs at, whatever the course asked
+#: for. ``CreateCourseRequest`` declares ``quality_tier``, but the api's ``create_course`` (kitesforu-api ca510ec,
+#: ``services/courses/crud.py``) writes no ``quality_tier`` to the course doc; the orchestrator creates each episode
+#: with ``course_state.get("quality_tier")`` (kitesforu-workers 7f384670a, ``stages/course/orchestrator/worker.py``),
+#: and ``podcast_services.create_job`` stores that None as ``"medium"``. Smart-create's course executor writes the
+#: field; the course door does not. Once it does, an episode's tier is the course's own ``quality_tier``.
+COURSE_EPISODE_TIER = "medium"
+
+#: The curriculum call, one per course. Workers ``stages/course/syllabus/worker.py`` sends ``gpt-4o`` (the serving
+#: syllabus service sets no ``LLM_MODEL``, and gpt-4o has no ``model_catalog.csv`` row), priced at the workers' own
+#: gpt-4o rates (``common/pricing.py``: $2.50 in, $10.00 out per 1M tokens). A MEASUREMENT, not a bound: the
+#: ``curriculum_debug.llm_call`` tokens of the 130 courses that record them (232 scanned, read-only, 2026-10-28) cost
+#: a median $0.0071 and at most $0.0351; each of the 3 two-episode courses among them cost about $0.007.
+_SYLLABUS_BAND = (0.0071, 0.0351, "syllabus ~$0.007-0.035 (one gpt-4o call: median and max of 130 recorded, 2026-10-28)")
+
+
+def build_course_body(*, topic: str, duration: str, tier: str, style: str, language: str) -> Dict[str, Any]:
+    """The ``POST /v1/courses`` body for the smallest course the api accepts. Every key is a declared
+    ``CreateCourseRequest`` field: that model drops an undeclared key without an error."""
+    return {
+        "topic": topic,
+        "total_episodes": COURSE_EPISODES,
+        "episode_duration_min": float(duration),
+        "style": style,
+        "language": language,
+        "quality_tier": tier,
+        # Without it the api HOLDS a course whose topic is under three words, or that names no target_audience, in
+        # `clarifying` with questions (routes/courses/crud.py generate_course_clarifier_questions), and nothing runs.
+        "skip_clarifier": True,
+    }
+
+
+def course_episode_body(course: Dict[str, Any]) -> Dict[str, Any]:
+    """One episode of ``course``, in the keys :func:`estimate` and :func:`ack_decision` read. The orchestrator creates
+    each episode through ``POST /v1/podcasts`` with the course's episode duration, the tier the course door leaves it
+    (:data:`COURSE_EPISODE_TIER`), and NEITHER visuals key: ``CreateCourseRequest`` has no visuals field, so every
+    episode keeps the workers' $0 visuals default and may run its visuals authors."""
+    return {"quality_tier": COURSE_EPISODE_TIER, "duration_min": float(course.get("episode_duration_min") or 0)}
+
+
+def course_estimate(course: Dict[str, Any]) -> Estimate:
+    """The curriculum call plus every episode's own :func:`estimate`."""
+    episode = estimate(course_episode_body(course))
+    n = int(course.get("total_episodes") or 0)
+    each = f"{n} episode(s) at {COURSE_EPISODE_TIER}, each {episode.text}"
+    if episode.low is None or episode.high is None:
+        return Estimate(text=f"unknown = {_SYLLABUS_BAND[2]} + {each}", low=None, high=None)
+    lo = _SYLLABUS_BAND[0] + n * episode.low
+    hi = _SYLLABUS_BAND[1] + n * episode.high
+    return Estimate(text=f"~{_span(lo, hi)} = {_SYLLABUS_BAND[2]} + {each}", low=lo, high=hi)
+
+
+# ---------------------------------------------------------------------------------------------
 # Quotes from the producer: a kitesforu-workers tree, through its PUBLIC functions
 # ---------------------------------------------------------------------------------------------
 
@@ -832,6 +895,25 @@ def _plan(args: argparse.Namespace) -> Dict[str, Any]:
             "est_detail": detail, "needs_ack": needs_ack, "ack_reason": reason, "warnings": warn}
 
 
+def _course_plan(args: argparse.Namespace) -> Dict[str, Any]:
+    """:func:`_plan` for ``--course``, in the same shape. The ACK decision is :func:`ack_decision` of ONE EPISODE,
+    because a course orders episode jobs, and each is gated as the job the api will create for it."""
+    payload = json.dumps(build_course_body(topic=args.topic, duration=args.duration, tier=args.tier,
+                                           style=args.style, language=args.language))
+    sent = json.loads(payload)   # as in _plan: the estimate and the ACK decision read the bytes curl sends
+    episode = course_episode_body(sent)
+    needs_ack, reason = ack_decision(episode)
+    est = course_estimate(sent)
+    warn: List[str] = []
+    if sent["quality_tier"] != episode["quality_tier"]:
+        warn.append(f"⚠️  the course asks for quality_tier={sent['quality_tier']}, which the api's course door does not "
+                    f"store: each episode runs at {episode['quality_tier']}, and is priced and gated here at "
+                    f"{episode['quality_tier']}.")
+    return {"payload": payload, "est": est.text, "est_low": est.low, "est_high": est.high,
+            "est_detail": list(est.detail), "needs_ack": needs_ack, "ack_reason": reason, "warnings": warn,
+            "course_episodes": sent["total_episodes"], "episode_tier": episode["quality_tier"]}
+
+
 def _read_snapshot(arg: str) -> Any:
     """``-`` reads stdin. A /status body with a full visual compartment can be large, and argv
     has a size limit."""
@@ -862,6 +944,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--workers-src", default="")
     p.add_argument("--catalog-label", default="")
 
+    cp = sub.add_parser("course-plan", help="--course: the smallest course's body + estimate + ACK decision, as one "
+                                            "JSON object")
+    for name in ("--topic", "--duration", "--tier", "--style", "--language"):
+        cp.add_argument(name, required=True)
+
     c = sub.add_parser("check-stored", help="fields the api stored lower than requested, one per line")
     c.add_argument("--requested", required=True, help="the exact JSON body that was POSTed")
     c.add_argument("--snapshot", required=True, help="the GET /status JSON, or - for stdin")
@@ -887,6 +974,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             out = _plan(args)
         except (PricingUnavailable, ValueError) as exc:
             print(f"cannot plan this request: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(out))
+        return 0
+    if args.cmd == "course-plan":
+        try:
+            out = _course_plan(args)
+        except ValueError as exc:
+            print(f"cannot plan this course: {exc}", file=sys.stderr)
             return 1
         print(json.dumps(out))
         return 0

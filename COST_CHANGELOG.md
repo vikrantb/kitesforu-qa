@@ -2,6 +2,21 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-10-28 — the verification job can create the smallest course (`--course`: ~$0.31-0.64 a run, every run ACK-gated; $0 change on every other run)
+
+**Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py`, `tests/test_create_verification_job.py`,
+this entry.
+
+**What a `--course` run buys.** One `POST /v1/courses` with 2 episodes x `--duration` (10 s by default): one curriculum
+call (gpt-4o, a median of ~$0.007 and at most $0.035 over the 130 courses that record their tokens, read 2026-10-28),
+then 2 podcast jobs the course orchestrator creates through the api. Each episode runs at `medium` whatever the course
+asks for, because the api's course door stores no `quality_tier` (kitesforu-api ca510ec,
+`services/courses/crud.py::create_course`), and sends neither visuals key, so it may run its visuals authors. The
+estimate is that sum, from this script's own measured bands (`_audio_term`, `_AUTHORS_BAND`): ~$0.31-0.64. A
+`medium` episode needs the ACK, so every course run does. The other modes send the bytes they sent before.
+
+**Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
+
 ## 2026-10-10 — the verification job buys paid clips and stills on a QA identity, and its estimate is computed from the body it sends and priced by the code that buys it (opt-in `--motion-clips` only: ~$0.75-3.05 per `--tier low --motion-clips 2` run at 10 s, ~$0.75-3.19 at 1 min; $0 change on every run without a purchase)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py` (new),
