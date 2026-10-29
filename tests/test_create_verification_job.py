@@ -787,11 +787,13 @@ def test_the_cost_changelog_records_this_change():
 
 
 def test_the_cost_changelog_records_the_course_mode():
-    newest = (QA / "COST_CHANGELOG.md").read_text().split("\n## ")[1]
-    assert newest.startswith("2026-10-28"), newest[:80]
+    sections = (QA / "COST_CHANGELOG.md").read_text().split("\n## ")[1:]
+    entry = next((s for s in sections if s.startswith("2026-10-28 — the verification job can create the smallest "
+                                                      "course")), "")
+    assert entry, [s[:40] for s in sections[:3]]
     for needle in ("`--course`", "scripts/create_verification_job.sh", "scripts/verification_job.py", "medium",
                    "quality_tier", "Pricing-page implication"):
-        assert needle in newest, needle
+        assert needle in entry, needle
 
 
 # ---------------------------------------------------------------------------------------------
