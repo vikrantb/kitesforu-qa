@@ -19,9 +19,11 @@
 #   ./create_verification_job.sh --course --on-behalf-of user_…  # the smallest COURSE the api accepts (POST
 #     /v1/courses): 2 episodes x --duration. It takes --topic --duration --tier --style --language, the owner
 #     flags and --dry-run, and refuses every other flag, --wait included (read GET /v1/courses/<id>/status).
-#     Its episodes run at medium whatever --tier says (the course door does not store quality_tier), so it needs
-#     the ACK. Pass a real owner: each episode is created on the owner's behalf, and the creation gate refuses
-#     an owner Clerk has no email for (the default, test_user_e2e).
+#     Each episode is priced and gated at --tier AND at medium (the course door stores the asked tier from
+#     kitesforu-api #911 on, none before it), with the paid stills a real owner's episode may buy, so it needs
+#     the ACK. It refuses any owner but a user_… id: each episode is created on the owner's behalf, and the
+#     creation gate refuses an owner Clerk has no email for (the key's own identity, any test_… id). It prices
+#     through the workers tree, as a purchase does.
 #
 # The estimate is computed FROM the body that is sent. A purchase (clips, stills, relimage bases,
 # character plates) is priced by the kitesforu-workers functions that select and price it, at origin/main
@@ -37,7 +39,8 @@
 #                        CREDITS lands here too: the api answers that refusal with HTTP 500, not a 4xx.
 #                        Check the owner's library before re-running.
 #   THE JOB WAS CREATED (its id is printed): 0 ok · 4 --wait ran out (NOT a result) · 5 ended with
-#                        nothing to grade · 6 the api stored LESS than asked · 7 the stored request could
+#                        nothing to grade, or a course whose curriculum generation did not start
+#                        · 6 the api stored LESS than asked · 7 the stored request could
 #                        not be read · 9 its status could not be read while waiting
 #   A signal BEFORE the POST exits 128+N, the shell's own convention: nothing was sent.
 #
@@ -224,6 +227,15 @@ if [[ "$COURSE" == "true" ]]; then
     echo "GET /v1/courses/<course_id>/status (the --wait loop reads a podcast's)." >&2
     exit 1
   fi
+  # The orchestrator creates each episode with SERVICE_API_KEY and X-On-Behalf-Of alone, so the api looks the owner's
+  # email up in Clerk (dependencies.get_current_user_full). The key's own identity and test_* ids have none there, and
+  # the creation gate (auth/access_gate.py) refuses an empty email while its `denied` list holds "*". Expected from
+  # the code and the current gate config; not observed on a live course.
+  if [[ "$ON_BEHALF_OF" != user_* ]]; then
+    echo "--course needs --on-behalf-of <user_…>: each episode is created on its owner's behalf, and the creation gate" >&2
+    echo "refuses an owner with no Clerk email (the key's own identity, any test_… id). Nothing was sent." >&2
+    exit 1
+  fi
 fi
 
 # ---- Motion clips: validate, and never let the $0 default opt the job OUT of visuals --------
@@ -289,6 +301,10 @@ if [[ "$MOTION_CLIPS" != "0" ]]; then
   ensure_workers_tree "price the clips this job buys" \
     || { echo "Refusing the purchase: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
+elif [[ "$COURSE" == "true" ]]; then
+  ensure_workers_tree "price the paid stills each episode may buy" \
+    || { echo "Refusing the course: it cannot be priced. Nothing was sent." >&2; exit 1; }
+  PLAN_PY="$WORKERS_PY"
 fi
 
 # ---- The request, and the estimate and ACK decision computed FROM IT --------------------------
@@ -299,7 +315,8 @@ fi
 # not a guess.
 if [[ "$COURSE" == "true" ]]; then
   PLAN=$("$PLAN_PY" "$HERE/verification_job.py" course-plan \
-    "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--language=$LANGUAGE") \
+    "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--language=$LANGUAGE" \
+    "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
     || { echo "Refusing: the course request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 else
   PLAN=$("$PLAN_PY" "$HERE/verification_job.py" plan \
@@ -366,7 +383,7 @@ fi
 
 if [[ "$COURSE" == "true" ]]; then
   echo "Creating verification course: $(plan_field course_episodes) episodes x ${DURATION}min, quality_tier=$TIER asked," \
-       "episodes run at $(plan_field episode_tier), lang=$LANGUAGE est=$EST" >&2
+       "episodes priced at $(plan_field episode_tiers), lang=$LANGUAGE est=$EST" >&2
 else
   echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST" >&2
 fi
@@ -406,13 +423,6 @@ if [[ -z "$ON_BEHALF_OF" ]]; then
   echo "  ⚠️  OWNER: the API key's own identity (test_user_e2e)." >&2
   echo "      This $NOUN will NOT appear on the founder's signed-in home page." >&2
   echo "      For anything a human must SEE, pass:  --on-behalf-of <user_…>" >&2
-  # The course orchestrator creates each episode with SERVICE_API_KEY and X-On-Behalf-Of alone, so the api looks the
-  # owner's email up in Clerk (dependencies.get_current_user_full); Clerk has no test_user_e2e, and the creation gate
-  # (auth/access_gate.py) refuses an empty email whenever its `denied` list holds "*".
-  if [[ "$COURSE" == "true" ]]; then
-    echo "      A COURSE needs a real owner as well: its episodes are created on the owner's behalf, and the" >&2
-    echo "      creation gate refuses an owner Clerk has no email for. This one gets its course and no episodes." >&2
-  fi
 else
   echo "  OWNER: $ON_BEHALF_OF — visible in that account's library." >&2
 fi
@@ -489,6 +499,20 @@ fi
 POST_STATE="created"
 echo "${ID_KEYS[0]}=$JOB_ID  (est $EST)"
 echo "status: $API_BASE/v1/$STATUS_ROUTE/$JOB_ID/status"
+# A course is created whether or not its curriculum generation starts: create_course_endpoint kicks it fail-open and
+# says which in the reply's message ("Course created — curriculum generation started." or "... Generate curriculum to
+# proceed.", kitesforu-api routes/courses/crud.py). A draft that never starts runs nothing, so it is exit 5.
+if [[ "$COURSE" == "true" ]]; then
+  _kick=$(printf '%s' "$RESP" | python3 -c '
+import json, sys
+message = str(json.load(sys.stdin).get("message") or "")
+print("started" if "curriculum generation started" in message.lower() else (message or "(no message)"))' 2>/dev/null) \
+    || _kick="(the reply could not be read)"
+  if [[ "$_kick" != "started" ]]; then
+    echo "The course was created, but its curriculum generation did not start, so nothing will run. The api said: $_kick" >&2
+    finish 5
+  fi
+fi
 
 # ---- Read back what the api STORED, for every run the ACK gate priced -------------------------
 # The api clamps a FREE subscription silently. `podcast_services.create_job` drops visual_options
@@ -496,8 +520,8 @@ echo "status: $API_BASE/v1/$STATUS_ROUTE/$JOB_ID/status"
 # and the 200 response says nothing. So a T4 could be created, charged and approved for clips it
 # will never render. `GET /status` echoes the stored request (`inputs`, `quality_tier`).
 # 6 = stored less than asked; 7 = could not read it. In both the job WAS created.
-# A course has nothing here to read back: the course door stores no quality_tier (the estimate above already prices
-# the tier its episodes run at), and /v1/podcasts/<id>/status does not serve a course.
+# A course has nothing here to read back: /v1/podcasts/<id>/status does not serve a course, and the estimate above
+# prices every tier its episodes can run at.
 if [[ "$NEEDS_ACK" == "true" && "$COURSE" != "true" ]]; then
   _readback="unread"
   SHORTFALL=""

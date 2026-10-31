@@ -549,13 +549,25 @@ def estimate(body: Dict[str, Any], *, clips: Optional[ClipQuote] = None,
 #: api answers 1 with a 422 before it writes anything.
 COURSE_EPISODES = 2
 
-#: The quality tier each episode of a course created through ``POST /v1/courses`` runs at, whatever the course asked
-#: for. ``CreateCourseRequest`` declares ``quality_tier``, but the api's ``create_course`` (kitesforu-api ca510ec,
-#: ``services/courses/crud.py``) writes no ``quality_tier`` to the course doc; the orchestrator creates each episode
-#: with ``course_state.get("quality_tier")`` (kitesforu-workers 7f384670a, ``stages/course/orchestrator/worker.py``),
-#: and ``podcast_services.create_job`` stores that None as ``"medium"``. Smart-create's course executor writes the
-#: field; the course door does not. Once it does, an episode's tier is the course's own ``quality_tier``.
-COURSE_EPISODE_TIER = "medium"
+#: The tier an episode runs at when its course doc stores none. The orchestrator creates each episode with
+#: ``course_state.get("quality_tier")`` (kitesforu-workers ``stages/course/orchestrator/worker.py``), and
+#: ``podcast_services.create_job`` stores that None as ``"medium"``. Before kitesforu-api #911 the course door wrote no
+#: ``quality_tier``, so every episode ran at medium; from #911 on, ``create_course`` writes the tier the account may buy.
+COURSE_TIER_WHEN_UNSTORED = "medium"
+
+#: The paid stills each episode may buy. An episode carries no visuals key (``CreateCourseRequest`` has no visuals
+#: field), and its owner is a real account, never a QA identity, because ``--course`` refuses any other owner. So the
+#: workers' implied share applies: ``scene_budget._implied_floor(12)`` = 4 stills with ``allow_paid=True``. That
+#: owner's low-tier jobs booked paid stills on 40 of 62, max $0.390 (qa #190 round 1, claims lens census). This is a
+#: ceiling, priced through :class:`ImageQuote` like the podcast mode's stills.
+COURSE_EPISODE_IMPLIED_STILLS = 4
+
+
+def course_episode_tiers(asked: str) -> Tuple[str, ...]:
+    """Every tier an episode of a course that asked for ``asked`` can run at: the asked tier where the api stores it
+    (kitesforu-api #911 on), and medium where it stores none (before it). This script cannot see which api revision
+    serves, so each episode is priced and gated at both."""
+    return (asked,) if asked == COURSE_TIER_WHEN_UNSTORED else (asked, COURSE_TIER_WHEN_UNSTORED)
 
 #: The curriculum call, one per course. Workers ``stages/course/syllabus/worker.py`` sends ``gpt-4o`` (the serving
 #: syllabus service sets no ``LLM_MODEL``, and gpt-4o has no ``model_catalog.csv`` row), priced at the workers' own
@@ -581,24 +593,44 @@ def build_course_body(*, topic: str, duration: str, tier: str, style: str, langu
     }
 
 
-def course_episode_body(course: Dict[str, Any]) -> Dict[str, Any]:
-    """One episode of ``course``, in the keys :func:`estimate` and :func:`ack_decision` read. The orchestrator creates
-    each episode through ``POST /v1/podcasts`` with the course's episode duration, the tier the course door leaves it
-    (:data:`COURSE_EPISODE_TIER`), and NEITHER visuals key: ``CreateCourseRequest`` has no visuals field, so every
-    episode keeps the workers' $0 visuals default and may run its visuals authors."""
-    return {"quality_tier": COURSE_EPISODE_TIER, "duration_min": float(course.get("episode_duration_min") or 0)}
+def course_episode_body(course: Dict[str, Any], tier: str) -> Dict[str, Any]:
+    """One episode of ``course`` at ``tier``, in the keys :func:`estimate` and :func:`ack_decision` read. The
+    orchestrator creates each episode through ``POST /v1/podcasts`` with the course's episode duration and no visuals
+    key. ``visual_options`` here is not sent: it states the implied paid stills
+    (:data:`COURSE_EPISODE_IMPLIED_STILLS`), so the estimate and the ACK count what the episode may buy."""
+    return {"quality_tier": tier, "duration_min": float(course.get("episode_duration_min") or 0),
+            "visual_options": {"real_images": True, "max_images": COURSE_EPISODE_IMPLIED_STILLS, "motion_clips": 0}}
 
 
-def course_estimate(course: Dict[str, Any]) -> Estimate:
-    """The curriculum call plus every episode's own :func:`estimate`."""
-    episode = estimate(course_episode_body(course))
+def course_estimate(course: Dict[str, Any], *, images: Optional[ImageQuote] = None) -> Estimate:
+    """The curriculum call plus every episode's own :func:`estimate`, at the costlier of the tiers it can run at
+    (:func:`course_episode_tiers`). An unpriced tier makes the whole course unknown."""
     n = int(course.get("total_episodes") or 0)
-    each = f"{n} episode(s) at {COURSE_EPISODE_TIER}, each {episode.text}"
-    if episode.low is None or episode.high is None:
-        return Estimate(text=f"unknown = {_SYLLABUS_BAND[2]} + {each}", low=None, high=None)
-    lo = _SYLLABUS_BAND[0] + n * episode.low
-    hi = _SYLLABUS_BAND[1] + n * episode.high
-    return Estimate(text=f"~{_span(lo, hi)} = {_SYLLABUS_BAND[2]} + {each}", low=lo, high=hi)
+    tiers = course_episode_tiers(str(course.get("quality_tier")))
+    episodes = [(t, estimate(course_episode_body(course, t), images=images)) for t in tiers]
+    each = f"{n} episode(s), each priced at {' and '.join(tiers)}: " + "; ".join(
+        f"{t} {e.text}" for t, e in episodes)
+    detail = list(episodes[0][1].detail)
+    if any(e.low is None or e.high is None for _, e in episodes):
+        return Estimate(text=f"unknown = {_SYLLABUS_BAND[2]} + {each}", low=None, high=None, detail=detail)
+    lo = _SYLLABUS_BAND[0] + n * min(e.low for _, e in episodes if e.low is not None)
+    hi = _SYLLABUS_BAND[1] + n * max(e.high for _, e in episodes if e.high is not None)
+    return Estimate(text=f"~{_span(lo, hi)} = {_SYLLABUS_BAND[2]} + {each}", low=lo, high=hi, detail=detail)
+
+
+#: The order :func:`ack_decision` names its conditions in, so a course's reasons print in the same order.
+_ACK_REASON_ORDER = ("tier=", "visuals=", "duration=", "motion_clips=", "paid_stills=")
+
+
+def course_ack_decision(course: Dict[str, Any]) -> Tuple[bool, str]:
+    """:func:`ack_decision` of one episode at every tier it can run at: each reason once, in that function's order."""
+    reasons: List[str] = []
+    for tier in course_episode_tiers(str(course.get("quality_tier"))):
+        needs, why = ack_decision(course_episode_body(course, tier))
+        if needs:
+            reasons += [r for r in why.split() if r not in reasons]
+    reasons.sort(key=lambda r: next((i for i, p in enumerate(_ACK_REASON_ORDER) if r.startswith(p)), len(_ACK_REASON_ORDER)))
+    return bool(reasons), "".join(f"{r} " for r in reasons)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -901,17 +933,33 @@ def _course_plan(args: argparse.Namespace) -> Dict[str, Any]:
     payload = json.dumps(build_course_body(topic=args.topic, duration=args.duration, tier=args.tier,
                                            style=args.style, language=args.language))
     sent = json.loads(payload)   # as in _plan: the estimate and the ACK decision read the bytes curl sends
-    episode = course_episode_body(sent)
-    needs_ack, reason = ack_decision(episode)
-    est = course_estimate(sent)
+    if not args.workers_src:
+        raise PricingUnavailable("each episode may buy paid stills, and no --workers-src was given to price them")
+    noise = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+            image_quote = quote_paid_images(_workers(args.workers_src))
+    except Exception as exc:
+        tail = "\n".join(noise.getvalue().strip().splitlines()[-15:])
+        if tail:
+            print(f"(workers output before the failure)\n{tail}", file=sys.stderr)
+        if isinstance(exc, PricingUnavailable):
+            raise
+        raise PricingUnavailable(f"the workers selector raised {type(exc).__name__}: {exc}") from exc
+    tiers = course_episode_tiers(sent["quality_tier"])
+    needs_ack, reason = course_ack_decision(sent)
+    est = course_estimate(sent, images=image_quote)
+    detail = list(est.detail)
+    if detail and args.catalog_label:
+        detail.insert(0, f"priced from {args.catalog_label}")
     warn: List[str] = []
-    if sent["quality_tier"] != episode["quality_tier"]:
-        warn.append(f"⚠️  the course asks for quality_tier={sent['quality_tier']}, which the api's course door does not "
-                    f"store: each episode runs at {episode['quality_tier']}, and is priced and gated here at "
-                    f"{episode['quality_tier']}.")
+    if len(tiers) > 1:
+        warn.append(f"⚠️  each episode is priced and gated at {' and '.join(tiers)}: the course door stores the asked "
+                    f"tier from kitesforu-api #911 on, and none before it (the api then runs {tiers[-1]}). This "
+                    "script cannot see which api revision serves.")
     return {"payload": payload, "est": est.text, "est_low": est.low, "est_high": est.high,
-            "est_detail": list(est.detail), "needs_ack": needs_ack, "ack_reason": reason, "warnings": warn,
-            "course_episodes": sent["total_episodes"], "episode_tier": episode["quality_tier"]}
+            "est_detail": detail, "needs_ack": needs_ack, "ack_reason": reason, "warnings": warn,
+            "course_episodes": sent["total_episodes"], "episode_tiers": " and ".join(tiers)}
 
 
 def _read_snapshot(arg: str) -> Any:
@@ -948,6 +996,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                             "JSON object")
     for name in ("--topic", "--duration", "--tier", "--style", "--language"):
         cp.add_argument(name, required=True)
+    cp.add_argument("--workers-src", default="")
+    cp.add_argument("--catalog-label", default="")
 
     c = sub.add_parser("check-stored", help="fields the api stored lower than requested, one per line")
     c.add_argument("--requested", required=True, help="the exact JSON body that was POSTed")

@@ -2,18 +2,22 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
-## 2026-10-28 — the verification job can create the smallest course (`--course`: ~$0.31-0.64 a run, every run ACK-gated; $0 change on every other run)
+## 2026-10-28 — the verification job can create the smallest course (`--course`: ~$0.08-4.20 a run at `--tier low`, a dollar ceiling, every run ACK-gated; $0 change on every other run)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py`, `tests/test_create_verification_job.py`,
 this entry.
 
 **What a `--course` run buys.** One `POST /v1/courses` with 2 episodes x `--duration` (10 s by default): one curriculum
 call (gpt-4o, a median of ~$0.007 and at most $0.035 over the 130 courses that record their tokens, read 2026-10-28),
-then 2 podcast jobs the course orchestrator creates through the api. Each episode runs at `medium` whatever the course
-asks for, because the api's course door stores no `quality_tier` (kitesforu-api ca510ec,
-`services/courses/crud.py::create_course`), and sends neither visuals key, so it may run its visuals authors. The
-estimate is that sum, from this script's own measured bands (`_audio_term`, `_AUTHORS_BAND`): ~$0.31-0.64. A
-`medium` episode needs the ACK, so every course run does. The other modes send the bytes they sent before.
+then 2 podcast jobs the course orchestrator creates through the api. Each episode runs at the course's stored
+`quality_tier`, or at `medium` when the doc stores none: the course door stores none before kitesforu-api #911 and the
+asked tier from it on. This script cannot see which api revision serves, so it prices and gates each episode at both
+and keeps the costlier. An episode sends neither visuals key, and its owner is a real account (`--course` refuses any
+other), so the workers' implied share lets it buy up to 4 paid stills (`scene_budget._implied_floor(12)`; that owner's
+low-tier jobs booked paid stills on 40 of 62, max $0.390). Those stills, their relimage bases and character plates are
+priced through the producer's own still quote, as in the podcast mode: a dollar ceiling, not a measurement. The
+estimate at `--tier low` is ~$0.08-4.20; at `--tier high` ~$0.33-8.37. A `medium` episode needs the ACK, so every
+course run does. The other modes send the bytes they sent before.
 
 **Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
 

@@ -1298,12 +1298,19 @@ EXPECTED_COURSE_BODY = (
     '{"topic": "pipeline verification", "total_episodes": 2, "episode_duration_min": 0.167, "style": "Explainer", '
     '"language": "en-US", "quality_tier": "low", "skip_clarifier": true}'
 )
-#: The shape of the api's CreateCourseResponse (synthetic: this repo is public).
-COURSE_REPLY = '{"course_id": "course_test_1", "status": "draft", "credits_estimated": 0.0, "message": "created"}'
+#: The shape of the api's CreateCourseResponse (synthetic: this repo is public), with the message
+#: create_course_endpoint sends when it kicked curriculum generation (kitesforu-api routes/courses/crud.py).
+COURSE_REPLY = ('{"course_id": "course_test_1", "status": "draft", "credits_estimated": 0.0, '
+                '"message": "Course created \u2014 curriculum generation started."}')
+#: The message it sends when the kick failed open: the course exists, and nothing will run.
+COURSE_REPLY_NOT_STARTED = ('{"course_id": "course_test_1", "status": "draft", "credits_estimated": 0.0, '
+                            '"message": "Course created successfully. Generate curriculum to proceed."}')
+#: A synthetic Clerk user id: a course is refused for any other owner.
+OWNER = ("--on-behalf-of", "user_abc123")
 
 
-def test_the_course_dry_run_prints_the_smallest_course_and_sends_nothing(harness):
-    r = harness.run("--course", "--dry-run", env={"KFU_WORKERS_REPO": "/nonexistent"})
+def test_the_course_dry_run_prints_the_smallest_course_and_sends_nothing(harness, workers_src):
+    r = harness.run("--course", "--dry-run", *OWNER, env={"WORKERS_SRC": workers_src})
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == EXPECTED_COURSE_BODY
     assert "POST http://127.0.0.1:9/v1/courses" in r.stderr
@@ -1332,7 +1339,7 @@ print(json.dumps(out))
 '''
 
 
-def test_the_course_body_sits_on_the_floors_of_the_apis_own_request_model(harness):
+def test_the_course_body_sits_on_the_floors_of_the_apis_own_request_model(harness, workers_src):
     """The api's CreateCourseRequest accepts the body, declares every key it sends (it drops an undeclared key without
     an error), and refuses one episode fewer and a shorter episode. So "the smallest course the api accepts" is the
     model's own bounds, read from it, and not this test's reading of them."""
@@ -1340,7 +1347,7 @@ def test_the_course_body_sits_on_the_floors_of_the_apis_own_request_model(harnes
     if not py:
         pytest.skip("no kitesforu-workers venv to import kitesforu_schemas from (set KFU_WORKERS_PYTHON): "
                     "SKIPPED, not passed")
-    body = harness.run("--course", "--dry-run").stdout
+    body = harness.run("--course", "--dry-run", *OWNER, env={"WORKERS_SRC": workers_src}).stdout
     probe = subprocess.run([py, "-I", "-c", _COURSE_MODEL_PROBE], input=body, capture_output=True, text=True,
                            timeout=120)
     assert probe.returncode == 0, probe.stderr[-2000:]
@@ -1381,59 +1388,113 @@ req = CreateCourseRequest.model_validate(json.loads(sys.stdin.read()))
 now = datetime.now(timezone.utc)
 doc = Course(course_id="c", user_id="u", title="t", topic=req.topic, created_at=now, updated_at=now,
              settings=CourseSettings(**{k: getattr(req, k) for k in CourseSettings.model_fields})).model_dump()
-params = CourseModuleOrchestratorWorker._extract_course_params(None, doc)
+unstored = CourseModuleOrchestratorWorker._extract_course_params(None, doc)
+# kitesforu-api #911: create_course writes the asked (entitled) tier TOP-LEVEL on the doc, outside the Course model.
+stored = CourseModuleOrchestratorWorker._extract_course_params(None, {**doc, "quality_tier": req.quality_tier})
 print(json.dumps({"asked": req.quality_tier, "course_declares_quality_tier": "quality_tier" in Course.model_fields,
-                  "episode_quality_tier": params["quality_tier"],
-                  "episode_visuals": [params["wants_visuals"], params["visuals_opt_out"]]}))
+                  "unstored_episode_tier": unstored["quality_tier"], "stored_episode_tier": stored["quality_tier"],
+                  "episode_visuals": [unstored["wants_visuals"], unstored["visuals_opt_out"]]}))
 '''
 
 
-def test_the_course_door_hands_each_episode_no_tier_of_its_own(harness, course_producer_src):
-    """COURSE_EPISODE_TIER, read from the producers rather than restated: ``Course`` declares no quality_tier, so the
-    course doc the api writes carries none, and the orchestrator creates each episode with
-    ``course_state.get("quality_tier")``: None, and neither visuals key. The api stores that None as "medium"
-    (kitesforu-api podcast_services ``quality_tier or "medium"``), which is the one link this test cannot import."""
+def test_an_episode_runs_at_the_tier_its_course_doc_stores_and_both_are_priced(harness, workers_src,
+                                                                                course_producer_src):
+    """The orchestrator hands each episode the course doc's top-level tier when the doc stores one (api #911 on) and
+    None when it stores none (before it; the api runs None as medium). :func:`course_episode_tiers` prices both,
+    because this script cannot see which api revision serves. The orchestrator also sends neither visuals key, which
+    is why each episode is priced with its implied paid stills."""
     py = _workers_python()
     if not py:
         pytest.skip("no kitesforu-workers venv (set KFU_WORKERS_PYTHON): SKIPPED, not passed")
-    body = harness.run("--course", "--dry-run").stdout
+    body = harness.run("--course", "--dry-run", *OWNER, env={"WORKERS_SRC": workers_src}).stdout
     probe = subprocess.run([py, "-I", "-c", _COURSE_ROUTE_PROBE, course_producer_src], input=body,
                            capture_output=True, text=True, timeout=180)
     assert probe.returncode == 0, probe.stderr[-2000:]
     got = json.loads(probe.stdout.strip().splitlines()[-1])
     assert got["asked"] == "low" and got["course_declares_quality_tier"] is False, got
-    assert got["episode_quality_tier"] is None and got["episode_visuals"] == [None, None], got
+    assert got["stored_episode_tier"] == "low" and got["unstored_episode_tier"] is None, got
+    assert got["episode_visuals"] == [None, None], got
+    assert verification_job.course_episode_tiers("low") == ("low", verification_job.COURSE_TIER_WHEN_UNSTORED)
 
 
-def test_a_course_is_priced_as_its_syllabus_and_each_episode_the_api_creates():
-    course = json.loads(EXPECTED_COURSE_BODY)
-    episode = verification_job.course_episode_body(course)
-    assert episode == {"quality_tier": "medium", "duration_min": 0.167}, "not the job the orchestrator creates"
-    each = verification_job.estimate(episode)
-    est = verification_job.course_estimate(course)
+#: A synthetic still quote: two image rows, one regen per beat, one relimage base, two plates.
+_IMAGES = verification_job.ImageQuote(rows=(("img-cheap", 0.039, True), ("img-dear", 0.134, True)), relimage_usd=0.04,
+                                      relimage_cap=lambda n, paid: 1 if paid and n else 0, plate_budget=2, regens=1)
+
+
+@pytest.mark.parametrize("tier", ["low", "medium", "high"])
+def test_a_course_is_priced_at_the_costlier_of_the_tiers_its_episodes_can_run_at(tier):
+    course = {**json.loads(EXPECTED_COURSE_BODY), "quality_tier": tier}
+    tiers = verification_job.course_episode_tiers(tier)
+    each = [verification_job.estimate(verification_job.course_episode_body(course, t), images=_IMAGES) for t in tiers]
+    est = verification_job.course_estimate(course, images=_IMAGES)
     lo, hi, _ = verification_job._SYLLABUS_BAND
-    assert est.low == pytest.approx(lo + 2 * each.low) and est.high == pytest.approx(hi + 2 * each.high)
-    assert each.high > each.low, "an episode sent neither visuals key, so its visuals authors belong in its band"
+    assert est.low == pytest.approx(lo + 2 * min(e.low for e in each))
+    assert est.high == pytest.approx(hi + 2 * max(e.high for e in each))
+    assert set(tiers) == {tier, "medium"}
+    medium = verification_job.estimate(verification_job.course_episode_body(course, "medium"), images=_IMAGES)
+    assert est.high >= hi + 2 * medium.high - 1e-9, "a course asked below medium is not bounded by medium"
 
 
-def test_a_course_needs_the_ack_because_its_episodes_run_at_medium(harness):
-    r = harness.run("--course", env={"STUB_POST_RESPONSE": COURSE_REPLY})
+def test_an_ultra_course_is_unknown_not_priced_as_medium():
+    course = {**json.loads(EXPECTED_COURSE_BODY), "quality_tier": "ultra"}
+    est = verification_job.course_estimate(course, images=_IMAGES)
+    assert est.low is None and est.high is None and est.text.startswith("unknown"), est.text
+
+
+def test_each_episode_is_priced_with_the_paid_stills_a_real_owners_episode_may_buy():
+    course = json.loads(EXPECTED_COURSE_BODY)
+    episode = verification_job.course_episode_body(course, "medium")
+    assert verification_job.ordered_stills(episode) == verification_job.COURSE_EPISODE_IMPLIED_STILLS == 4
+    assert verification_job.ordered_clips(episode) == 0
+    with pytest.raises(verification_job.PricingUnavailable):
+        verification_job.course_estimate(course)   # a still it cannot price is a refusal, never a guess
+    without = verification_job.estimate({"quality_tier": "medium", "duration_min": 0.167})
+    priced = verification_job.estimate(episode, images=_IMAGES)
+    assert priced.high > without.high, "the implied stills are not in the episode's band"
+
+
+def test_a_course_needs_the_ack_at_every_tier_its_episodes_can_run_at(harness, workers_src):
+    r = harness.run("--course", *OWNER, env={"STUB_POST_RESPONSE": COURSE_REPLY, "WORKERS_SRC": workers_src})
     assert r.returncode == 3, (r.returncode, r.stderr)
-    assert "T4 ESCALATION BLOCKED (tier=medium )" in r.stderr and "does not store" in r.stderr
+    assert "T4 ESCALATION BLOCKED (tier=medium paid_stills=4 )" in r.stderr, r.stderr
+    assert "priced and gated at low and medium" in r.stderr
     assert harness.calls("curl") == [], "a course that needs the ACK reached curl"
 
 
-def test_the_course_gate_keys_on_the_episodes_it_orders(harness):
-    r = harness.run("--course", "--dry-run", "--duration", "1.0")
+def test_the_course_gate_keys_on_the_episodes_it_orders(harness, workers_src):
+    r = harness.run("--course", "--dry-run", *OWNER, "--duration", "1.0", env={"WORKERS_SRC": workers_src})
     assert r.returncode == 0, r.stderr
-    assert "a real run would need the ACK (tier=medium duration=1.0min )" in r.stderr
+    assert "a real run would need the ACK (tier=medium duration=1.0min paid_stills=4 )" in r.stderr
 
 
-def test_a_course_is_posted_to_the_course_door_with_the_podcasts_headers(harness):
+@pytest.mark.parametrize("owner", [(), ("--on-behalf-of", "test_synthetic")])
+def test_a_course_without_a_real_owner_is_refused_before_the_ack_and_sends_nothing(harness, workers_src, owner):
+    """The orchestrator creates each episode on the owner's behalf, and the creation gate refuses an owner with no
+    Clerk email: the key's own identity and every test_* id. So the course is refused before it is priced, gated or
+    sent, dry run included."""
+    for extra in ((), ("--dry-run",)):
+        r = harness.run("--course", *extra, *owner, env={"STUB_POST_RESPONSE": COURSE_REPLY,
+                                                         "WORKERS_SRC": workers_src})
+        assert r.returncode == 1 and "--course needs --on-behalf-of <user_" in r.stderr, (r.returncode, r.stderr)
+        assert "T4 ESCALATION" not in r.stderr and "would need the ACK" not in r.stderr
+        assert harness.calls() == [] and r.stdout == ""
+
+
+def test_a_course_whose_curriculum_generation_did_not_start_is_exit_5(harness, workers_src):
+    harness.fresh_ack()
+    r = harness.run("--course", *OWNER, env={"STUB_POST_RESPONSE": COURSE_REPLY_NOT_STARTED,
+                                             "WORKERS_SRC": workers_src})
+    assert r.returncode == 5, (r.returncode, r.stderr)
+    assert "course_id=course_test_1" in r.stdout, "the course WAS created, so its id is printed"
+    assert "did not start" in r.stderr and "Generate curriculum to proceed" in r.stderr
+
+
+def test_a_course_is_posted_to_the_course_door_with_the_podcasts_headers(harness, workers_src):
     harness.fresh_ack()
     obo = ("--on-behalf-of", "user_abc123", "--on-behalf-of-email", "ops team@example.com")
     assert harness.run(*obo).returncode == 0                    # the podcast POST: the headers to match
-    course = harness.run("--course", *obo, env={"STUB_POST_RESPONSE": COURSE_REPLY})
+    course = harness.run("--course", *obo, env={"STUB_POST_RESPONSE": COURSE_REPLY, "WORKERS_SRC": workers_src})
     assert course.returncode == 0, course.stderr
     podcast_post, course_post = [c for c in harness.calls("curl") if "POST" in c]
     headers = lambda call: [call[i + 1] for i, a in enumerate(call) if a == "-H"]
@@ -1462,24 +1523,27 @@ def test_a_flag_a_course_request_cannot_carry_is_refused_before_anything_is_sent
     # A podcast's id key is not a course's: a reply naming no course_id says a course MAY exist.
     ("200", '{"job_id": "not_a_course"}', 8, "No course id in the api's reply (HTTP 200)"),
 ])
-def test_a_course_post_is_classified_by_what_it_says_about_the_course(harness, http, body, rc, needle):
+def test_a_course_post_is_classified_by_what_it_says_about_the_course(harness, workers_src, http, body, rc, needle):
     harness.fresh_ack()
-    r = harness.run("--course", env={"STUB_POST_HTTP": http, "STUB_POST_RESPONSE": body})
+    r = harness.run("--course", *OWNER, env={"STUB_POST_HTTP": http, "STUB_POST_RESPONSE": body,
+                                             "WORKERS_SRC": workers_src})
     assert r.returncode == rc and needle in r.stderr, (r.returncode, r.stderr)
 
 
-def test_a_course_post_transport_failure_says_the_course_may_exist(harness):
+def test_a_course_post_transport_failure_says_the_course_may_exist(harness, workers_src):
     harness.fresh_ack()
-    r = harness.run("--course", env={"STUB_POST_RESPONSE": COURSE_REPLY, "STUB_POST_EXIT": "28"})
+    r = harness.run("--course", *OWNER, env={"STUB_POST_RESPONSE": COURSE_REPLY, "STUB_POST_EXIT": "28",
+                                             "WORKERS_SRC": workers_src})
     assert r.returncode == 8 and "The course MAY have been created" in r.stderr and "timed out" in r.stderr
 
 
-def test_a_signal_while_the_course_post_is_out_is_exit_8(harness):
+def test_a_signal_while_the_course_post_is_out_is_exit_8(harness, workers_src):
     """POST_STATE is `sent` before the course's curl, as before the podcast's: a stop with the POST in flight says a
     course MAY exist and exits 8, never 128+N, which says nothing was sent."""
     harness.fresh_ack()
-    proc = subprocess.Popen(["/bin/bash", str(harness.script), "--course"],
-                            env=harness.env({"STUB_POST_RESPONSE": COURSE_REPLY, "STUB_POST_DELAY": "2"}),
+    proc = subprocess.Popen(["/bin/bash", str(harness.script), "--course", *OWNER],
+                            env=harness.env({"STUB_POST_RESPONSE": COURSE_REPLY, "STUB_POST_DELAY": "2",
+                                             "WORKERS_SRC": workers_src}),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.time() + 30
@@ -1498,6 +1562,6 @@ def test_a_signal_while_the_course_post_is_out_is_exit_8(harness):
 def test_help_documents_the_course_mode(harness):
     r = harness.run("--help")
     assert r.returncode == 0
-    for needle in ("--course", "POST", "/v1/courses", "GET /v1/courses/<id>/status", "run at medium", "the ACK",
-                   "test_user_e2e"):
+    for needle in ("--course", "POST", "/v1/courses", "GET /v1/courses/<id>/status", "AND at medium", "the ACK",
+                   "paid stills", "user_…"):
         assert needle in r.stdout, needle
