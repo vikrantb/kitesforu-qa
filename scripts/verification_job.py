@@ -619,10 +619,9 @@ def course_estimate(course: Dict[str, Any], *, images: Optional[ImageQuote] = No
     each = f"{n} episode(s), each priced at {' and '.join(tiers)}: " + "; ".join(
         f"{t} {e.text}" for t, e in episodes)
     detail = list(episodes[0][1].detail)
-    if any(e.low is None or e.high is None for _, e in episodes):
-        return Estimate(text=f"unknown = {_SYLLABUS_BAND[2]} + {each}", low=None, high=None, detail=detail)
-    lo = _SYLLABUS_BAND[0] + n * min(e.low for _, e in episodes if e.low is not None)
-    hi = _SYLLABUS_BAND[1] + n * max(e.high for _, e in episodes if e.high is not None)
+    # Every tier in COURSE_TIERS has a band, and a still it cannot price raises, so both ends are numbers.
+    lo = _SYLLABUS_BAND[0] + n * min(float(e.low) for _, e in episodes)
+    hi = _SYLLABUS_BAND[1] + n * max(float(e.high) for _, e in episodes)
     return Estimate(text=f"~{_span(lo, hi)} = {_SYLLABUS_BAND[2]} + {each}", low=lo, high=hi, detail=detail)
 
 
@@ -941,6 +940,7 @@ def _course_plan(args: argparse.Namespace) -> Dict[str, Any]:
     payload = json.dumps(build_course_body(topic=args.topic, duration=args.duration, tier=args.tier,
                                            style=args.style, language=args.language))
     sent = json.loads(payload)   # as in _plan: the estimate and the ACK decision read the bytes curl sends
+    course_episode_tiers(sent["quality_tier"])   # the tier rule first: a premium ask is refused for what it is
     if not args.workers_src:
         raise PricingUnavailable("each episode may buy paid stills, and no --workers-src was given to price them")
     noise = io.StringIO()

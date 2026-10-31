@@ -1474,7 +1474,7 @@ sys.path.insert(0, sys.argv[1])
 from workers.stages.visuals.policy import policy_for_job, scene_budget_for
 grants = {}
 for sub in ("trial", "free", "enthu", "pro", "payg", "pro_plus", "ultimate", None):
-    for q in ("low", "medium"):
+    for q in json.loads(sys.argv[2]):
         doc = {"user_id": "user_synthetic_owner", "quality_tier": q, "allow_premium": False}
         if sub:
             doc["subscription_tier"] = sub
@@ -1487,12 +1487,13 @@ print(json.dumps({"grants": grants,
 
 def test_the_implied_stills_bound_the_producers_grant(workers_src):
     """COURSE_EPISODE_IMPLIED_STILLS is not a restated number: the producer's own policy grants a never-asked course
-    episode at most that many paid stills at every --course tier and subscription, and reaches it."""
+    episode at most that many paid stills at every tier in COURSE_TIERS and every subscription, and reaches it. The
+    tiers come from COURSE_TIERS itself, so widening it to a premium tier turns this pin red."""
     py = _workers_python()
     if not py:
         pytest.skip("no kitesforu-workers venv (set KFU_WORKERS_PYTHON): SKIPPED, not passed")
-    probe = subprocess.run([py, "-I", "-c", _STILLS_GRANT_PROBE, workers_src], capture_output=True, text=True,
-                           timeout=180)
+    probe = subprocess.run([py, "-I", "-c", _STILLS_GRANT_PROBE, workers_src,
+                            json.dumps(verification_job.COURSE_TIERS)], capture_output=True, text=True, timeout=180)
     assert probe.returncode == 0, probe.stderr[-2000:]
     got = json.loads(probe.stdout.strip().splitlines()[-1])
     assert got["qa_control"] == 0, "positive control: a QA identity is granted no paid still"
