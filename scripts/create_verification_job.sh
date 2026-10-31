@@ -239,12 +239,6 @@ if [[ "$COURSE" == "true" ]]; then
     echo "the code and the current gate config; not observed on a live course). Nothing was sent." >&2
     exit 1
   fi
-  # POST /v1/courses charges nothing, so it runs no episode above medium (kitesforu-api #911; before it, every
-  # episode ran at medium). A premium ask would run at medium either way, and its price would mislead the ACK.
-  if [[ "$TIER" != "low" && "$TIER" != "medium" ]]; then
-    echo "--course takes --tier low or medium, not '$TIER': POST /v1/courses runs no episode above medium. Nothing was sent." >&2
-    exit 1
-  fi
 fi
 
 # ---- Motion clips: validate, and never let the $0 default opt the job OUT of visuals --------
