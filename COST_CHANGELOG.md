@@ -2,6 +2,27 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-10-28 — the verification job can create the smallest course (`--course`: ~$0.08-4.20 a run at `--tier low`, every run ACK-gated; $0 change on every other run)
+
+**Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py`, `tests/test_create_verification_job.py`,
+this entry.
+
+**What a `--course` run buys.** One `POST /v1/courses` with 2 episodes x `--duration` (10 s by default): one curriculum
+call (gpt-4o, a median of ~$0.007 and at most $0.035 over the 130 courses that record their tokens, read 2026-10-28),
+then 2 podcast jobs the course orchestrator creates through the api. Each episode runs at the course's stored
+`quality_tier`, or at `medium` when the doc stores none: the course door stores none before kitesforu-api #911 and the
+asked tier from it on. This script cannot see which api revision serves, so it prices and gates each episode at both:
+the printed range runs from the cheaper tier's low end to the costlier tier's high end. `--course` takes `--tier low`
+or `medium` only, because the course door runs no episode above medium. An episode sends neither visuals key, and its
+owner is a real account (`--course` refuses any other), so the producer's implied share lets it buy up to 4 paid
+stills; a test runs the producer's own `policy_for_job` and `scene_budget_for` to hold that bound. Those stills, their
+relimage bases and character plates are priced through the producer's own still quote, as a dollar ceiling. The
+audio, visuals-authors and curriculum terms are measured maxima, not bounds. The estimate at `--tier low` is
+~$0.08-4.20, and at `--tier medium` ~$0.33-4.17. A `medium` episode needs the ACK, so every course run does. The other
+modes send the bytes they sent before.
+
+**Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
+
 ## 2026-10-10 — the verification job buys paid clips and stills on a QA identity, and its estimate is computed from the body it sends and priced by the code that buys it (opt-in `--motion-clips` only: ~$0.75-3.05 per `--tier low --motion-clips 2` run at 10 s, ~$0.75-3.19 at 1 min; $0 change on every run without a purchase)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_job.py` (new),

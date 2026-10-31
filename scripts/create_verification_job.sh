@@ -16,6 +16,15 @@
 #   ./create_verification_job.sh ... --on-behalf-of user_…  # a Clerk USER ID owns the job (default:
 #                                                           # test_user_e2e, invisible to the founder)
 #   ./create_verification_job.sh ... --dry-run            # print the request and its estimate; no auth, no POST, $0
+#   ./create_verification_job.sh --course --on-behalf-of user_…  # the smallest COURSE the api accepts (POST
+#     /v1/courses): 2 episodes x --duration. It takes --topic --duration --tier --style --language, the owner
+#     flags and --dry-run, and refuses every other flag, --wait included (read GET /v1/courses/<id>/status).
+#     It takes --tier low or medium (the course door runs no episode above medium). Each episode is priced and
+#     gated at --tier AND at medium (the course door stores the asked tier from kitesforu-api #911 on, none
+#     before it), with the paid stills a real owner's episode may buy, so it needs the ACK. It refuses any owner
+#     but a user_… id: each episode is created on the owner's behalf, and the creation gate is expected to refuse
+#     an owner Clerk has no email for (the key's own identity, any test_… id). It prices
+#     through the workers tree, as a purchase does.
 #
 # The estimate is computed FROM the body that is sent. A purchase (clips, stills, relimage bases,
 # character plates) is priced by the kitesforu-workers functions that select and price it, at origin/main
@@ -31,7 +40,8 @@
 #                        CREDITS lands here too: the api answers that refusal with HTTP 500, not a 4xx.
 #                        Check the owner's library before re-running.
 #   THE JOB WAS CREATED (its id is printed): 0 ok · 4 --wait ran out (NOT a result) · 5 ended with
-#                        nothing to grade · 6 the api stored LESS than asked · 7 the stored request could
+#                        nothing to grade, or a course whose curriculum generation did not start
+#                        · 6 the api stored LESS than asked · 7 the stored request could
 #                        not be read · 9 its status could not be read while waiting
 #   A signal BEFORE the POST exits 128+N, the shell's own convention: nothing was sent.
 #
@@ -61,6 +71,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 WORKERS_TREE=""
 POST_STATE="unsent"   # unsent | sent (outcome unknown) | rejected (HTTP 4xx) | created (JOB_ID known)
 JOB_ID=""
+NOUN="job"            # what the POST creates: a podcast "job", or with --course a "course" (JOB_ID is its id)
 EXPLAINED="false"
 SIGNALLED=""
 SLEEP_PID=""
@@ -75,9 +86,9 @@ on_exit() {
   local why="exit $rc"
   [[ -n "$SIGNALLED" ]] && why="SIG$SIGNALLED"
   case "$POST_STATE" in
-    sent)    echo "Stopped ($why) after the POST went out: a job MAY exist. Check the owner's library before re-running." >&2
+    sent)    echo "Stopped ($why) after the POST went out: a $NOUN MAY exist. Check the owner's library before re-running." >&2
              exit 8 ;;
-    created) echo "Stopped ($why): job $JOB_ID WAS created. Do not re-run to retry it; read it instead." >&2
+    created) echo "Stopped ($why): $NOUN $JOB_ID WAS created. Do not re-run to retry it; read it instead." >&2
              exit 8 ;;
   esac
   return 0
@@ -89,7 +100,8 @@ trap 'on_signal HUP 129' HUP
 trap 'on_signal INT 130' INT
 # The kitesforu-workers checkout whose origin/main prices a purchased clip or still: its own
 # selector and catalog, read from a temporary `git archive`, never from the working tree (a lane's
-# feature branch is not what serves). Read only when the job buys clips. Same root as ACK_FILE.
+# feature branch is not what serves). Read when the job buys clips, and for every --course (its episodes may buy
+# paid stills). Same root as ACK_FILE.
 WORKERS_REPO="${KFU_WORKERS_REPO:-/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers}"
 # THE INTERPRETER THAT IMPORTS THE PRODUCER IS THE PRODUCER'S. Pricing imports workers.*, so it needs the
 # workers dependencies; it used to run under whichever python3 was first on PATH, and a bare PATH refused
@@ -139,6 +151,7 @@ DRY_RUN="false"     # --dry-run: print the POST URL, headers, body and estimate,
 PAID_STILLS="on"    # --paid-stills on|off: with --motion-clips, buy paid stills too (on) or clips only
                     # (off). How many, and why, is decided beside the body: verification_job.py.
 PAID_STILLS_GIVEN="false"  # set when --paid-stills is passed explicitly (validated below)
+COURSE="false"      # --course: POST /v1/courses, the smallest course the api accepts (verification_job.py course-plan)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -174,6 +187,7 @@ while [[ $# -gt 0 ]]; do
     --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
     --paid-stills)  PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
     --dry-run)  DRY_RUN="true"; shift ;;
+    --course)   COURSE="true"; shift ;;
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
@@ -194,6 +208,38 @@ done
 # A non-numeric value used to reach the clip warning first ("for a 0s episode") and die later at the
 # payload build (qa #175 round-2 code critic). Refuse it here, once.
 [[ "$DURATION" =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)$ ]] || { echo "--duration must be a number of minutes (e.g. 0.167, 2.0), got: '$DURATION'" >&2; exit 1; }
+
+# ---- --course takes only what a course request carries ------------------------------------------
+# Every other flag shapes a podcast body or polls a podcast's /status, so with --course it would do nothing:
+# refused here, before anything is planned or sent (the same rule as --paid-stills without clips below).
+if [[ "$COURSE" == "true" ]]; then
+  _podcast_only=()
+  [[ "$WAIT" == "true" ]] && _podcast_only+=("--wait")
+  [[ "$VISUALS" == "true" ]] && _podcast_only+=("--visuals")
+  [[ "$VISUALS" == "auto" ]] && _podcast_only+=("--visuals-auto")
+  [[ "$MOTION_CLIPS" != "0" ]] && _podcast_only+=("--motion-clips")
+  [[ "$PAID_STILLS_GIVEN" == "true" ]] && _podcast_only+=("--paid-stills")
+  [[ "$SHORT" == "true" ]] && _podcast_only+=("--short")
+  [[ -n "$FORMAT" ]] && _podcast_only+=("--format")
+  [[ -n "$CONTENT_RATING" ]] && _podcast_only+=("--content-rating")
+  [[ -n "$SOURCE_WRITEUP" ]] && _podcast_only+=("--source-writeup")
+  if (( ${#_podcast_only[@]} > 0 )); then
+    echo "--course does not take ${_podcast_only[*]}: a course request carries only the topic, the episode duration," >&2
+    echo "the tier, the style, the language and the owner. Nothing was sent. To follow a course, read" >&2
+    echo "GET /v1/courses/<course_id>/status (the --wait loop reads a podcast's)." >&2
+    exit 1
+  fi
+  # The orchestrator creates each episode with SERVICE_API_KEY and X-On-Behalf-Of alone, so the api looks the owner's
+  # email up in Clerk (dependencies.get_current_user_full). The key's own identity and test_* ids have none there, and
+  # the creation gate (auth/access_gate.py) refuses an empty email while its `denied` list holds "*". Expected from
+  # the code and the current gate config; not observed on a live course.
+  if [[ "$ON_BEHALF_OF" != user_* ]]; then
+    echo "--course needs --on-behalf-of <user_…>: each episode is created on its owner's behalf, and the creation gate" >&2
+    echo "is expected to refuse an owner with no Clerk email, which the key's own identity and test_… ids are (from" >&2
+    echo "the code and the current gate config; not observed on a live course). Nothing was sent." >&2
+    exit 1
+  fi
+fi
 
 # ---- Motion clips: validate, and never let the $0 default opt the job OUT of visuals --------
 [[ "$MOTION_CLIPS" =~ ^[0-3]$ ]] || { echo "--motion-clips must be 0-3 (the API's VisualOptions bound), got: $MOTION_CLIPS" >&2; exit 1; }
@@ -221,10 +267,11 @@ if [[ "$PAID_STILLS_GIVEN" == "true" && "$MOTION_CLIPS" == "0" ]]; then
 fi
 
 # ---- The producer: a temporary tree of kitesforu-workers origin/main, under the workers interpreter ---
-# Read when the job buys clips (and the stills that ride with them), to price them, and before a --wait for a
-# video, to read the producer's by-design no-video reasons. WORKERS_SRC=<tree>/src overrides it, and the
-# tree's ../config/model_catalog.csv is the catalog. A job that buys nothing priced and waits for no video
-# needs no tree, so the T3 default path reads no repo and runs no git.
+# Read when the job buys clips (and the stills that ride with them), to price them; for every --course, whose
+# episodes may buy paid stills; and before a --wait for a video, to read the producer's by-design no-video
+# reasons. WORKERS_SRC=<tree>/src overrides it, and the tree's ../config/model_catalog.csv is the catalog. A
+# podcast that buys nothing priced and waits for no video needs no tree, so the T3 default path reads no repo
+# and runs no git.
 WORKERS_SRC_FOR_PLAN=""
 CATALOG_LABEL=""
 # `ensure_workers_tree "<what it is for>"`: sets WORKERS_SRC_FOR_PLAN (and CATALOG_LABEL) once, or says why it
@@ -258,6 +305,10 @@ if [[ "$MOTION_CLIPS" != "0" ]]; then
   ensure_workers_tree "price the clips this job buys" \
     || { echo "Refusing the purchase: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
+elif [[ "$COURSE" == "true" ]]; then
+  ensure_workers_tree "price the paid stills each episode may buy" \
+    || { echo "Refusing the course: it cannot be priced. Nothing was sent." >&2; exit 1; }
+  PLAN_PY="$WORKERS_PY"
 fi
 
 # ---- The request, and the estimate and ACK decision computed FROM IT --------------------------
@@ -266,12 +317,19 @@ fi
 # and shared nothing with it: round 2 began buying stills while the printed estimate stayed
 # byte-identical (qa #175 round-2 cost D1/D2). A purchase it cannot price is a refusal (exit 1),
 # not a guess.
-PLAN=$("$PLAN_PY" "$HERE/verification_job.py" plan \
-  "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--visuals=$VISUALS" \
-  "--format=$FORMAT" "--content-rating=$CONTENT_RATING" "--source-writeup=$SOURCE_WRITEUP" \
-  "--language=$LANGUAGE" "--motion-clips=$MOTION_CLIPS" "--paid-stills=$PAID_STILLS" "--short=$SHORT" \
-  "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
-  || { echo "Refusing: the request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
+if [[ "$COURSE" == "true" ]]; then
+  PLAN=$("$PLAN_PY" "$HERE/verification_job.py" course-plan \
+    "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--language=$LANGUAGE" \
+    "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
+    || { echo "Refusing: the course request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
+else
+  PLAN=$("$PLAN_PY" "$HERE/verification_job.py" plan \
+    "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--visuals=$VISUALS" \
+    "--format=$FORMAT" "--content-rating=$CONTENT_RATING" "--source-writeup=$SOURCE_WRITEUP" \
+    "--language=$LANGUAGE" "--motion-clips=$MOTION_CLIPS" "--paid-stills=$PAID_STILLS" "--short=$SHORT" \
+    "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
+    || { echo "Refusing: the request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
+fi
 plan_field() {
   printf '%s' "$PLAN" | python3 -c '
 import json, sys
@@ -317,8 +375,22 @@ fi
 # required (short_hint = short_video AND duration_min<=2), else the hint is ignored.
 POST_URL="$API_BASE/v1/podcasts"
 [[ "$SHORT" == "true" ]] && POST_URL="${POST_URL}?short_video=true"
+# What the POST creates, the reply key that names it, and the route its status is read on.
+ID_KEYS=(job_id id)
+STATUS_ROUTE="podcasts"
+if [[ "$COURSE" == "true" ]]; then
+  POST_URL="$API_BASE/v1/courses"
+  NOUN="course"
+  ID_KEYS=(course_id)
+  STATUS_ROUTE="courses"
+fi
 
-echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST" >&2
+if [[ "$COURSE" == "true" ]]; then
+  echo "Creating verification course: $(plan_field course_episodes) episodes x ${DURATION}min, quality_tier=$TIER asked," \
+       "episodes priced at $(plan_field episode_tiers), lang=$LANGUAGE est=$EST" >&2
+else
+  echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST" >&2
+fi
 print_est_detail
 
 if [[ -n "$ON_BEHALF_OF" ]]; then
@@ -353,7 +425,7 @@ fi
 # and nothing else and can be piped straight to jq (round-1 code critic NIT).
 if [[ -z "$ON_BEHALF_OF" ]]; then
   echo "  ⚠️  OWNER: the API key's own identity (test_user_e2e)." >&2
-  echo "      This job will NOT appear on the founder's signed-in home page." >&2
+  echo "      This $NOUN will NOT appear on the founder's signed-in home page." >&2
   echo "      For anything a human must SEE, pass:  --on-behalf-of <user_…>" >&2
 else
   echo "  OWNER: $ON_BEHALF_OF — visible in that account's library." >&2
@@ -399,13 +471,14 @@ POST_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$POST_URL" "${P
   -d "$PAYLOAD" -w $'\n%{http_code}') || {
   _rc=$?
   _how="curl exit $_rc"; (( _rc == 28 )) && _how="timed out, curl exit 28"
-  echo "POST failed at the transport level ($_how). The job MAY have been created and charged:" >&2
+  echo "POST failed at the transport level ($_how). The $NOUN MAY have been created and charged:" >&2
   echo "check the owner's library before re-running, or this buys it twice." >&2
   finish 8
 }
 HTTP_CODE="${POST_OUT##*$'\n'}"
 RESP="${POST_OUT%$'\n'*}"
-JOB_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('job_id') or d.get('id') or '')" 2>/dev/null || true)
+JOB_ID=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((d[k] for k in sys.argv[1:] if d.get(k)), ''))" \
+  "${ID_KEYS[@]}" 2>/dev/null || true)
 if [[ -z "$JOB_ID" ]]; then
   if [[ "$HTTP_CODE" =~ ^4[0-9][0-9]$ ]]; then
     # 4xx is decided before the job is written or any credit is charged: auth and validation before the
@@ -415,19 +488,35 @@ if [[ -z "$JOB_ID" ]]; then
     # not a 4xx: `check_user_quotas` raises InsufficientCreditsError, a bare Exception that create_podcast_job
     # maps to HTTP 500, so it lands in exit 8 below, "a job MAY exist" (#175 round-6 claims 2). The one 4xx
     # that can follow a create, the Idempotency-Key 409, needs a header this script does not send.
+    # The course door's 4xx are of the same kind: auth (401), the creation gate (403) and request validation (422)
+    # all run before create_course_endpoint, which answers every error of its own with a 500 (routes/courses/crud.py).
     POST_STATE="rejected"
-    echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a job; nothing was charged. Response:" >&2
+    echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a $NOUN; nothing was charged. Response:" >&2
     echo "$RESP" >&2
     finish 1
   fi
-  echo "No job id in the api's reply (HTTP ${HTTP_CODE:-none}). The job MAY have been created and charged: a 5xx or a" >&2
+  echo "No $NOUN id in the api's reply (HTTP ${HTTP_CODE:-none}). The $NOUN MAY have been created and charged: a 5xx or a" >&2
   echo "gateway timeout can follow the api's write. Check the owner's library before re-running. Response:" >&2
   echo "$RESP" >&2
   finish 8
 fi
 POST_STATE="created"
-echo "job_id=$JOB_ID  (est $EST)"
-echo "status: $API_BASE/v1/podcasts/$JOB_ID/status"
+echo "${ID_KEYS[0]}=$JOB_ID  (est $EST)"
+echo "status: $API_BASE/v1/$STATUS_ROUTE/$JOB_ID/status"
+# A course is created whether or not its curriculum generation starts: create_course_endpoint kicks it fail-open and
+# says which in the reply's message ("Course created — curriculum generation started." or "... Generate curriculum to
+# proceed.", kitesforu-api routes/courses/crud.py). A draft that never starts runs nothing, so it is exit 5.
+if [[ "$COURSE" == "true" ]]; then
+  _kick=$(printf '%s' "$RESP" | python3 -c '
+import json, sys
+message = str(json.load(sys.stdin).get("message") or "")
+print("started" if "curriculum generation started" in message.lower() else (message or "(no message)"))' 2>/dev/null) \
+    || _kick="(the reply could not be read)"
+  if [[ "$_kick" != "started" ]]; then
+    echo "The course was created, but its curriculum generation did not start, so nothing will run. The api said: $_kick" >&2
+    finish 5
+  fi
+fi
 
 # ---- Read back what the api STORED, for every run the ACK gate priced -------------------------
 # The api clamps a FREE subscription silently. `podcast_services.create_job` drops visual_options
@@ -435,7 +524,9 @@ echo "status: $API_BASE/v1/podcasts/$JOB_ID/status"
 # and the 200 response says nothing. So a T4 could be created, charged and approved for clips it
 # will never render. `GET /status` echoes the stored request (`inputs`, `quality_tier`).
 # 6 = stored less than asked; 7 = could not read it. In both the job WAS created.
-if [[ "$NEEDS_ACK" == "true" ]]; then
+# A course has nothing here to read back: /v1/podcasts/<id>/status does not serve a course, and the estimate above
+# prices every tier its episodes can run at.
+if [[ "$NEEDS_ACK" == "true" && "$COURSE" != "true" ]]; then
   _readback="unread"
   SHORTFALL=""
   for _attempt in 1 2 3; do
