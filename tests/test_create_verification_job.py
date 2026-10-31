@@ -1422,7 +1422,7 @@ _IMAGES = verification_job.ImageQuote(rows=(("img-cheap", 0.039, True), ("img-de
                                       relimage_cap=lambda n, paid: 1 if paid and n else 0, plate_budget=2, regens=1)
 
 
-@pytest.mark.parametrize("tier", ["low", "medium", "high"])
+@pytest.mark.parametrize("tier", ["low", "medium"])
 def test_a_course_is_priced_at_the_costlier_of_the_tiers_its_episodes_can_run_at(tier):
     course = {**json.loads(EXPECTED_COURSE_BODY), "quality_tier": tier}
     tiers = verification_job.course_episode_tiers(tier)
@@ -1436,10 +1436,67 @@ def test_a_course_is_priced_at_the_costlier_of_the_tiers_its_episodes_can_run_at
     assert est.high >= hi + 2 * medium.high - 1e-9, "a course asked below medium is not bounded by medium"
 
 
-def test_an_ultra_course_is_unknown_not_priced_as_medium():
-    course = {**json.loads(EXPECTED_COURSE_BODY), "quality_tier": "ultra"}
+def test_the_costlier_tier_sets_the_ceiling():
+    """At 1 min a medium episode's band is dearer than a low one's, so a low course's ceiling is medium's: a course
+    priced from the asked tier alone would print less than a medium episode can cost."""
+    course = {**json.loads(EXPECTED_COURSE_BODY), "episode_duration_min": 1.0}
+    low = verification_job.estimate(verification_job.course_episode_body(course, "low"), images=_IMAGES)
+    medium = verification_job.estimate(verification_job.course_episode_body(course, "medium"), images=_IMAGES)
+    assert medium.high > low.high, "precondition: at 1 min medium is the dearer episode"
     est = verification_job.course_estimate(course, images=_IMAGES)
-    assert est.low is None and est.high is None and est.text.startswith("unknown"), est.text
+    _, hi, _ = verification_job._SYLLABUS_BAND
+    assert est.high == pytest.approx(hi + 2 * medium.high)
+
+
+@pytest.mark.parametrize("tier", ["rich", "high", "cinematic", "ultra"])
+def test_a_premium_course_tier_is_refused_before_anything_is_sent(harness, workers_src, tier):
+    """POST /v1/courses runs no episode above medium (api #911; before it, every episode ran at medium), so a premium
+    ask is refused rather than priced as something it cannot buy."""
+    r = harness.run("--course", *OWNER, "--tier", tier, env={"STUB_POST_RESPONSE": COURSE_REPLY,
+                                                             "WORKERS_SRC": workers_src})
+    assert r.returncode == 1 and "--course takes --tier low or medium" in r.stderr, (r.returncode, r.stderr)
+    assert harness.calls() == [] and r.stdout == ""
+    with pytest.raises(ValueError):
+        verification_job.course_episode_tiers(tier)
+
+
+def test_a_course_plan_that_cannot_be_priced_says_so_in_one_line(capsys):
+    rc = verification_job.main(["course-plan", "--topic", "t", "--duration", "0.167", "--tier", "low",
+                                "--style", "Explainer", "--language", "en-US"])
+    err = capsys.readouterr().err
+    assert rc == 1 and err.startswith("cannot plan this course:") and len(err.strip().splitlines()) == 1, err
+
+
+#: Run under the workers interpreter: the producer's own grant for a never-asked course episode.
+_STILLS_GRANT_PROBE = r'''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from workers.stages.visuals.policy import policy_for_job, scene_budget_for
+grants = {}
+for sub in ("trial", "free", "enthu", "pro", "payg", "pro_plus", "ultimate", None):
+    for q in ("low", "medium"):
+        doc = {"user_id": "user_synthetic_owner", "quality_tier": q, "allow_premium": False}
+        if sub:
+            doc["subscription_tier"] = sub
+        grants[f"{sub}:{q}"] = scene_budget_for(doc, policy_for_job(doc), opted_in=False, born_short=False).granted
+qa = {"user_id": "test_user_e2e", "subscription_tier": "ultimate", "quality_tier": "medium", "allow_premium": False}
+print(json.dumps({"grants": grants,
+                  "qa_control": scene_budget_for(qa, policy_for_job(qa), opted_in=False, born_short=False).granted}))
+'''
+
+
+def test_the_implied_stills_bound_the_producers_grant(workers_src):
+    """COURSE_EPISODE_IMPLIED_STILLS is not a restated number: the producer's own policy grants a never-asked course
+    episode at most that many paid stills at every --course tier and subscription, and reaches it."""
+    py = _workers_python()
+    if not py:
+        pytest.skip("no kitesforu-workers venv (set KFU_WORKERS_PYTHON): SKIPPED, not passed")
+    probe = subprocess.run([py, "-I", "-c", _STILLS_GRANT_PROBE, workers_src], capture_output=True, text=True,
+                           timeout=180)
+    assert probe.returncode == 0, probe.stderr[-2000:]
+    got = json.loads(probe.stdout.strip().splitlines()[-1])
+    assert got["qa_control"] == 0, "positive control: a QA identity is granted no paid still"
+    assert max(got["grants"].values()) == verification_job.COURSE_EPISODE_IMPLIED_STILLS, got["grants"]
 
 
 def test_each_episode_is_priced_with_the_paid_stills_a_real_owners_episode_may_buy():

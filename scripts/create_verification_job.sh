@@ -19,10 +19,11 @@
 #   ./create_verification_job.sh --course --on-behalf-of user_…  # the smallest COURSE the api accepts (POST
 #     /v1/courses): 2 episodes x --duration. It takes --topic --duration --tier --style --language, the owner
 #     flags and --dry-run, and refuses every other flag, --wait included (read GET /v1/courses/<id>/status).
-#     Each episode is priced and gated at --tier AND at medium (the course door stores the asked tier from
-#     kitesforu-api #911 on, none before it), with the paid stills a real owner's episode may buy, so it needs
-#     the ACK. It refuses any owner but a user_… id: each episode is created on the owner's behalf, and the
-#     creation gate refuses an owner Clerk has no email for (the key's own identity, any test_… id). It prices
+#     It takes --tier low or medium (the course door runs no episode above medium). Each episode is priced and
+#     gated at --tier AND at medium (the course door stores the asked tier from kitesforu-api #911 on, none
+#     before it), with the paid stills a real owner's episode may buy, so it needs the ACK. It refuses any owner
+#     but a user_… id: each episode is created on the owner's behalf, and the creation gate is expected to refuse
+#     an owner Clerk has no email for (the key's own identity, any test_… id). It prices
 #     through the workers tree, as a purchase does.
 #
 # The estimate is computed FROM the body that is sent. A purchase (clips, stills, relimage bases,
@@ -99,7 +100,8 @@ trap 'on_signal HUP 129' HUP
 trap 'on_signal INT 130' INT
 # The kitesforu-workers checkout whose origin/main prices a purchased clip or still: its own
 # selector and catalog, read from a temporary `git archive`, never from the working tree (a lane's
-# feature branch is not what serves). Read only when the job buys clips. Same root as ACK_FILE.
+# feature branch is not what serves). Read when the job buys clips, and for every --course (its episodes may buy
+# paid stills). Same root as ACK_FILE.
 WORKERS_REPO="${KFU_WORKERS_REPO:-/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers}"
 # THE INTERPRETER THAT IMPORTS THE PRODUCER IS THE PRODUCER'S. Pricing imports workers.*, so it needs the
 # workers dependencies; it used to run under whichever python3 was first on PATH, and a bare PATH refused
@@ -233,7 +235,14 @@ if [[ "$COURSE" == "true" ]]; then
   # the code and the current gate config; not observed on a live course.
   if [[ "$ON_BEHALF_OF" != user_* ]]; then
     echo "--course needs --on-behalf-of <user_…>: each episode is created on its owner's behalf, and the creation gate" >&2
-    echo "refuses an owner with no Clerk email (the key's own identity, any test_… id). Nothing was sent." >&2
+    echo "is expected to refuse an owner with no Clerk email, which the key's own identity and test_… ids are (from" >&2
+    echo "the code and the current gate config; not observed on a live course). Nothing was sent." >&2
+    exit 1
+  fi
+  # POST /v1/courses charges nothing, so it runs no episode above medium (kitesforu-api #911; before it, every
+  # episode ran at medium). A premium ask would run at medium either way, and its price would mislead the ACK.
+  if [[ "$TIER" != "low" && "$TIER" != "medium" ]]; then
+    echo "--course takes --tier low or medium, not '$TIER': POST /v1/courses runs no episode above medium. Nothing was sent." >&2
     exit 1
   fi
 fi
@@ -264,10 +273,11 @@ if [[ "$PAID_STILLS_GIVEN" == "true" && "$MOTION_CLIPS" == "0" ]]; then
 fi
 
 # ---- The producer: a temporary tree of kitesforu-workers origin/main, under the workers interpreter ---
-# Read when the job buys clips (and the stills that ride with them), to price them, and before a --wait for a
-# video, to read the producer's by-design no-video reasons. WORKERS_SRC=<tree>/src overrides it, and the
-# tree's ../config/model_catalog.csv is the catalog. A job that buys nothing priced and waits for no video
-# needs no tree, so the T3 default path reads no repo and runs no git.
+# Read when the job buys clips (and the stills that ride with them), to price them; for every --course, whose
+# episodes may buy paid stills; and before a --wait for a video, to read the producer's by-design no-video
+# reasons. WORKERS_SRC=<tree>/src overrides it, and the tree's ../config/model_catalog.csv is the catalog. A
+# podcast that buys nothing priced and waits for no video needs no tree, so the T3 default path reads no repo
+# and runs no git.
 WORKERS_SRC_FOR_PLAN=""
 CATALOG_LABEL=""
 # `ensure_workers_tree "<what it is for>"`: sets WORKERS_SRC_FOR_PLAN (and CATALOG_LABEL) once, or says why it

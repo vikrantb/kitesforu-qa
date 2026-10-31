@@ -555,18 +555,26 @@ COURSE_EPISODES = 2
 #: ``quality_tier``, so every episode ran at medium; from #911 on, ``create_course`` writes the tier the account may buy.
 COURSE_TIER_WHEN_UNSTORED = "medium"
 
-#: The paid stills each episode may buy. An episode carries no visuals key (``CreateCourseRequest`` has no visuals
-#: field), and its owner is a real account, never a QA identity, because ``--course`` refuses any other owner. So the
-#: workers' implied share applies: ``scene_budget._implied_floor(12)`` = 4 stills with ``allow_paid=True``. That
-#: owner's low-tier jobs booked paid stills on 40 of 62, max $0.390 (qa #190 round 1, claims lens census). This is a
-#: ceiling, priced through :class:`ImageQuote` like the podcast mode's stills.
+#: The tiers ``--course`` takes. ``POST /v1/courses`` charges nothing, so it runs no episode above medium (kitesforu-api
+#: #911); before #911 it ran every episode at medium. A premium ask would run at medium either way, so it is refused.
+COURSE_TIERS = ("low", "medium")
+
+#: The paid stills each episode may buy: the bound of the workers' grant for a never-asked episode at
+#: :data:`COURSE_TIERS`. An episode carries no visuals key (``CreateCourseRequest`` has no visuals field), and its owner
+#: is a real account, never a QA identity, because ``--course`` refuses any other owner. So ``scene_budget`` grants the
+#: implied share: at most 3 at low (the cheapest clamp) and 4 at medium, for every subscription. That is pinned by
+#: ``test_the_implied_stills_bound_the_producers_grant``, which runs the producer's own ``policy_for_job`` and
+#: ``scene_budget_for``. This is a ceiling, priced through :class:`ImageQuote` like the podcast mode's stills.
 COURSE_EPISODE_IMPLIED_STILLS = 4
 
 
 def course_episode_tiers(asked: str) -> Tuple[str, ...]:
-    """Every tier an episode of a course that asked for ``asked`` can run at: the asked tier where the api stores it
-    (kitesforu-api #911 on), and medium where it stores none (before it). This script cannot see which api revision
-    serves, so each episode is priced and gated at both."""
+    """Every tier an episode of a course that asked for ``asked`` (one of :data:`COURSE_TIERS`) can run at: the asked
+    tier where the api stores it (kitesforu-api #911 on), and medium where it stores none (before it). This script
+    cannot see which api revision serves, so each episode is priced and gated at both."""
+    if asked not in COURSE_TIERS:
+        raise ValueError(f"--course takes --tier {' or '.join(COURSE_TIERS)}, not {asked!r}: POST /v1/courses runs "
+                         "no episode above medium")
     return (asked,) if asked == COURSE_TIER_WHEN_UNSTORED else (asked, COURSE_TIER_WHEN_UNSTORED)
 
 #: The curriculum call, one per course. Workers ``stages/course/syllabus/worker.py`` sends ``gpt-4o`` (the serving
@@ -603,8 +611,8 @@ def course_episode_body(course: Dict[str, Any], tier: str) -> Dict[str, Any]:
 
 
 def course_estimate(course: Dict[str, Any], *, images: Optional[ImageQuote] = None) -> Estimate:
-    """The curriculum call plus every episode's own :func:`estimate`, at the costlier of the tiers it can run at
-    (:func:`course_episode_tiers`). An unpriced tier makes the whole course unknown."""
+    """The curriculum call plus every episode's own :func:`estimate`, over every tier it can run at
+    (:func:`course_episode_tiers`): the low end from the cheaper tier, the high end from the costlier."""
     n = int(course.get("total_episodes") or 0)
     tiers = course_episode_tiers(str(course.get("quality_tier")))
     episodes = [(t, estimate(course_episode_body(course, t), images=images)) for t in tiers]
@@ -1030,7 +1038,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.cmd == "course-plan":
         try:
             out = _course_plan(args)
-        except ValueError as exc:
+        except (PricingUnavailable, ValueError) as exc:
             print(f"cannot plan this course: {exc}", file=sys.stderr)
             return 1
         print(json.dumps(out))
