@@ -16,7 +16,7 @@ from typing import Optional
 
 QA = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA / "scripts"))
-from verification_job import SKIP_REASONS_FILE as SKIP_REASONS  # noqa: E402  (stdlib-only at import)
+from verification_job import SKIP_REASONS_FILE as SKIP_REASONS  # noqa: E402
 from verification_job import workers_repo as _workers_repo  # noqa: E402
 
 SEAM = "src/workers/stages/visuals/hero_clip_choice.py"

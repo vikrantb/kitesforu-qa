@@ -493,8 +493,13 @@ def _producer_no_video_reasons() -> ProducerNoVideo:
     scripts = os.path.dirname(os.path.abspath(__file__))
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
-    from verification_job import (SKIP_REASONS_FILE, PricingUnavailable, producer_no_video_reasons,
-                                  producer_opted_out_reason, workers_repo)
+    from verification_job import (
+        SKIP_REASONS_FILE,
+        PricingUnavailable,
+        producer_no_video_reasons,
+        producer_opted_out_reason,
+        workers_repo,
+    )
 
     def read(src: str, source: str) -> ProducerNoVideo:
         return ProducerNoVideo(frozenset(producer_no_video_reasons(src)), producer_opted_out_reason(src), source)
