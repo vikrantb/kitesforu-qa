@@ -86,8 +86,8 @@ def _fetch_master(url: str, path: str) -> bool:
     A previous run's file is removed first. The path is fixed per job, and ``curl -f`` leaves an existing file
     in place when the server answers with an error (measured: a 404 exits 56 and the old bytes stay). A failed
     re-fetch then graded the last run's master as this run's artifact. A transfer that dies part-way exits non-zero
-    too (curl 18) and leaves a partial file whose header still states the full duration, so what a failed fetch
-    leaves is removed and never graded."""
+    too (curl 18) and leaves a partial file, and an MP3 master's header still states the full duration, so what a
+    failed fetch leaves is removed and never graded."""
     with contextlib.suppress(FileNotFoundError):
         os.remove(path)
     fetch = subprocess.run(["gsutil", "-q", "cp", url, path] if url.startswith("gs://")

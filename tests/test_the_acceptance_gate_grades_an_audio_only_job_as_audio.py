@@ -364,8 +364,10 @@ def test_a_failed_download_never_grades_the_last_runs_master(gate, tmp_path, mon
 @pytest.mark.skipif(not shutil.which("curl"), reason="curl required for the real fetch")
 def test_a_download_that_dies_part_way_is_never_graded(gate, monkeypatch, tmp_path, producer_reasons,
                                                        producer_opted_out):
-    """A REAL fetch from a local server that promises the whole master and sends 30% of it. curl exits 18, and the
-    partial file's header still states the full duration, so a grade of it measured a third and passed the rest."""
+    """A REAL fetch from a local server that promises the whole master and sends 30% of it. curl exits 18. An MP3
+    master's header still states the full duration then (a 30% cut of a 101 s master reads 101.5 s), so a grade of it
+    measured a third and passed the rest. This WAV fixture's partial reads short, so the pin holds the exit-code rule
+    whatever the header says."""
     body = _master(tmp_path / "whole.wav", seconds=20).read_bytes()
 
     class PartWay(http.server.BaseHTTPRequestHandler):
@@ -400,10 +402,10 @@ def test_a_download_that_dies_part_way_is_never_graded(gate, monkeypatch, tmp_pa
 
 def test_every_child_a_grade_starts_is_given_no_stdin(gate, monkeypatch, tmp_path, producer_reasons,
                                                       producer_opted_out):
-    """A shell loop feeds the gate job ids on stdin, and ffmpeg reads its stdin for keys: one byte per 100 ms of a
-    pass (measured: an astats pass over a 101 s master took the "i" of the next id, which then came back NOT_FOUND).
-    How much a pass reads depends on the machine's speed, so this pins the mechanism: every child that an audio grade
-    and a video grade start is given no stdin."""
+    """A shell loop feeds the gate job ids on stdin, and ffmpeg reads its stdin for keys: one byte per stats period
+    of a pass, 0.5 s by default (measured: an astats pass over a 101 s master took the "i" of the next id, which then
+    came back NOT_FOUND). How much a pass reads depends on how long it runs, so this pins the mechanism: every child
+    that an audio grade and a video grade start is given no stdin."""
     master = _master(tmp_path / "m.wav")
     video = tmp_path / "v.mp4"
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",

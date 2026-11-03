@@ -7,7 +7,8 @@ Per Tenet 7 (cost transparency): every change affecting per-unit cost is documen
 **Files:** `scripts/acceptance_gate.py`, `scripts/verification_job.py` (the producer's reasons and its one workers
 checkout), `src/kitesforu_qa/harness/` (`artifact.py`, `checks/audio.py`), `src/kitesforu_qa/utils/audio.py`,
 `src/kitesforu_qa/visual_readiness.py` (comment), `hero_users/RUBRIC.md`, `tests/producer_tree.py`,
-`tests/test_the_acceptance_gate_grades_an_audio_only_job_as_audio.py`, this entry.
+`tests/test_one_visual_readiness_rule.py`, `tests/test_the_acceptance_gate_grades_an_audio_only_job_as_audio.py`, this
+entry.
 
 COST-NEUTRAL per unit because no provider, model, job or Firestore write is added. Grading a job that asked for no
 visuals adds one public-bucket read of its audio master (1.6 MB on the witness; about $0.0002 of egress at list price,
