@@ -9,9 +9,9 @@ fresh-context vision agent run on the emitted frames + manifest.
 Proven: on the real broken job 85ec6fc9 (topic "systematic discrimination", rendered 1080x1920 with
 16:9-authored clips) this FAILS on exactly the two defects the founder caught in 30s.
 
-A job with no video BY DESIGN (the producer's own reasons) is graded as the AUDIO its listener opens, and says
-``audio_only: true``: it is never failed for a video it never asked for. A job that wanted a video and has none
-is NOT SURFACED.
+A job that asked for no visuals (the producer's opted-out reason) is graded as the AUDIO its listener opens, and says
+``audio_only: true``: it is never failed for a video it never asked for. Every other job with no video is NOT
+SURFACED, a job the producer will never re-render included: it stamps those reasons on jobs that asked for a video too.
 
 Usage:
   python acceptance_gate.py --job-id <id> [--frames-dir DIR]
@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # The package's ONE readiness rule (stdlib only): this tree's `src`, never an installed copy.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -81,15 +81,21 @@ def _fetch_job(job_id: str) -> dict[str, Any]:
 
 
 def _fetch_master(url: str, path: str) -> bool:
-    """Download the surfaced master to ``path``. True only when THIS fetch left a non-empty file there.
+    """Download the surfaced master to ``path``. True only when THIS fetch exited 0 and left a non-empty file there.
 
     A previous run's file is removed first. The path is fixed per job, and ``curl -f`` leaves an existing file
     in place when the server answers with an error (measured: a 404 exits 56 and the old bytes stay). A failed
-    re-fetch then graded the last run's master as this run's artifact."""
+    re-fetch then graded the last run's master as this run's artifact. A transfer that dies part-way exits non-zero
+    too (curl 18) and leaves a partial file whose header still states the full duration, so what a failed fetch
+    leaves is removed and never graded."""
     with contextlib.suppress(FileNotFoundError):
         os.remove(path)
-    subprocess.run(["gsutil", "-q", "cp", url, path] if url.startswith("gs://")
-                   else ["curl", "-fsSL", "-o", path, url], check=False)
+    fetch = subprocess.run(["gsutil", "-q", "cp", url, path] if url.startswith("gs://")
+                           else ["curl", "-fsSL", "-o", path, url], check=False, stdin=subprocess.DEVNULL)
+    if fetch.returncode != 0:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+        return False
     return os.path.exists(path) and os.path.getsize(path) > 0
 
 
@@ -97,7 +103,7 @@ def _probe_dims(path: str) -> tuple[int, int, float]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,duration", "-of", "csv=p=0", path],
-        capture_output=True, text=True).stdout.strip()
+        capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
     parts = out.split(",")
     w = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
     h = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
@@ -109,11 +115,12 @@ def _probe_dims(path: str) -> tuple[int, int, float]:
 
 
 def _extract_frames(mp4: str, out_dir: str) -> list[str]:
-    """OBSERVE: one frame every ~3s across the FULL duration (never one hero frame)."""
+    """OBSERVE: one frame every ~3s across the FULL duration (never one hero frame). ffmpeg reads its stdin for
+    keys, so it is given none: inherited, it ate the job ids a shell loop feeds the gate."""
     os.makedirs(out_dir, exist_ok=True)
     subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", "fps=1/3,scale=540:-1",
                     os.path.join(out_dir, "f_%05d.png")],
-                   capture_output=True)
+                   capture_output=True, stdin=subprocess.DEVNULL)
     return _frames_in_order(out_dir)
 
 
@@ -386,20 +393,18 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     readiness = VisualReadiness.from_visual(vis)
     phase, why = readiness.video_phase(expected=True)
     if phase != PHASE_READY:
-        # A video that is not ready may be one the job never wanted, and only the PRODUCER can say so: its
-        # by-design reasons, once nothing is working on the compartment at this read's clock. Asked only here, so a
-        # ready video never reads the producer. Request fields cannot answer it: `visuals_opt_out` is set on
-        # born-shorts too, and they get a video.
-        reasons, source = _producer_no_video_reasons()
-        phase, why = readiness.video_phase(expected=True, no_video_reasons=reasons,
+        # A video that is not ready may be one the job never wanted, and only the PRODUCER can say so. Its by-design
+        # reasons say no video is coming, once nothing is working on the compartment at this read's clock; of them,
+        # only its opted-out reason says the job never wanted one, because it stamps the others on jobs that asked for
+        # a video too. Asked only here, so a ready video never reads the producer. Request fields cannot answer it:
+        # `visuals_opt_out` is set on born-shorts too, and they get a video.
+        producer = _producer_no_video_reasons()
+        phase, why = readiness.video_phase(expected=True, no_video_reasons=producer.by_design,
                                            now_ms=int(time.time() * 1000))
-        if phase == PHASE_NO_VIDEO:
-            return _grade_audio(job_id, d, topic, f"{why}, by design per {source}", frames_dir, persona)
-        unread = "" if reasons else (f". The producer's by-design no-video reasons could not be read ({source}), "
-                                     "so no skip reason could say the job wanted no video")
+        if phase == PHASE_NO_VIDEO and readiness.video_skip_reason == producer.opted_out:
+            return _grade_audio(job_id, d, topic, f"{why}, by design per {producer.source}", frames_dir, persona)
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
-                "issues": [{"sev": "BLOCKER", "msg": f"NOT SURFACED: the video is {phase} ({why}), not the master "
-                                                     f"the watch page shows{unread}"}]}
+                "issues": [{"sev": "BLOCKER", "msg": _not_surfaced(phase, why, readiness, producer)}]}
     if not url:
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
@@ -453,46 +458,67 @@ def _verdict(issues: list[dict[str, str]]) -> str:
     return "FAIL" if "BLOCKER" in sevs else ("REVIEW" if "MAJOR" in sevs else "PASS_DETERMINISTIC")
 
 
-#: Where kitesforu-workers keeps the by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``).
-_SKIP_REASONS_FILE = "src/workers/stages/visuals/video_skip_reasons.py"
+def _not_surfaced(phase: str, why: str, readiness: VisualReadiness, producer: ProducerNoVideo) -> str:
+    """Why a job with no ready video FAILs, saying only what the gate established."""
+    if not producer.by_design:
+        state = ", ".join(f"{field}={value}" for field, value in (("video_status", readiness.video_status),
+                                                                  ("video_skip_reason", readiness.video_skip_reason))
+                          if value)
+        return (f"NOT SURFACED: the video is {phase} ({state or 'no video yet'}), and the producer's no-video reasons "
+                f"could not be read ({producer.source}), so nothing says the job wanted no video")
+    if phase == PHASE_NO_VIDEO:
+        return (f"NOT SURFACED: no video is coming ({why}), but {readiness.video_skip_reason} does not say the job "
+                "wanted none: the producer stamps it on jobs that asked for a video too, so the audio is not graded "
+                "in the video's place")
+    return f"NOT SURFACED: the video is {phase} ({why}), not the master the watch page shows"
 
 
-def _producer_no_video_reasons() -> tuple[frozenset[str], str]:
-    """The producer's by-design no-video reasons and where they were read, or no reasons and why not.
+class ProducerNoVideo(NamedTuple):
+    """What the producer says about a job with no video: the reasons it never re-renders (``by_design``), the one of
+    them that says the job asked for no visuals (``opted_out``), and where both were read (``source``). Empty when
+    they could not be read, and ``source`` then says why."""
+    by_design: frozenset[str]
+    opted_out: str
+    source: str
 
-    Read by ``verification_job.producer_no_video_reasons``, the wait's own reader, from the wait's own sources
-    (``create_verification_job.sh`` ``ensure_workers_tree``): ``WORKERS_SRC`` (a tree's ``src``) when set, else
-    ``KFU_WORKERS_REPO`` at ``origin/main``, by default the kitesforu-workers checkout beside this one. Never a
-    working tree: a lane's branch is not what serves. With no reasons, no skip reason can say a job wanted no
-    video, so a job without one stays NOT SURFACED: an artifact the gate cannot classify is never graded as audio."""
+
+def _producer_no_video_reasons() -> ProducerNoVideo:
+    """The producer's no-video reasons and where they were read, or none and why not.
+
+    Read by ``verification_job``'s readers of the producer's file, from ``WORKERS_SRC`` (a tree's ``src``) when set,
+    else from ``verification_job.workers_repo()`` at ``origin/main``: the checkout the wait reads, wherever this tree
+    is. Never a working tree: a lane's branch is not what serves. With no reasons, no skip reason can say a job wanted
+    no video, so a job without a ready video stays NOT SURFACED: an artifact the gate cannot classify is never graded
+    as audio."""
     scripts = os.path.dirname(os.path.abspath(__file__))
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
-    from verification_job import PricingUnavailable, producer_no_video_reasons
+    from verification_job import (SKIP_REASONS_FILE, PricingUnavailable, producer_no_video_reasons,
+                                  producer_opted_out_reason, workers_repo)
+
+    def read(src: str, source: str) -> ProducerNoVideo:
+        return ProducerNoVideo(frozenset(producer_no_video_reasons(src)), producer_opted_out_reason(src), source)
 
     explicit = os.environ.get("WORKERS_SRC", "").strip()
-    repo = (os.environ.get("KFU_WORKERS_REPO", "").strip()
-            or str(Path(__file__).resolve().parents[2] / "kitesforu-workers"))
+    repo = workers_repo()
     try:
         if explicit:
-            return frozenset(producer_no_video_reasons(explicit)), f"WORKERS_SRC={explicit}"
+            return read(explicit, f"WORKERS_SRC={explicit}")
         sha = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "origin/main^{commit}"],
-                             capture_output=True, text=True).stdout.strip()
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
         if not sha:
-            return frozenset(), f"no origin/main in {repo}: set KFU_WORKERS_REPO or WORKERS_SRC"
-        archive = subprocess.run(["git", "-C", repo, "archive", sha, "--", _SKIP_REASONS_FILE], capture_output=True)
+            return ProducerNoVideo(frozenset(), "", f"no origin/main in {repo}: set KFU_WORKERS_REPO or WORKERS_SRC")
+        archive = subprocess.run(["git", "-C", repo, "archive", sha, "--", SKIP_REASONS_FILE], capture_output=True,
+                                 stdin=subprocess.DEVNULL)
         if archive.returncode != 0:
-            return frozenset(), f"kitesforu-workers {sha[:12]} has no {_SKIP_REASONS_FILE}"
+            return ProducerNoVideo(frozenset(), "", f"kitesforu-workers {sha[:12]} has no {SKIP_REASONS_FILE}")
         with tempfile.TemporaryDirectory(prefix="ag-producer-") as tree:
             subprocess.run(["tar", "-x", "-C", tree], input=archive.stdout, check=True, capture_output=True)
-            reasons = producer_no_video_reasons(os.path.join(tree, "src"))
-        return frozenset(reasons), f"kitesforu-workers origin/main {sha[:12]}"
+            return read(os.path.join(tree, "src"), f"kitesforu-workers origin/main {sha[:12]}")
     except (PricingUnavailable, OSError, subprocess.SubprocessError) as exc:
-        return frozenset(), f"{type(exc).__name__}: {exc}"
+        return ProducerNoVideo(frozenset(), "", f"{type(exc).__name__}: {exc}")
 
 
-#: Battery severities that FAIL the gate: the ones the harness gates a battery on (``harness/battery.py``).
-_AUDIO_BLOCKING_SEVERITIES = frozenset({"critical", "high"})
 #: Layer 0's duration gate, ``hero_users/RUBRIC.md`` G0.5: measured >= ~60% of requested, and "any one trips ->
 #: FAIL". The battery rates that check medium, advisory to its other readers; this gate is Layer 0.
 _AUDIO_LAYER0_CHECKS = frozenset({"audio.duration_vs_requested"})
@@ -500,15 +526,15 @@ _AUDIO_LAYER0_CHECKS = frozenset({"audio.duration_vs_requested"})
 
 def _grade_audio(job_id: str, d: dict[str, Any], topic: str, no_video: str, frames_dir: str | None,
                  persona: str | None) -> dict[str, Any]:
-    """Grade a job with no video BY DESIGN as the AUDIO its listener opens, never as a missing video.
+    """Grade a job that asked for no visuals as the AUDIO its listener opens, never as a missing video.
 
     The master is ``outputs.audio_url``: what the audio combiner writes, and the first field the api's one reader
     (``signed_url.master_audio_url``) serves to ``/watch``. It is graded by the harness's own audio battery (the
     ``audio-mix`` dimension of ``harness/checks/audio.py``), never a second copy of it: the true duration against
     the ask (``duration_vs_requested``) and against the transcript's words (``not_truncated``), loudness by ebur128
     (``loudness_in_target_range``, ``lra_in_genre_band``, ``no_clipping``) and long silences (``no_long_silence``).
-    A failed critical or high check is a BLOCKER, as the battery gates itself, and so is Layer 0's duration gate;
-    a medium one is MAJOR (REVIEW); a low one is MINOR. The transcript, the words the master was voiced from, goes
+    A failed check at a severity the battery gates on is a BLOCKER, as the battery gates itself, and so is Layer 0's
+    duration gate; a medium one is MAJOR (REVIEW); a low one is MINOR. The transcript, the words the master was voiced from, goes
     to the listening critic, which has no frames to read."""
     url = str((d.get("outputs") or {}).get("audio_url") or "").strip()
     out: dict[str, Any] = {"job_id": job_id, "topic": topic, "audio_only": True, "no_video": no_video,
@@ -542,9 +568,12 @@ def _grade_audio(job_id: str, d: dict[str, Any], topic: str, no_video: str, fram
 
 
 def _audio_issue(check: dict[str, Any]) -> dict[str, str]:
-    """One failed battery check as a gate issue, at the level ``_grade_audio`` states."""
+    """One failed battery check as a gate issue, at the level ``_grade_audio`` states. The severities that block are
+    the battery's own, imported and never copied: a copy fails open when the battery's set changes."""
+    from kitesforu_qa.harness.battery import _GATING
+
     sev = check.get("severity")
-    if sev in _AUDIO_BLOCKING_SEVERITIES or check.get("check_id") in _AUDIO_LAYER0_CHECKS:
+    if sev in _GATING or check.get("check_id") in _AUDIO_LAYER0_CHECKS:
         level = "BLOCKER"
     else:
         level = "MAJOR" if sev == "medium" else "MINOR"
@@ -552,9 +581,9 @@ def _audio_issue(check: dict[str, Any]) -> dict[str, str]:
 
 
 def _transcript(art: Any) -> dict[str, Any]:
-    """The words the master was voiced from, the job's script dialogue: one ``speaker: text`` line per turn."""
-    turns = [(str(t.get("speaker") or t.get("name") or "").strip(), str(t.get("text") or t.get("line") or "").strip())
-             for t in art.dialogue if isinstance(t, dict)]
+    """The words the master was voiced from, the job's script dialogue as ``Artifact.turns`` reads it: one
+    ``speaker: text`` line per turn."""
+    turns = [(who.strip(), said.strip()) for who, said in art.turns]
     turns = [(who, said) for who, said in turns if said]
     return {"lines": len(turns), "words": sum(len(said.split()) for _, said in turns),
             "text": "\n".join(f"{who}: {said}" if who else said for who, said in turns)}

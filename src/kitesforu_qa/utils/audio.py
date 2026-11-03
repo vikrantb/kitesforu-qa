@@ -97,7 +97,7 @@ def get_audio_info(audio_path: str) -> dict:
         '-show_format', '-show_streams', audio_path
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         return {"error": "Failed to get audio info"}
 
