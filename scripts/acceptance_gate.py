@@ -9,25 +9,32 @@ fresh-context vision agent run on the emitted frames + manifest.
 Proven: on the real broken job 85ec6fc9 (topic "systematic discrimination", rendered 1080x1920 with
 16:9-authored clips) this FAILS on exactly the two defects the founder caught in 30s.
 
+A job with no video BY DESIGN (the producer's own reasons) is graded as the AUDIO its listener opens, and says
+``audio_only: true``: it is never failed for a video it never asked for. A job that wanted a video and has none
+is NOT SURFACED.
+
 Usage:
   python acceptance_gate.py --job-id <id> [--frames-dir DIR]
-Exit 0 = deterministic PASS (still run the vision/adversary step); 1 = deterministic FAIL; 2 = the id names no
-single job (NOT_FOUND / AMBIGUOUS_ID), so nothing was graded.
+Exit 0 = deterministic PASS (still run the vision/adversary step, or the listening one for an audio-only job);
+1 = deterministic FAIL; 2 = the id names no single job (NOT_FOUND / AMBIGUOUS_ID), so nothing was graded.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 # The package's ONE readiness rule (stdlib only): this tree's `src`, never an installed copy.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from kitesforu_qa.visual_readiness import (  # noqa: E402
+    PHASE_NO_VIDEO,
     PHASE_READY,
     VisualReadiness,
     is_delivered_hero_clip,
@@ -71,6 +78,19 @@ def _fetch_job(job_id: str) -> dict[str, Any]:
     doc = jobs.document(hits[0]).get().to_dict() or {}
     doc["job_id"] = hits[0]
     return doc
+
+
+def _fetch_master(url: str, path: str) -> bool:
+    """Download the surfaced master to ``path``. True only when THIS fetch left a non-empty file there.
+
+    A previous run's file is removed first. The path is fixed per job, and ``curl -f`` leaves an existing file
+    in place when the server answers with an error (measured: a 404 exits 56 and the old bytes stay). A failed
+    re-fetch then graded the last run's master as this run's artifact."""
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(path)
+    subprocess.run(["gsutil", "-q", "cp", url, path] if url.startswith("gs://")
+                   else ["curl", "-fsSL", "-o", path, url], check=False)
+    return os.path.exists(path) and os.path.getsize(path) > 0
 
 
 def _probe_dims(path: str) -> tuple[int, int, float]:
@@ -363,19 +383,29 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     # shows "rendering", not this file (#175 round-6 design D2: the gate read the URL with no ladder check).
     url = vis.get("video_url") or vis.get("video_burned_url")
     issues: list[dict[str, str]] = []
-    phase, why = VisualReadiness.from_visual(vis).video_phase(expected=True)
+    readiness = VisualReadiness.from_visual(vis)
+    phase, why = readiness.video_phase(expected=True)
     if phase != PHASE_READY:
+        # A video that is not ready may be one the job never wanted, and only the PRODUCER can say so: its
+        # by-design reasons, once nothing is working on the compartment at this read's clock. Asked only here, so a
+        # ready video never reads the producer. Request fields cannot answer it: `visuals_opt_out` is set on
+        # born-shorts too, and they get a video.
+        reasons, source = _producer_no_video_reasons()
+        phase, why = readiness.video_phase(expected=True, no_video_reasons=reasons,
+                                           now_ms=int(time.time() * 1000))
+        if phase == PHASE_NO_VIDEO:
+            return _grade_audio(job_id, d, topic, f"{why}, by design per {source}", frames_dir, persona)
+        unread = "" if reasons else (f". The producer's by-design no-video reasons could not be read ({source}), "
+                                     "so no skip reason could say the job wanted no video")
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": f"NOT SURFACED: the video is {phase} ({why}), not the master "
-                                                     "the watch page shows"}]}
+                                                     f"the watch page shows{unread}"}]}
     if not url:
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
 
     tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4")
-    subprocess.run(["gsutil", "-q", "cp", url, tmp] if url.startswith("gs://")
-                   else ["curl", "-fsSL", "-o", tmp, url], check=False)
-    if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+    if not _fetch_master(url, tmp):
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]}
     vw, vh, dur = _probe_dims(tmp)
@@ -409,13 +439,125 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     frames = _extract_frames(tmp, fdir)
     issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
 
-    verdict = "FAIL" if any(i["sev"] == "BLOCKER" for i in issues) else \
-              ("REVIEW" if issues else "PASS_DETERMINISTIC")
     return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
-            "clip_aspects": clip_aspects, "verdict": verdict, "issues": issues,
+            "clip_aspects": clip_aspects, "verdict": _verdict(issues), "issues": issues,
             "frames_dir": fdir, "num_frames": len(frames),
             "persona": persona or None,
             "next": _adversary_brief(persona)}
+
+
+def _verdict(issues: list[dict[str, str]]) -> str:
+    """FAIL on a BLOCKER, REVIEW on a MAJOR, else PASS_DETERMINISTIC. A MINOR is reported and moves nothing; only
+    the audio grade writes one, so on a video every issue still decides the verdict as it always has."""
+    sevs = {i["sev"] for i in issues}
+    return "FAIL" if "BLOCKER" in sevs else ("REVIEW" if "MAJOR" in sevs else "PASS_DETERMINISTIC")
+
+
+#: Where kitesforu-workers keeps the by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``).
+_SKIP_REASONS_FILE = "src/workers/stages/visuals/video_skip_reasons.py"
+
+
+def _producer_no_video_reasons() -> tuple[frozenset[str], str]:
+    """The producer's by-design no-video reasons and where they were read, or no reasons and why not.
+
+    Read by ``verification_job.producer_no_video_reasons``, the wait's own reader, from the wait's own sources
+    (``create_verification_job.sh`` ``ensure_workers_tree``): ``WORKERS_SRC`` (a tree's ``src``) when set, else
+    ``KFU_WORKERS_REPO`` at ``origin/main``, by default the kitesforu-workers checkout beside this one. Never a
+    working tree: a lane's branch is not what serves. With no reasons, no skip reason can say a job wanted no
+    video, so a job without one stays NOT SURFACED: an artifact the gate cannot classify is never graded as audio."""
+    scripts = os.path.dirname(os.path.abspath(__file__))
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from verification_job import PricingUnavailable, producer_no_video_reasons
+
+    explicit = os.environ.get("WORKERS_SRC", "").strip()
+    repo = (os.environ.get("KFU_WORKERS_REPO", "").strip()
+            or str(Path(__file__).resolve().parents[2] / "kitesforu-workers"))
+    try:
+        if explicit:
+            return frozenset(producer_no_video_reasons(explicit)), f"WORKERS_SRC={explicit}"
+        sha = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "origin/main^{commit}"],
+                             capture_output=True, text=True).stdout.strip()
+        if not sha:
+            return frozenset(), f"no origin/main in {repo}: set KFU_WORKERS_REPO or WORKERS_SRC"
+        archive = subprocess.run(["git", "-C", repo, "archive", sha, "--", _SKIP_REASONS_FILE], capture_output=True)
+        if archive.returncode != 0:
+            return frozenset(), f"kitesforu-workers {sha[:12]} has no {_SKIP_REASONS_FILE}"
+        with tempfile.TemporaryDirectory(prefix="ag-producer-") as tree:
+            subprocess.run(["tar", "-x", "-C", tree], input=archive.stdout, check=True, capture_output=True)
+            reasons = producer_no_video_reasons(os.path.join(tree, "src"))
+        return frozenset(reasons), f"kitesforu-workers origin/main {sha[:12]}"
+    except (PricingUnavailable, OSError, subprocess.SubprocessError) as exc:
+        return frozenset(), f"{type(exc).__name__}: {exc}"
+
+
+#: Battery severities that FAIL the gate: the ones the harness gates a battery on (``harness/battery.py``).
+_AUDIO_BLOCKING_SEVERITIES = frozenset({"critical", "high"})
+#: Layer 0's duration gate, ``hero_users/RUBRIC.md`` G0.5: measured >= ~60% of requested, and "any one trips ->
+#: FAIL". The battery rates that check medium, advisory to its other readers; this gate is Layer 0.
+_AUDIO_LAYER0_CHECKS = frozenset({"audio.duration_vs_requested"})
+
+
+def _grade_audio(job_id: str, d: dict[str, Any], topic: str, no_video: str, frames_dir: str | None,
+                 persona: str | None) -> dict[str, Any]:
+    """Grade a job with no video BY DESIGN as the AUDIO its listener opens, never as a missing video.
+
+    The master is ``outputs.audio_url``: what the audio combiner writes, and the first field the api's one reader
+    (``signed_url.master_audio_url``) serves to ``/watch``. It is graded by the harness's own audio battery (the
+    ``audio-mix`` dimension of ``harness/checks/audio.py``), never a second copy of it: the true duration against
+    the ask (``duration_vs_requested``) and against the transcript's words (``not_truncated``), loudness by ebur128
+    (``loudness_in_target_range``, ``lra_in_genre_band``, ``no_clipping``) and long silences (``no_long_silence``).
+    A failed critical or high check is a BLOCKER, as the battery gates itself, and so is Layer 0's duration gate;
+    a medium one is MAJOR (REVIEW); a low one is MINOR. The transcript, the words the master was voiced from, goes
+    to the listening critic, which has no frames to read."""
+    url = str((d.get("outputs") or {}).get("audio_url") or "").strip()
+    out: dict[str, Any] = {"job_id": job_id, "topic": topic, "audio_only": True, "no_video": no_video,
+                           "audio_url": url, "num_frames": 0, "frames_dir": frames_dir or ""}
+    if not url:
+        return {**out, "verdict": "FAIL", "issues": [{"sev": "BLOCKER", "msg": (
+            "NOT SURFACED: no video by design, and outputs.audio_url is empty: there is no audio master to open")}]}
+    tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.audio")
+    if not _fetch_master(url, tmp):
+        return {**out, "verdict": "FAIL", "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]}
+    from kitesforu_qa.harness import Artifact, run_dimension
+
+    art = Artifact.from_doc(d, audio_path=tmp)
+    duration = art.audio_duration_s
+    if duration <= 0:
+        return {**out, "verdict": "FAIL", "issues": [{"sev": "BLOCKER", "msg": (
+            f"NOT AUDIO: ffprobe read no duration from the fetched artifact ({url})")}]}
+    checks = run_dimension(art, "audio-mix").data["checks"]
+    issues = [_audio_issue(c) for c in checks if not c["skipped"] and not c["passed"]]
+    if all(c["skipped"] for c in checks):
+        issues.append({"sev": "BLOCKER", "msg": "NO AUDIO CHECK RAN: every check in the audio battery skipped"})
+    transcript = _transcript(art)
+    if not transcript["words"]:
+        issues.append({"sev": "MAJOR", "msg": (
+            "NO TRANSCRIPT: the job carries no script dialogue, so nothing says what the master should say")})
+    return {**out, "duration": duration, "verdict": _verdict(issues), "issues": issues,
+            "audio_checks": [{k: c[k] for k in ("check_id", "severity", "passed", "skipped", "evidence")}
+                             for c in checks],
+            "transcript": transcript, "persona": persona or None,
+            "next": _adversary_brief(persona, audio_only=True)}
+
+
+def _audio_issue(check: dict[str, Any]) -> dict[str, str]:
+    """One failed battery check as a gate issue, at the level ``_grade_audio`` states."""
+    sev = check.get("severity")
+    if sev in _AUDIO_BLOCKING_SEVERITIES or check.get("check_id") in _AUDIO_LAYER0_CHECKS:
+        level = "BLOCKER"
+    else:
+        level = "MAJOR" if sev == "medium" else "MINOR"
+    return {"sev": level, "msg": f"{check['check_id']} ({sev}): {check.get('evidence') or check.get('error') or ''}"}
+
+
+def _transcript(art: Any) -> dict[str, Any]:
+    """The words the master was voiced from, the job's script dialogue: one ``speaker: text`` line per turn."""
+    turns = [(str(t.get("speaker") or t.get("name") or "").strip(), str(t.get("text") or t.get("line") or "").strip())
+             for t in art.dialogue if isinstance(t, dict)]
+    turns = [(who, said) for who, said in turns if said]
+    return {"lines": len(turns), "words": sum(len(said.split()) for _, said in turns),
+            "text": "\n".join(f"{who}: {said}" if who else said for who, said in turns)}
 
 
 #: The surface each persona was written for, read from its own YAML rather than re-listed here.
@@ -425,7 +567,7 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
 #: path raises loudly and this path was silent, which is the same defect one axis over. Rather
 #: than restrict the flag (a general `--persona` is genuinely useful for cross-checking), the
 #: brief now STATES the surface so the reviewer can flag the mismatch itself.
-def _surface_note(persona: str | None) -> str:
+def _surface_note(persona: str | None, *, audio_only: bool = False) -> str:
     """One line naming the surface the persona was authored for, or "" when it declares none."""
     if not persona:
         return ""
@@ -441,14 +583,16 @@ def _surface_note(persona: str | None) -> str:
         return ""
     if not surface:
         return ""
+    shown, judged_from = (("an audio master and its transcript; the job has no video by design", "the audio")
+                          if audio_only else ("frames from a rendered video", "these frames"))
     return (
-        f"THE SURFACE YOU WERE WRITTEN FOR: {surface}. You are being shown frames from a rendered "
-        f"video. If that is not your surface, say so FIRST and judge only what you can legitimately "
-        f"judge from these frames — do not stretch your lens to cover an artifact it does not fit.\n\n"
+        f"THE SURFACE YOU WERE WRITTEN FOR: {surface}. You are being shown {shown}. If that is not your "
+        f"surface, say so FIRST and judge only what you can legitimately judge from {judged_from} — do not "
+        f"stretch your lens to cover an artifact it does not fit.\n\n"
     )
 
 
-def _adversary_brief(persona: str | None) -> str:
+def _adversary_brief(persona: str | None, *, audio_only: bool = False) -> str:
     """The instruction the ADVERSARY step is run under.
 
     Default: the generic refute-ship-ready brief this gate has always emitted — byte-identical
@@ -473,25 +617,35 @@ def _adversary_brief(persona: str | None) -> str:
     Reuses `story_judge.load_persona` rather than re-rendering the YAML — one owner for what a
     persona brief looks like. A typo RAISES there with the valid names, deliberately: a silent
     fallback would produce a confident verdict from the wrong reviewer.
+
+    An AUDIO-ONLY job (no video by design) gets the listening brief: it has no frames, and "read every
+    frame" would send its reviewer to an empty directory.
     """
     base = ("Run the ADVERSARY: a fresh vision agent Reads every frame in frames_dir, told to "
             "REFUTE 'ship-ready' vs the spec (on-topic? text cut? coherent?). Verdict is final "
             "only after that + the receipt in .claude/acceptance/.")
+    observe = ("YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in `frames_dir` — "
+               "they are sampled across the FULL duration at fps=1/3, so judge the whole piece and never "
+               "one hero frame. Defects first, verdict last. Refute 'ship-ready' by default; a review "
+               "that agrees to be agreeable is a failed review. Name the exact frame and the exact thing "
+               "that is wrong with it.\n\n")
+    if audio_only:
+        base = ("Run the ADVERSARY: a fresh agent LISTENS to the master at audio_url across its FULL duration, "
+                "with local tools only ($0: ffmpeg, a local whisper with word timestamps; never a paid "
+                "transcription API), beside `transcript`, told to REFUTE 'ship-ready' vs the spec (on-topic? "
+                "audible to the last word? paced? pronounced right?). The job has no video by design: there are "
+                "no frames. Verdict is final only after that + the receipt in .claude/acceptance/.")
+        observe = ("YOU ARE REVIEWING THE DELIVERED AUDIO, not a script and not a video: the job has no video by "
+                   "design. Listen to the WHOLE master at `audio_url`, start to finish, with `transcript` beside "
+                   "it, and never one excerpt. Defects first, verdict last. Refute 'ship-ready' by default; a "
+                   "review that agrees to be agreeable is a failed review. Name the exact timestamp and the exact "
+                   "thing that is wrong there.\n\n")
     if not persona:
         return base
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from story_judge import load_persona
 
-    return (
-        f"{load_persona(persona)}\n\n"
-        f"{_surface_note(persona)}"
-        "YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in `frames_dir` — "
-        "they are sampled across the FULL duration at fps=1/3, so judge the whole piece and never "
-        "one hero frame. Defects first, verdict last. Refute 'ship-ready' by default; a review "
-        "that agrees to be agreeable is a failed review. Name the exact frame and the exact thing "
-        "that is wrong with it.\n\n"
-        f"{base}"
-    )
+    return f"{load_persona(persona)}\n\n{_surface_note(persona, audio_only=audio_only)}{observe}{base}"
 
 
 def main() -> int:

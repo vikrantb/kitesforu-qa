@@ -11,7 +11,7 @@ This module owns the things the script used to do inline, in places that drifted
 ``check-stored``      compares what the api stored with what was requested;
 ``status-fields``     reads one ``/status`` body through the package's ONE readiness rule
                       (:mod:`kitesforu_qa.visual_readiness`) for the wait loop;
-``no-video-reasons``  the producer's by-design no-video reasons, read once before a wait (workers venv);
+``no-video-reasons``  the producer's by-design no-video reasons, read once before a wait (from the producer's file);
 ``settle-window``     how long a clip array must hold still before it is counted (``settled_clips``).
 
 THE ESTIMATE AND THE PAYLOAD COME FROM ONE EXPRESSION (kitesforu-qa #175 rounds 2-3)
@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -714,18 +715,30 @@ def _workers(workers_src: str):
 
 
 def producer_no_video_reasons(workers_src: str) -> List[str]:
-    """The producer's own by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``), the ONLY
+    """The producer's own by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``): the ONLY
     skip reasons that end the wait beside a non-``ready`` ladder (#175 round 6: design D1, latency L6-1, critic
-    F2). Imported, never copied: a copy fails open on drift."""
-    _producer_on_path(workers_src, _SKIP_REASONS_MODULE, label="the no-video reasons")
+    F2), and the ones the acceptance gate grades a job's audio on. Imported, never copied: a copy fails open on drift.
+
+    The producer's FILE is executed on its own, never imported through the ``workers`` package. The module imports
+    nothing (its docstring: it exists so a reader outside the visuals worker can read the names without the worker),
+    while ``workers/__init__.py`` imports the worker base, so the package import needed the workers dependencies: under
+    the qa venv it raised ``No module named 'kitesforu_schemas'``. The acceptance gate runs under whichever python3
+    is on PATH, so it needs a read that does not depend on the interpreter."""
+    if not os.path.isdir(os.path.join(workers_src, "workers")):
+        raise PricingUnavailable(f"no `workers` package under {workers_src}")
+    path = os.path.join(workers_src, *_SKIP_REASONS_MODULE.split(".")) + ".py"
+    if not os.path.isfile(path):
+        raise PricingUnavailable(f"the workers tree at {workers_src} predates the no-video reasons "
+                                 f"({_SKIP_REASONS_MODULE}). {_NEEDS_3280}")
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            from workers.stages.visuals.video_skip_reasons import BY_DESIGN_NO_VIDEO_REASONS
+        spec = importlib.util.spec_from_file_location("_producer_video_skip_reasons", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        raw = module.BY_DESIGN_NO_VIDEO_REASONS
     except Exception as exc:  # noqa: BLE001
-        raise PricingUnavailable(f"the producer's no-video reasons did not import from {workers_src} under "
+        raise PricingUnavailable(f"the producer's no-video reasons did not load from {path} under "
                                  f"{sys.executable}: {type(exc).__name__}: {exc}") from exc
-    reasons = sorted(str(r) for r in BY_DESIGN_NO_VIDEO_REASONS)
+    reasons = sorted(str(r) for r in raw)
     if not reasons:
         raise PricingUnavailable("the producer's BY_DESIGN_NO_VIDEO_REASONS is empty")
     return reasons
@@ -1021,7 +1034,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "the wait on no skip reason")
 
     n = sub.add_parser("no-video-reasons",
-                       help="the producer's BY_DESIGN_NO_VIDEO_REASONS, comma-separated (run under the workers python)")
+                       help="the producer's BY_DESIGN_NO_VIDEO_REASONS, comma-separated (read from the producer's file "
+                            "alone, so any python3)")
     n.add_argument("--workers-src", required=True)
 
     sub.add_parser("settle-window", help="seconds a clip array must hold still before it is counted")
