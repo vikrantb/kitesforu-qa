@@ -693,9 +693,9 @@ def _producer_on_path(workers_src: str, module: str, *, label: str) -> None:
 
     The live visuals worker routes from the CSV (MODEL_CATALOG_SHEET_ID is absent on kitesforu-worker-visuals).
     With it set here the loader would reach Google Sheets, a network call, and could read a different catalog
-    than the one that serves, so it is cleared."""
-    _producer_module_file(workers_src, module, label=label)
+    than the one that serves, so it is cleared, first: before a check can refuse the tree."""
     os.environ.pop("MODEL_CATALOG_SHEET_ID", None)
+    _producer_module_file(workers_src, module, label=label)
     if workers_src not in sys.path:
         sys.path.insert(0, workers_src)
 

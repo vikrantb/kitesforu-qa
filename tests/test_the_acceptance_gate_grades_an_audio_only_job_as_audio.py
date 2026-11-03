@@ -400,33 +400,28 @@ def test_a_download_that_dies_part_way_is_never_graded(gate, monkeypatch, tmp_pa
     assert out["verdict"] == "FAIL" and out["issues"] == [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]
 
 
-def test_the_gate_leaves_its_stdin_unread(tmp_path, producer_reasons, producer_opted_out):
-    """A shell loop feeds the gate job ids on stdin. ffmpeg reads its stdin for keys, so every child the gate starts
-    is given none: an audio grade and a video grade each leave the ids after them unread."""
+def test_every_child_a_grade_starts_is_given_no_stdin(gate, monkeypatch, tmp_path, producer_reasons,
+                                                      producer_opted_out):
+    """A shell loop feeds the gate job ids on stdin, and ffmpeg reads its stdin for keys: one byte per 100 ms of a
+    pass (measured: an astats pass over a 101 s master took the "i" of the next id, which then came back NOT_FOUND).
+    How much a pass reads depends on the machine's speed, so this pins the mechanism: every child that an audio grade
+    and a video grade start is given no stdin."""
     master = _master(tmp_path / "m.wav")
     video = tmp_path / "v.mp4"
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     "color=c=gray:s=540x960:d=6", "-c:v", "mpeg4", str(video)],
                    check=True, capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
     ready = {"topic": "t", "visual": {"status": "done", "video_status": "ready", "video_url": "https://x.invalid/v.mp4"}}
-    script = tmp_path / "grade_then_read_stdin.py"
-    script.write_text(
-        "import importlib.util, json, shutil, sys\n"
-        f"spec = importlib.util.spec_from_file_location('gate_stdin', {str(_GATE)!r})\n"
-        "gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)\n"
-        "doc, source = json.loads(sys.argv[1]), sys.argv[2]\n"
-        "gate._fetch_job = lambda job_id: doc\n"
-        "gate._fetch_master = lambda url, path: bool(shutil.copyfile(source, path))\n"
-        f"gate._producer_no_video_reasons = lambda: gate.ProducerNoVideo(frozenset({sorted(producer_reasons)!r}), "
-        f"{producer_opted_out!r}, 'stub')\n"
-        f"out = gate.run_gate('synthetic-stdin', {str(tmp_path / 'frames')!r})\n"
-        "print(json.dumps({'audio_only': out.get('audio_only', False), 'checks': len(out.get('audio_checks') or []), "
-        "'frames': out.get('num_frames'), 'left': sys.stdin.read()}))\n")
-    for doc, source, audio_only in ((_doc({"video_skip_reason": producer_opted_out}), master, True),
-                                    (ready, video, False)):
-        r = subprocess.run([sys.executable, str(script), json.dumps(doc), str(source)], input="id-2\nid-3\n",
-                           capture_output=True, text=True, timeout=300, env={**os.environ, "TMPDIR": str(tmp_path)})
-        assert r.returncode == 0, r.stderr[-2000:]
-        result = json.loads(r.stdout.strip().splitlines()[-1])
-        assert result["audio_only"] is audio_only and (result["checks"] if audio_only else result["frames"]), result
-        assert result["left"] == "id-2\nid-3\n", f"a child of the gate read its stdin: {result}"
+    started: list[tuple[str, object]] = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        if "input" not in kwargs:  # a child fed its input on stdin has no stdin left to inherit
+            started.append((Path(str(cmd[0])).name, kwargs.get("stdin")))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    for doc, source in ((_doc({"video_skip_reason": producer_opted_out}), master), (ready, video)):
+        _run(gate, monkeypatch, doc, master=source, reasons=producer_reasons, opted_out=producer_opted_out)
+    assert {"ffmpeg", "ffprobe"} <= {name for name, _ in started}, f"the spy saw no ffmpeg/ffprobe child: {started}"
+    assert all(stdin is subprocess.DEVNULL for _, stdin in started), [c for c in started if c[1] is not subprocess.DEVNULL]
