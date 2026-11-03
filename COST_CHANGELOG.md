@@ -2,15 +2,17 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
-## 2026-11-03 — the acceptance gate grades a job with no video by design as its audio (cost-NEUTRAL, $0)
+## 2026-11-03 — the acceptance gate grades a job that asked for no visuals as its audio (cost-NEUTRAL per unit)
 
-**Files:** `scripts/acceptance_gate.py`, `scripts/verification_job.py` (`producer_no_video_reasons`),
-`src/kitesforu_qa/visual_readiness.py` (comment), `hero_users/RUBRIC.md`,
+**Files:** `scripts/acceptance_gate.py`, `scripts/verification_job.py` (the producer's reasons and its one workers
+checkout), `src/kitesforu_qa/harness/` (`artifact.py`, `checks/audio.py`), `src/kitesforu_qa/utils/audio.py`,
+`src/kitesforu_qa/visual_readiness.py` (comment), `hero_users/RUBRIC.md`, `tests/producer_tree.py`,
 `tests/test_the_acceptance_gate_grades_an_audio_only_job_as_audio.py`, this entry.
 
-COST-NEUTRAL because the gate still makes zero metered calls. An audio-only job now downloads its audio master (a
-public-bucket read like the video path's mp4), runs ffprobe/ffmpeg and reads one file by a local `git archive`. No
-provider, model, job or Firestore write is added. **Pricing-page implication:** none.
+COST-NEUTRAL per unit because no provider, model, job or Firestore write is added. Grading a job that asked for no
+visuals adds one public-bucket read of its audio master (1.6 MB on the witness; about $0.0002 of egress at list price,
+an estimate), as the video path reads its mp4, plus ffprobe/ffmpeg and one file by a local `git archive`.
+**Pricing-page implication:** none.
 
 ## 2026-10-28 — the verification job can create the smallest course (`--course`: ~$0.08-4.20 a run at `--tier low`, every run ACK-gated; $0 change on every other run)
 

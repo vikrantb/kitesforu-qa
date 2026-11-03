@@ -12,9 +12,10 @@ for a short, never one hero frame.
 ## LAYER 0 — DETERMINISTIC $0 GATES  (run BEFORE any LLM/vision spend; reuse `acceptance_gate.py`)
 Any one trips → FAIL, name it, stop (no LLM cost on a broken artifact):
 - **G0.1 SURFACED & PLAYABLE** — fetch the exact URL the watch page reads (`visual.video_url`). A bare
-  `gs://` / empty field = FAIL (rendered-but-not-surfaced class). A job with no video BY DESIGN (the producer's
-  `BY_DESIGN_NO_VIDEO_REASONS`) is graded on the audio master the player reads (`outputs.audio_url`) instead,
-  by the harness audio battery, and is never failed for a video it never asked for.
+  `gs://` / empty field = FAIL (rendered-but-not-surfaced class). A job that asked for no visuals (the producer's
+  `VIDEO_SKIP_OPTED_OUT`) is graded on the audio master the player reads (`outputs.audio_url`) instead, by the
+  harness audio battery, and is never failed for a video it never asked for. The producer's other no-video reasons
+  say only that no video is coming (it stamps them on jobs that asked for one too), so those jobs FAIL here.
 - **G0.2 ORIENTATION/ASPECT** — ffprobe true WxH; orientation(each authored clip) == orientation(render
   target). A 16:9 clip crop-filled into 9:16 (edges CUT) = FAIL.
 - **G0.3 NO PERSISTENT LETTERBOX BAND; no high-contrast/text pixels inside the edge safety margin.**
