@@ -11,7 +11,7 @@ This module owns the things the script used to do inline, in places that drifted
 ``check-stored``      compares what the api stored with what was requested;
 ``status-fields``     reads one ``/status`` body through the package's ONE readiness rule
                       (:mod:`kitesforu_qa.visual_readiness`) for the wait loop;
-``no-video-reasons``  the producer's by-design no-video reasons, read once before a wait (workers venv);
+``no-video-reasons``  the producer's by-design no-video reasons, read once before a wait (from the producer's file);
 ``settle-window``     how long a clip array must hold still before it is counted (``settled_clips``).
 
 THE ESTIMATE AND THE PAYLOAD COME FROM ONE EXPRESSION (kitesforu-qa #175 rounds 2-3)
@@ -97,6 +97,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -664,6 +665,27 @@ _SEAM_MODULE = "workers.stages.visuals.hero_clip_choice"
 #: The workers module that names the reasons no video is coming (workers #3280's fix round). A tree without it
 #: predates the move, and the wait then ends on no skip reason at all.
 _SKIP_REASONS_MODULE = "workers.stages.visuals.video_skip_reasons"
+#: That module's file in a kitesforu-workers checkout, for a ``git archive`` of it alone.
+SKIP_REASONS_FILE = "src/" + _SKIP_REASONS_MODULE.replace(".", "/") + ".py"
+#: The kitesforu-workers checkout whose ``origin/main`` is the producer that serves, when ``KFU_WORKERS_REPO`` is
+#: unset. ``create_verification_job.sh`` gives ``WORKERS_REPO`` the same default (a test holds the two together), and
+#: the acceptance gate and the tests read it from here, so no reader looks beside whichever checkout it runs from.
+WORKERS_REPO_DEFAULT = "/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers"
+
+
+def workers_repo() -> str:
+    """The kitesforu-workers checkout the producer is read from: ``KFU_WORKERS_REPO``, else :data:`WORKERS_REPO_DEFAULT`."""
+    return os.environ.get("KFU_WORKERS_REPO", "").strip() or WORKERS_REPO_DEFAULT
+
+
+def _producer_module_file(workers_src: str, module: str, *, label: str) -> str:
+    """The file of the producer's ``module`` under ``workers_src``. Fails closed with the reason."""
+    if not os.path.isdir(os.path.join(workers_src, "workers")):
+        raise PricingUnavailable(f"no `workers` package under {workers_src}")
+    path = os.path.join(workers_src, *module.split(".")) + ".py"
+    if not os.path.isfile(path):
+        raise PricingUnavailable(f"the workers tree at {workers_src} predates {label} ({module}). {_NEEDS_3280}")
+    return path
 
 
 def _producer_on_path(workers_src: str, module: str, *, label: str) -> None:
@@ -671,14 +693,11 @@ def _producer_on_path(workers_src: str, module: str, *, label: str) -> None:
 
     The live visuals worker routes from the CSV (MODEL_CATALOG_SHEET_ID is absent on kitesforu-worker-visuals).
     With it set here the loader would reach Google Sheets, a network call, and could read a different catalog
-    than the one that serves, so it is cleared."""
-    if not os.path.isdir(os.path.join(workers_src, "workers")):
-        raise PricingUnavailable(f"no `workers` package under {workers_src}")
+    than the one that serves, so it is cleared, first: before a check can refuse the tree."""
     os.environ.pop("MODEL_CATALOG_SHEET_ID", None)
+    _producer_module_file(workers_src, module, label=label)
     if workers_src not in sys.path:
         sys.path.insert(0, workers_src)
-    if not os.path.isfile(os.path.join(workers_src, *module.split(".")) + ".py"):
-        raise PricingUnavailable(f"the workers tree at {workers_src} predates {label} ({module}). {_NEEDS_3280}")
 
 
 _NEEDS_3280 = ("kitesforu-qa #175 depends on the kitesforu-workers PR that adds it (branch "
@@ -713,22 +732,45 @@ def _workers(workers_src: str):
                 relimage_usd=image_cost_ledger.price_of(image_cost_ledger.RELIMAGE))
 
 
-def producer_no_video_reasons(workers_src: str) -> List[str]:
-    """The producer's own by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``), the ONLY
-    skip reasons that end the wait beside a non-``ready`` ladder (#175 round 6: design D1, latency L6-1, critic
-    F2). Imported, never copied: a copy fails open on drift."""
-    _producer_on_path(workers_src, _SKIP_REASONS_MODULE, label="the no-video reasons")
+def _producer_skip_reason(workers_src: str, name: str) -> Any:
+    """One name from the producer's ``video_skip_reasons``, read from its FILE alone, never through the ``workers``
+    package. Imported, never copied: a copy fails open on drift.
+
+    The module imports nothing (its docstring: it exists so a reader outside the visuals worker can read the names
+    without the worker), while ``workers/__init__.py`` imports the worker base, so the package import needed the
+    workers dependencies: under the qa venv it raised ``No module named 'kitesforu_schemas'``. The acceptance gate
+    runs under whichever python3 is on PATH, so it needs a read that does not depend on the interpreter."""
+    path = _producer_module_file(workers_src, _SKIP_REASONS_MODULE, label="the no-video reasons")
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            from workers.stages.visuals.video_skip_reasons import BY_DESIGN_NO_VIDEO_REASONS
+        spec = importlib.util.spec_from_file_location("_producer_video_skip_reasons", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return getattr(module, name)
     except Exception as exc:  # noqa: BLE001
-        raise PricingUnavailable(f"the producer's no-video reasons did not import from {workers_src} under "
+        raise PricingUnavailable(f"the producer's {name} did not load from {path} under "
                                  f"{sys.executable}: {type(exc).__name__}: {exc}") from exc
-    reasons = sorted(str(r) for r in BY_DESIGN_NO_VIDEO_REASONS)
+
+
+def producer_no_video_reasons(workers_src: str) -> List[str]:
+    """The producer's own by-design no-video reasons (``video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``): the ONLY
+    skip reasons that end the wait beside a non-``ready`` ladder (#175 round 6: design D1, latency L6-1, critic
+    F2). They say no video is COMING, not that none was wanted: :func:`producer_opted_out_reason` is that one."""
+    reasons = sorted(str(r) for r in _producer_skip_reason(workers_src, "BY_DESIGN_NO_VIDEO_REASONS"))
     if not reasons:
         raise PricingUnavailable("the producer's BY_DESIGN_NO_VIDEO_REASONS is empty")
     return reasons
+
+
+def producer_opted_out_reason(workers_src: str) -> str:
+    """The producer's skip reason for a job that asked for no visuals (``video_skip_reasons.VIDEO_SKIP_OPTED_OUT``):
+    the one no-video reason that says the job never WANTED a video, and the one the acceptance gate grades a job's
+    audio on. The producer stamps its other by-design reasons on jobs that asked for a video too:
+    ``audio_only_no_clips`` on every such job stored before that reason came to mean Car Mode alone, and
+    ``fiction_or_undetermined_no_opt_in`` from its fail-safe when a blueprint cannot be classified."""
+    reason = str(_producer_skip_reason(workers_src, "VIDEO_SKIP_OPTED_OUT") or "")
+    if not reason:
+        raise PricingUnavailable("the producer's VIDEO_SKIP_OPTED_OUT is empty")
+    return reason
 
 
 def _row_provider(w: Dict[str, Any], model_id: str) -> str:
@@ -1021,7 +1063,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "the wait on no skip reason")
 
     n = sub.add_parser("no-video-reasons",
-                       help="the producer's BY_DESIGN_NO_VIDEO_REASONS, comma-separated (run under the workers python)")
+                       help="the producer's BY_DESIGN_NO_VIDEO_REASONS, comma-separated (read from the producer's file "
+                            "alone, so any python3)")
     n.add_argument("--workers-src", required=True)
 
     sub.add_parser("settle-window", help="seconds a clip array must hold still before it is counted")

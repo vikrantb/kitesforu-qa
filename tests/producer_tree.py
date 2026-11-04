@@ -10,21 +10,24 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
 QA = Path(__file__).resolve().parents[1]
-WORKSPACE_DEFAULT = Path("/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers")
+sys.path.insert(0, str(QA / "scripts"))
+from verification_job import SKIP_REASONS_FILE as SKIP_REASONS  # noqa: E402
+from verification_job import workers_repo as _workers_repo  # noqa: E402
+
 SEAM = "src/workers/stages/visuals/hero_clip_choice.py"
-SKIP_REASONS = "src/workers/stages/visuals/video_skip_reasons.py"
 SEAM_BRANCH = "feat/a-purchase-is-quoted-by-the-code-that-selects-it"
 
 
 def workers_repo() -> Optional[Path]:
-    for cand in (os.environ.get("KFU_WORKERS_REPO"), QA.parent / "kitesforu-workers", WORKSPACE_DEFAULT):
-        if cand and (Path(cand) / ".git").exists():
-            return Path(cand)
-    return None
+    """The checkout the wait and the acceptance gate read the producer from (``verification_job.workers_repo``),
+    when it is a git checkout."""
+    repo = Path(_workers_repo())
+    return repo if (repo / ".git").exists() else None
 
 
 def ref_with_seam(repo: Path) -> Optional[str]:

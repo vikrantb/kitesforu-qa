@@ -130,9 +130,10 @@ _STATS_CACHE: dict[str, _AudioStats] = {}
 
 
 def _run_ffmpeg(args: list[str]) -> str:
-    """Run ffmpeg with the given filter args, returning combined stderr (where filters report)."""
+    """Run ffmpeg with the given filter args, returning combined stderr (where filters report). ffmpeg reads its stdin
+    for keys, so it is given none: inherited, it ate the job ids a shell loop feeds the acceptance gate."""
     cmd = ["ffmpeg", "-hide_banner", "-nostats", *args, "-f", "null", "-"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT_S)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT_S, stdin=subprocess.DEVNULL)
     return proc.stderr or ""
 
 

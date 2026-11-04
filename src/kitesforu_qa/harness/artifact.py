@@ -83,23 +83,21 @@ class Artifact:
         return self.script.get("dialogue") or self.doc.get("dialogue") or []
 
     @property
+    def turns(self) -> list[tuple[str, str]]:
+        """Each dialogue turn as ``(speaker, text)``, ``""`` where a turn has none: the one reading of a turn's keys
+        that ``speakers``, ``script_text`` and the acceptance gate's transcript share."""
+        return [(str(d.get("speaker") or d.get("name") or d.get("role") or ""), str(d.get("text") or d.get("line") or ""))
+                for d in self.dialogue if isinstance(d, dict)]
+
+    @property
     def speakers(self) -> list[str]:
         """The speaker/character names from the dialogue (for the generic-host-name check)."""
-        out: list[str] = []
-        for d in self.dialogue:
-            if isinstance(d, dict):
-                sp = d.get("speaker") or d.get("name") or d.get("role")
-                if sp:
-                    out.append(str(sp))
-        return out
+        return [speaker for speaker, _ in self.turns if speaker]
 
     @cached_property
     def script_text(self) -> str:
         """All spoken text joined — the substrate for content/structure checks."""
-        parts: list[str] = []
-        for d in self.dialogue:
-            if isinstance(d, dict):
-                parts.append(str(d.get("text") or d.get("line") or ""))
+        parts = [text for _, text in self.turns]
         if not parts:
             # Segment fallback: real segments_ready store the (truncated) text under text_preview.
             for s in self.segments:
@@ -182,7 +180,7 @@ class Artifact:
             err = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-i", self.audio_path, "-af", "volumedetect",
                  "-f", "null", "-"],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
             ).stderr
             out: dict[str, float] = {}
             for key in ("max_volume", "mean_volume"):

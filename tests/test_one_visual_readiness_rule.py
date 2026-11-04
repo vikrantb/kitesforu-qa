@@ -285,9 +285,9 @@ def test_the_acceptance_gate_grades_only_the_master_the_watch_page_shows(monkeyp
     monkeypatch.setattr(gate, "_fetch_job", lambda job_id: doc)
     out = gate.run_gate(f"t-{uuid.uuid4().hex[:8]}")
     assert out["verdict"] == "FAIL" and "NOT SURFACED: the video is assembling" in out["issues"][0]["msg"], out
-    # CONTROL: on a ready ladder the gate goes on to fetch the master (stubbed: it fetches nothing).
+    # CONTROL: on a ready ladder the gate goes on to fetch the master (stubbed: it exits 0 and fetches nothing).
     doc["visual"]["video_status"] = "ready"
-    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **k: gate.subprocess.CompletedProcess(a[0], 0))
     out = gate.run_gate(f"t-{uuid.uuid4().hex[:8]}")
     assert out["issues"][0]["msg"].startswith("artifact not fetchable"), out
 

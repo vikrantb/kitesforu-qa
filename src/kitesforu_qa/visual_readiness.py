@@ -108,9 +108,9 @@ def is_delivered_hero_clip(clip: Any) -> bool:
 #:
 #: The reasons that mean NO video is coming are NOT listed here. They are the producer's
 #: ``workers.stages.visuals.video_skip_reasons.BY_DESIGN_NO_VIDEO_REASONS``, the four the stranded-assembly
-#: watchdog never re-renders, and a caller passes them to :meth:`VisualReadiness.video_phase`. The wait imports
-#: them through the workers interpreter (``verification_job.py no-video-reasons``). Every other reason
-#: (``assembly_failed``, ``final_audio_missing``) is a failure the producer retries or stamps
+#: watchdog never re-renders, and a caller passes them to :meth:`VisualReadiness.video_phase`. The wait and the
+#: acceptance gate read them with ``verification_job.producer_no_video_reasons``, from the producer's file.
+#: Every other reason (``assembly_failed``, ``final_audio_missing``) is a failure the producer retries or stamps
 #: ``failed_assembly``, so it ends nothing by itself (#175 round 6: design D1, latency L6-1, critic F2).
 VIDEO_PENDING_SKIP_REASONS = frozenset({"final_audio_pending", "clip_timing_pending"})
 
