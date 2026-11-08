@@ -1,4 +1,4 @@
-"""create_verification_job.sh --class, --writeup and --course-video-export, end to end, with NOTHING sent.
+"""create_verification_job.sh --class, --writeup, --course-video-export and --scorm-export, end to end, NOTHING sent.
 
 Every run here is ``--dry-run`` or the sending path with ``curl`` replaced by a stub on PATH, in the harness of
 ``test_create_verification_job.py``: a scratch copy of the script whose one changed line is ``ACK_FILE``, dead
@@ -91,6 +91,7 @@ def headers(call: List[str]) -> List[str]:
 
 OWNER = ("--on-behalf-of", "user_abc123")
 COURSE_ID = "course_test_1"
+CLASS_ID = "cls_done_1"
 
 EXPECTED_CLASS_BODY = (
     '{"topic": "pipeline verification", "subject": "General", "total_lessons": 3, "lesson_duration_min": 0.167, '
@@ -125,6 +126,15 @@ def writeup_stored(status: str = "researching", **fields) -> str:
                        "formats_requested": ["linkedin_post"], "status": status, **fields})
 
 
+SCORM_ACCEPTED = json.dumps({"package_id": "pkg_test_1", "status": "pending"})
+
+
+def scorm_stored(class_id: str = CLASS_ID, direction: str = "export") -> str:
+    """``GET /v1/scorm/packages/<id>``: the ScormPackageResponse shape."""
+    return json.dumps({"package_id": "pkg_test_1", "class_id": class_id, "direction": direction,
+                       "scorm_version": "1.2", "status": "pending", "gcs_zip_url": None})
+
+
 def export_stored(status: str = "pending", export_id: Optional[str] = "course_export_1") -> str:
     return json.dumps({"status": status, "export_id": export_id, "included": [{}, {}], "skipped": [],
                        "stale": False})
@@ -147,6 +157,11 @@ FLOWS: Dict[str, dict] = {
                      "stored": export_stored, "id_line": "export_id=course_export_1",
                      "create": f"{DEAD}/v1/courses/{COURSE_ID}/continuous-video", "trigger": None,
                      "status": f"{DEAD}/v1/courses/{COURSE_ID}/continuous-video"},
+    "scorm-export": {"args": ("--scorm-export", CLASS_ID), "noun": "SCORM package",
+                     "env": {"STUB_POST_RESPONSE": SCORM_ACCEPTED, "STUB_POST_HTTP": "202"},
+                     "stored": scorm_stored, "id_line": "package_id=pkg_test_1",
+                     "create": f"{DEAD}/v1/classes/{CLASS_ID}/export/scorm", "trigger": None,
+                     "status": f"{DEAD}/v1/scorm/packages/pkg_test_1"},
 }
 TRIGGERED = ("class", "writeup")
 
@@ -179,7 +194,8 @@ def run_flow(harness: Harness, flow: str, src: Optional[str], *extra: str, store
 
 @pytest.mark.parametrize("flow_src,flow,body", [("class", "class", EXPECTED_CLASS_BODY),
                                                 ("writeup", "writeup", EXPECTED_WRITEUP_BODY),
-                                                ("video-export", "video-export", "")], indirect=["flow_src"])
+                                                ("video-export", "video-export", ""),
+                                                ("scorm-export", "scorm-export", "{}")], indirect=["flow_src"])
 def test_each_dry_run_prints_its_smallest_request_and_its_doors_and_sends_nothing(harness, flow_src, flow, body):
     r = harness.run(*FLOWS[flow]["args"], "--dry-run", env=env_for(flow, flow_src))
     assert r.returncode == 0, r.stderr
@@ -190,7 +206,8 @@ def test_each_dry_run_prints_its_smallest_request_and_its_doors_and_sends_nothin
         doors = verification_flows.CLASS_DOORS if flow == "class" else verification_flows.WRITEUP_DOORS
         assert f"then POST {DEAD}{doors.trigger.replace('{id}', '<' + doors.id_key + '>')}" in r.stderr
     else:
-        assert "(no body)" in r.stderr and "then POST" not in r.stderr
+        assert "then POST" not in r.stderr
+    assert ("(no body)" in r.stderr) is (body == ""), r.stderr
     assert harness.calls() == [], "a dry run called a network binary"
 
 
@@ -269,10 +286,12 @@ def test_the_doors_and_the_started_phrases_are_the_apis_own():
                 + _origin_main_file(API_REPO, "src/api/routes/writeups/generation.py"))
     export = (_origin_main_file(API_REPO, "src/api/routes/courses/export.py")
               + _origin_main_file(API_REPO, "src/api/services/exports/continuous_video.py"))
+    scorm = _origin_main_file(API_REPO, "src/api/routes/scorm/packages.py")
     for doors, source in ((verification_flows.CLASS_DOORS, classes), (verification_flows.WRITEUP_DOORS, writeups),
-                          (verification_flows.export_doors("{course_id}"), export)):
+                          (verification_flows.export_doors("{course_id}"), export),
+                          (verification_flows.scorm_doors("{class_id}"), scorm)):
         param = "{course_id}" if doors.noun == "video export" else "{" + doors.id_key + "}"
-        route = lambda verb, path: re.search(rf'@router\.{verb}\("{re.escape(path)}"[,)]', source)
+        route = lambda verb, path: re.search(rf'@router\.{verb}\(\s*"{re.escape(path)}"[,)]', source)
         assert route("post", doors.create), doors.create
         assert route("get", doors.read.replace("{id}", param)), doors.read
         if doors.trigger:
@@ -358,7 +377,8 @@ def test_an_unmeasured_flow_prints_no_number_and_says_why(estimate):
 
 @pytest.mark.parametrize("flow_src,flow,reason", [("class", "class", "tier=medium paid_stills=4 est=unknown "),
                                                   ("writeup", "writeup", "tier=medium est=unknown "),
-                                                  ("video-export", "video-export", "est=unknown ")],
+                                                  ("video-export", "video-export", "est=unknown "),
+                                                  ("scorm-export", "scorm-export", "est=unknown ")],
                          indirect=["flow_src"])
 def test_every_flow_needs_the_ack_and_says_why(harness, flow_src, flow, reason):
     r = run_flow(harness, flow, flow_src)
@@ -378,7 +398,7 @@ def test_every_flow_needs_the_ack_and_says_why(harness, flow_src, flow, reason):
     ("class", ("--tier", "low")), ("class", ("--wait",)), ("class", ("--visuals",)), ("class", ("--format", "drama")),
     ("writeup", ("--duration", "1.0")), ("writeup", ("--style", "Interview")), ("writeup", ("--language", "fr-FR")),
     ("writeup", ("--tier", "low")), ("video-export", ("--topic", "t")), ("video-export", ("--duration", "1.0")),
-    ("video-export", ("--wait",)),
+    ("video-export", ("--wait",)), ("scorm-export", ("--topic", "t")), ("scorm-export", ("--style", "Interview")),
 ])
 def test_a_flag_a_flows_request_cannot_carry_is_refused_before_anything_is_sent(harness, flow, flag):
     harness.fresh_ack()
@@ -398,26 +418,29 @@ def test_a_class_without_a_real_owner_is_refused_before_the_ack_and_sends_nothin
 
 
 @pytest.mark.parametrize("modes", [("--class", "--writeup"), ("--course", "--class"),
-                                   ("--writeup", "--course-video-export", COURSE_ID)])
+                                   ("--writeup", "--course-video-export", COURSE_ID),
+                                   ("--course-video-export", COURSE_ID, "--scorm-export", CLASS_ID)])
 def test_two_runs_at_once_are_refused(harness, modes):
     r = harness.run(*modes, "--dry-run", *OWNER)
     assert r.returncode == 1 and "are two different runs: pick one" in r.stderr, (r.returncode, r.stderr)
     assert harness.calls() == []
 
 
-def test_the_export_never_reads_a_flag_as_its_course_id(harness):
+@pytest.mark.parametrize("flag,what", [("--course-video-export", "course"), ("--scorm-export", "class")])
+def test_an_export_never_reads_a_flag_as_its_id(harness, flag, what):
     """``--course-video-export --dry-run`` names no course: the id is refused as missing, and --dry-run stays what it
     is. Read as the id, it would have dropped the dry run and sent the POST it was meant to rehearse."""
-    r = harness.run("--course-video-export", "--dry-run", *OWNER)
-    assert r.returncode == 1 and "takes a course id (letters, digits, _ and -), got ''" in r.stderr, r.stderr
+    r = harness.run(flag, "--dry-run", *OWNER)
+    assert r.returncode == 1 and f"takes a {what} id (letters, digits, _ and -), got ''" in r.stderr, r.stderr
     assert harness.calls() == []
 
 
-@pytest.mark.parametrize("course_id", ["", "--dry-run", "-x", "a/b", "a b", "a?b=1", "../x"])
-def test_a_course_id_that_is_not_one_path_segment_is_refused(course_id):
+@pytest.mark.parametrize("flow", ["video-export", "scorm-export"])
+@pytest.mark.parametrize("target_id", ["", "--dry-run", "-x", "a/b", "a b", "a?b=1", "../x"])
+def test_an_id_that_is_not_one_path_segment_is_refused(flow, target_id):
     with pytest.raises(ValueError):
-        verification_flows.plan("video-export", topic="t", duration="0.167", style="Explainer", language="en-US",
-                                course_id=course_id, workers_src="", catalog_label="")
+        verification_flows.plan(flow, topic="t", duration="0.167", style="Explainer", language="en-US",
+                                target_id=target_id, workers_src="", catalog_label="")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -436,11 +459,15 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
     assert url_of(create) == FLOWS[flow]["create"]
     assert headers(create) == ["Authorization: Bearer dummy-test-key", "X-On-Behalf-Of: user_abc123",
                                "X-On-Behalf-Of-Email: ops team@example.com", "Content-Type: application/json"]
-    if flow == "video-export":
-        assert "-d" not in create and len(sent) == 1, "the export route takes no body and has no trigger"
+    body = {"class": EXPECTED_CLASS_BODY, "writeup": EXPECTED_WRITEUP_BODY, "video-export": None,
+            "scorm-export": "{}"}[flow]
+    if body is None:
+        assert "-d" not in create, "the video export's route declares no body"
     else:
-        body = EXPECTED_CLASS_BODY if flow == "class" else EXPECTED_WRITEUP_BODY
         assert create[create.index("-d") + 1] == body
+    if not FLOWS[flow]["trigger"]:
+        assert len(sent) == 1, "an export has no trigger"
+    else:
         trigger = sent[1]
         assert len(sent) == 2 and url_of(trigger) == FLOWS[flow]["trigger"] and "-d" not in trigger
         assert headers(trigger) == headers(create)[:-1], "the trigger carries the create's headers minus Content-Type"
@@ -464,6 +491,10 @@ def test_an_export_already_ready_queues_nothing_and_says_so(harness):
     ("video-export", "video-export", "404", '{"detail": "Course not found"}', 1, "Course not found"),
     ("class", "class", "500", '{"detail": "boom"}', 8, "The class MAY have been created"),
     ("writeup", "writeup", "200", '{"job_id": "not_a_writeup"}', 8, "No writeup id in the api's reply (HTTP 200)"),
+    ("scorm-export", "scorm-export", "400", '{"detail": "Class status must be COMPLETED or PARTIAL"}', 1,
+     "REJECTED the request (HTTP 400) before creating a SCORM package"),
+    ("scorm-export", "scorm-export", "402", '{"detail": "Insufficient credits."}', 1, "nothing was charged"),
+    ("scorm-export", "scorm-export", "500", '{"detail": "boom"}', 8, "The SCORM package MAY have been created"),
     ("video-export", "video-export", "500", '{"detail": "Failed to request continuous video"}', 8,
      "The video export MAY have been created"),
 ], indirect=["flow_src"])
@@ -515,6 +546,8 @@ def test_a_trigger_transport_failure_says_the_generation_may_have_started(harnes
     ("video-export", "video-export", export_stored(export_id="course_other"),
      'export_id: sent "course_export_1", stored "course_other"'),
     ("video-export", "video-export", export_stored(status="absent", export_id=None), "the course reports none"),
+    ("scorm-export", "scorm-export", scorm_stored(class_id="cls_other"), 'class_id: sent "cls_done_1", stored'),
+    ("scorm-export", "scorm-export", scorm_stored(direction="import"), 'direction: sent "export", stored "import"'),
 ], indirect=["flow_src"])
 def test_a_stored_request_other_than_sent_is_exit_6(harness, flow_src, flow, stored, needle):
     harness.fresh_ack()
@@ -563,9 +596,11 @@ def test_a_signal_while_the_trigger_is_out_is_exit_8_and_names_what_exists(harne
 @pytest.mark.parametrize("flow,snapshot", [
     ("class", None), ("class", {"class_id": "cls_test_1"}), ("class", {"class_id": "cls_other", "settings": {}}),
     ("writeup", {"writeup_id": "wrt_other"}), ("video-export", {"export_id": "course_export_1"}),
+    ("scorm-export", {"package_id": "pkg_other", "class_id": CLASS_ID}),
 ])
 def test_a_read_that_is_not_the_stored_doc_is_unreadable_never_a_pass(flow, snapshot):
-    created = {"class": "cls_test_1", "writeup": "wrt_test_1", "video-export": "course_export_1"}[flow]
+    created = {"class": "cls_test_1", "writeup": "wrt_test_1", "video-export": "course_export_1",
+               "scorm-export": "pkg_test_1"}[flow]
     with pytest.raises(verification_flows.UnreadableSnapshot):
         verification_flows.check_stored(flow, {}, snapshot, created_id=created)
     rc = verification_flows.main(["check-stored", f"--flow={flow}", "--requested=", f"--created-id={created}",
@@ -577,10 +612,11 @@ def test_a_read_that_is_not_the_stored_doc_is_unreadable_never_a_pass(flow, snap
     ("class", EXPECTED_CLASS_BODY, class_stored(), "cls_test_1"),
     ("writeup", EXPECTED_WRITEUP_BODY, writeup_stored(), "wrt_test_1"),
     ("video-export", "", export_stored(), "course_export_1"),
+    ("scorm-export", "{}", scorm_stored(), "pkg_test_1"),
 ])
 def test_what_was_sent_stored_as_sent_reads_back_clean(flow, sent, stored, created):
     assert verification_flows.check_stored(flow, json.loads(sent) if sent else {}, json.loads(stored),
-                                           created_id=created) == []
+                                           created_id=created, target_id=CLASS_ID) == []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -592,6 +628,7 @@ def test_help_documents_the_three_flows(harness):
     assert r.returncode == 0
     for needle in ("--class", "/v1/classes", "curriculum/generate", "autopilot", "--writeup", "/v1/writeups",
                    "linkedin_post", "--course-video-export <course_id>", "continuous-video", "NOT priced", "the ACK",
+                   "--scorm-export <class_id>", "/export/scorm", "completed or partial",
                    "409", "user_…", "reads back what\n#   the api STORED"):
         assert needle in r.stdout, needle
 
@@ -599,8 +636,9 @@ def test_help_documents_the_three_flows(harness):
 def test_the_cost_changelog_records_the_three_flows():
     sections = (QA / "COST_CHANGELOG.md").read_text().split("\n## ")[1:]
     entry = next((s for s in sections if s.startswith("2026-11-07 — the verification job can create the smallest "
-                                                      "class, writeup and course video export")), "")
+                                                      "class, writeup, course video export and SCORM export")), "")
     assert entry, [s[:40] for s in sections[:3]]
-    for needle in ("`--class`", "`--writeup`", "`--course-video-export", "scripts/create_verification_job.sh",
+    for needle in ("`--class`", "`--writeup`", "`--course-video-export", "`--scorm-export",
+                   "scripts/create_verification_job.sh",
                    "scripts/verification_flows.py", "medium", "not priced", "Pricing-page implication"):
         assert needle in entry, needle

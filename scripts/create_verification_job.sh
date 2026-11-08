@@ -40,7 +40,12 @@
 #     lesson masters the course already rendered. Compute only and zero credits, but NOT priced (this script carries
 #     no Cloud Run rate), so it needs the ACK. The api answers 409, nothing queued, unless 2 or more lessons have a
 #     video master. It takes the owner flags and --dry-run.
-#   Each of these three refuses --wait and every flag its request cannot carry, and after the POST reads back what
+#   ./create_verification_job.sh --scorm-export <class_id> --on-behalf-of user_…  # POST
+#     /v1/classes/<class_id>/export/scorm with {} (the request model's defaults), as the class's owner: the class
+#     zipped as a SCORM package by the lms-export worker. Compute only, charged in credits, NOT priced (no Cloud Run
+#     rate here), so it needs the ACK. The api answers 400, nothing charged, unless the class is completed or partial.
+#     It takes the owner flags and --dry-run, and is read back on GET /v1/scorm/packages/<package_id>.
+#   Each of these four refuses --wait and every flag its request cannot carry, and after the POST reads back what
 #   the api STORED (GET <its read route>, printed as its status URL).
 #
 # The estimate is computed FROM the body that is sent. A purchase (clips, stills, relimage bases,
@@ -171,11 +176,12 @@ DRY_RUN="false"     # --dry-run: print the POST URL, headers, body and estimate,
 PAID_STILLS="on"    # --paid-stills on|off: with --motion-clips, buy paid stills too (on) or clips only
                     # (off). How many, and why, is decided beside the body: verification_job.py.
 PAID_STILLS_GIVEN="false"  # set when --paid-stills is passed explicitly (validated below)
-# What the run creates: a podcast; --course, the smallest course (verification_job.py course-plan); --class, --writeup
-# or --course-video-export <course_id>, each the smallest request its door accepts (verification_flows.py plan).
+# What the run creates: a podcast; --course, the smallest course (verification_job.py course-plan); --class, --writeup,
+# --course-video-export <course_id> or --scorm-export <class_id>, each the smallest request its door accepts
+# (verification_flows.py plan).
 MODE="podcast"
 MODE_FLAG=""        # the flag that chose MODE, for the messages that name it
-EXPORT_COURSE_ID=""
+TARGET_ID=""        # the course or class an export acts on""
 GIVEN=()            # every --flag passed, so a mode can refuse the ones its request cannot carry
 set_mode() {        # set_mode <mode> <its flag>
   if [[ "$MODE" != "podcast" && "$MODE" != "$1" ]]; then
@@ -225,8 +231,9 @@ while [[ $# -gt 0 ]]; do
     --writeup)  set_mode writeup --writeup; shift ;;
     # The id is the next word unless that word is a flag: `--course-video-export --dry-run` must never read
     # --dry-run as the id and send the POST the dry run was meant to rehearse. A missing id is refused at the plan.
-    --course-video-export) set_mode video-export --course-video-export
-                if [[ $# -gt 1 && "$2" != -* ]]; then EXPORT_COURSE_ID="$2"; shift 2; else shift; fi ;;
+    --course-video-export|--scorm-export)
+                if [[ "$1" == --scorm-export ]]; then set_mode scorm-export "$1"; else set_mode video-export "$1"; fi
+                if [[ $# -gt 1 && "$2" != -* ]]; then TARGET_ID="$2"; shift 2; else shift; fi ;;
     --wait)     WAIT="true"; shift ;;
     --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
     --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
@@ -244,7 +251,7 @@ while [[ $# -gt 0 ]]; do
 done
 # A class, writeup or export is one of verification_flows.py's flows; a podcast and a course are not.
 FLOW=""
-case "$MODE" in class|writeup|video-export) FLOW="$MODE" ;; esac
+case "$MODE" in class|writeup|video-export|scorm-export) FLOW="$MODE" ;; esac
 
 # ---- Duration: a number of minutes, or nothing below means anything ------------------------
 # A non-numeric value used to reach the clip warning first ("for a 0s episode") and die later at the
@@ -283,10 +290,10 @@ if [[ "$MODE" == "course" ]]; then
   fi
 fi
 
-# ---- --class, --writeup and --course-video-export take only what their request carries -------------------------
+# ---- --class, --writeup and the two exports take only what their request carries -------------------------------
 # Each names the flags it takes, and any other flag passed would do nothing to its request: refused here, before
 # anything is planned or sent. --tier is one: neither the class nor the writeup door has a tier field (each runs at
-# medium), and the export has no body at all.
+# medium), and an export sends no field of its own.
 _takes=""
 case "$MODE" in
   class)        _takes="--class --topic --duration --style --language"
@@ -295,6 +302,8 @@ case "$MODE" in
                 _carries="the topic and the owner" ;;
   video-export) _takes="--course-video-export"
                 _carries="the course id and the owner" ;;
+  scorm-export) _takes="--scorm-export"
+                _carries="the class id and the owner" ;;
 esac
 if [[ -n "$_takes" ]]; then
   _takes="$_takes --on-behalf-of --on-behalf-of-email --dry-run"
@@ -345,10 +354,10 @@ fi
 
 # ---- The producer: a temporary tree of kitesforu-workers origin/main, under the workers interpreter ---
 # Read when the job buys clips (and the stills that ride with them), to price them; for every --course and --class,
-# whose episodes and lessons may buy paid stills; and before a --wait for a video, to read the producer's by-design no-video
-# reasons. WORKERS_SRC=<tree>/src overrides it, and the tree's ../config/model_catalog.csv is the catalog. A
-# podcast that buys nothing priced and waits for no video needs no tree, so the T3 default path reads no repo
-# and runs no git.
+# whose episodes and lessons may buy paid stills; and before a --wait for a video, to read the producer's
+# by-design no-video reasons. WORKERS_SRC=<tree>/src overrides it, and the tree's ../config/model_catalog.csv is the
+# catalog. A podcast that buys nothing priced and waits for no video needs no tree, so the T3 default path reads no
+# repo and runs no git.
 WORKERS_SRC_FOR_PLAN=""
 CATALOG_LABEL=""
 # `ensure_workers_tree "<what it is for>"`: sets WORKERS_SRC_FOR_PLAN (and CATALOG_LABEL) once, or says why it
@@ -401,7 +410,7 @@ if [[ "$MODE" == "course" ]]; then
     || { echo "Refusing: the course request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 elif [[ -n "$FLOW" ]]; then
   PLAN=$("$PLAN_PY" "$HERE/verification_flows.py" plan "--flow=$FLOW" \
-    "--topic=$TOPIC" "--duration=$DURATION" "--style=$STYLE" "--language=$LANGUAGE" "--course-id=$EXPORT_COURSE_ID" \
+    "--topic=$TOPIC" "--duration=$DURATION" "--style=$STYLE" "--language=$LANGUAGE" "--target-id=$TARGET_ID" \
     "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
     || { echo "Refusing: the $MODE_FLAG request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 else
@@ -597,8 +606,9 @@ if [[ -z "$JOB_ID" ]]; then
     # The course door's 4xx are of the same kind: auth (401), the creation gate (403) and request validation (422)
     # all run before create_course_endpoint, which answers every error of its own with a 500 (routes/courses/crud.py).
     # So are the class and writeup doors' (auth, validation and the rate limit before the handler, which answers its
-    # own errors with a 500: routes/classes/crud.py, routes/writeups/crud.py), and the export's 404 and 409, raised
-    # before its dispatch transaction writes anything (services/exports/continuous_video.py).
+    # own errors with a 500: routes/classes/crud.py, routes/writeups/crud.py), the video export's 404 and 409, raised
+    # before its dispatch transaction writes anything (services/exports/continuous_video.py), and the SCORM export's
+    # 400, 402, 403 and 404, all raised before its charge and its package record (routes/scorm/packages.py).
     POST_STATE="rejected"
     echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a $NOUN; nothing was charged. Response:" >&2
     echo "$RESP" >&2
@@ -679,7 +689,7 @@ if [[ -n "$FLOW" ]]; then
   for _attempt in 1 2 3; do
     _snap=$(curl -sS --connect-timeout 10 --max-time 20 "$STATUS_URL" "${HDR_ARGS[@]}" 2>/dev/null) || _snap=""
     if DIFFERS=$(printf '%s' "$_snap" | python3 "$HERE/verification_flows.py" check-stored "--flow=$FLOW" \
-                   "--requested=$PAYLOAD" "--created-id=$JOB_ID" --snapshot - 2>/dev/null); then
+                   "--requested=$PAYLOAD" "--created-id=$JOB_ID" "--target-id=$TARGET_ID" --snapshot - 2>/dev/null); then
       _readback="read"
       break
     fi

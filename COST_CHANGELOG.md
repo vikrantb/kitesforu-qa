@@ -2,7 +2,7 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
-## 2026-11-07 — the verification job can create the smallest class, writeup and course video export (`--class`: 3 lessons at medium ~$0.49-6.20 plus 5 unpriced LLM calls; `--writeup` and `--course-video-export`: unpriced; every run ACK-gated; $0 change on every other run)
+## 2026-11-07 — the verification job can create the smallest class, writeup, course video export and SCORM export (`--class`: 3 lessons at medium ~$0.49-6.20 plus 5 unpriced LLM calls; `--writeup`, `--course-video-export` and `--scorm-export`: unpriced; every run ACK-gated; $0 change on every other run)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_flows.py` (new), `scripts/verification_job.py`,
 `tests/test_verification_flows.py` (new), `tests/test_create_verification_job.py`, this entry.
@@ -16,8 +16,10 @@ own still quote: ~$0.16-2.07 a lesson at the 10 s default, ~$0.49-6.20 for the t
 A `--writeup` run is `POST /v1/writeups` (one format, `linkedin_post`) and `POST /v1/writeups/<id>/generate`: one
 research call and the format's generate passes, at medium, none priced for the same reason. A
 `--course-video-export <course_id>` run is one `POST /v1/courses/<id>/continuous-video`: compute only, zero credits
-and no provider, not priced because this script carries no Cloud Run rate. Each estimate says what it leaves out, and
-every run of the three needs the ACK. The other modes send the bytes they sent before.
+and no provider, not priced because this script carries no Cloud Run rate. A `--scorm-export <class_id>` run is one
+`POST /v1/classes/<id>/export/scorm` for a finished class: compute only and no provider, charged to the owner as a
+flat credit fee, not priced for the same reason. Each estimate says what it leaves out, and every run of the four
+needs the ACK. The other modes send the bytes they sent before.
 
 **Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
 

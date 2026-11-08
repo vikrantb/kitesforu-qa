@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Every flow the verification job creates beside a podcast or a course, from its request to its read-back.
 
-``create_verification_job.sh --class``, ``--writeup`` and ``--course-video-export <course_id>`` each make the smallest
-request their api door accepts. Per flow, this module owns the body, the :class:`Doors` it is POSTed to and read back
-on, the estimate and the ACK decision computed from the serialized body, and the comparison of what the api stored
-with what was sent. The shell owns the arguments, auth, the POSTs and the exit codes, as it does for a podcast and a
-course. Two commands:
+``create_verification_job.sh --class``, ``--writeup``, ``--course-video-export <course_id>`` and
+``--scorm-export <class_id>`` each make the smallest request their api door accepts. Per flow, this module owns the
+body, the :class:`Doors` it is POSTed to and read back on, the estimate and the ACK decision computed from the
+serialized body, and the comparison of what the api stored with what was sent. The shell owns the arguments, auth,
+the POSTs and the exit codes, as it does for a podcast and a course. Two commands:
 
 ``plan``          the body, its doors, its estimate and its ACK decision, as one JSON object;
 ``check-stored``  every way the stored request differs from the one sent, one per line.
 
-THE THREE DOORS (kitesforu-api origin/main, kitesforu-schemas 2.85.0, the version the api locks)
------------------------------------------------------------------------------------------------
+THE FOUR DOORS (kitesforu-api origin/main, kitesforu-schemas 2.85.0, the version the api locks)
+----------------------------------------------------------------------------------------------
 * **A class** is two POSTs. ``POST /v1/classes`` (``CreateClassRequest``) writes a $0 draft and is not behind the
   creation gate; ``POST /v1/classes/{id}/curriculum/generate`` (``services/classes/generation.py``
   ``start_curriculum_generation``) is gated and publishes class-initiate. In ``autopilot``, the default this body
@@ -23,6 +23,10 @@ THE THREE DOORS (kitesforu-api origin/main, kitesforu-schemas 2.85.0, the versio
 * **A course's continuous-video export** is one POST with no body, ``POST /v1/courses/{id}/continuous-video``:
   owner-only, no creation gate, zero credits (``routes/courses/export.py``). It queues the media-concat worker, which
   stitches the lesson masters the course already rendered.
+* **A class's SCORM export** is one POST of ``{}``, ``POST /v1/classes/{id}/export/scorm``: the request model's
+  defaults, in the JSON body the frontend sends. Owner-only, for a completed or partial class, charged in credits
+  (``routes/scorm/packages.py``). It queues the lms-export worker, which zips what the class already holds, and is
+  read back on ``GET /v1/scorm/packages/{package_id}``.
 
 Offline and $0: ``plan`` reads a local workers tree (a class's lessons may buy paid stills) and ``check-stored``
 reads text handed to it. No command here makes a network call.
@@ -38,7 +42,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import verification_job as vj
 
-FLOWS = ("class", "writeup", "video-export")
+FLOWS = ("class", "writeup", "video-export", "scorm-export")
 
 #: The reason a flow whose estimate holds an unpriced term gives the ACK gate: an approval must never price an
 #: unknown as $0, so the price shown says what it leaves out and the run needs the ACK.
@@ -123,8 +127,8 @@ def class_estimate(body: Dict[str, Any], *, images: Optional[vj.ImageQuote]) -> 
         f"lessons: the class door stores no tier, so each lesson job names none and the api runs it at {LESSON_TIER}",
         "not priced: no class is stored, so its LLM calls have no measurement (read-only Firestore, "
         "2026-11-07: no `classes` collection, against 237 `courses` read the same way). Each call is capped at "
-        f"{CLASS_CALL_MAX_TOKENS} output tokens. Not added either: the cover's concept call (covercore, one small-model "
-        "call capped at 200 output tokens)",
+        f"{CLASS_CALL_MAX_TOKENS} output tokens. Not added either: the cover's concept call (covercore, one "
+        "small-model call capped at 200 output tokens)",
     ] + list(lesson.detail)
     return vj.Estimate(text=text, low=None, high=None, detail=detail)
 
@@ -172,11 +176,12 @@ def writeup_estimate(body: Dict[str, Any]) -> vj.Estimate:
 
 
 # ---------------------------------------------------------------------------------------------
-# A course's continuous-video export: compute over masters the course already rendered
+# The two exports: compute over what a course or class already holds
 # ---------------------------------------------------------------------------------------------
 
-#: A course id is one path segment that is not a flag. Anything else would change the route the POST reaches.
-COURSE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+#: The course or class an export acts on is one path segment that is not a flag. Anything else would change the route
+#: the POST reaches.
+TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 def export_doors(course_id: str) -> Doors:
@@ -197,11 +202,29 @@ def export_estimate() -> vj.Estimate:
     return vj.Estimate(text=text, low=None, high=None, detail=detail)
 
 
+def scorm_doors(class_id: str) -> Doors:
+    return Doors(noun="SCORM package", create=f"/v1/classes/{class_id}/export/scorm", id_key="package_id",
+                 read="/v1/scorm/packages/{id}")
+
+
+def scorm_estimate() -> vj.Estimate:
+    text = ("unknown = compute only, NOT PRICED: the lms-export worker zips what the class already holds into a SCORM "
+            "package; it calls no paid provider (kitesforu-lms needs only GCP clients and lxml)")
+    detail = [
+        "not priced: this script carries no Cloud Run rate, and no package is stored to measure (read-only Firestore, "
+        "2026-11-07: no `scorm_packages` collection). The api charges the owner a flat credit fee for it, refunded "
+        "when the worker fails",
+        "the api refuses it (400, nothing charged) unless the class is completed or partial: run it on a --class that "
+        "has finished",
+    ]
+    return vj.Estimate(text=text, low=None, high=None, detail=detail)
+
+
 # ---------------------------------------------------------------------------------------------
 # The plan: body, doors, estimate and ACK decision, from the bytes sent
 # ---------------------------------------------------------------------------------------------
 
-def plan(flow: str, *, topic: str, duration: str, style: str, language: str, course_id: str,
+def plan(flow: str, *, topic: str, duration: str, style: str, language: str, target_id: str,
          workers_src: str, catalog_label: str) -> Dict[str, Any]:
     """The flow's plan in the shape ``verification_job.py plan`` emits, plus its doors. As there, the estimate and
     the ACK decision read the serialized payload, the same string curl sends, never the dict it came from."""
@@ -220,14 +243,20 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, cou
         needs_ack, reason = True, f"tier={WRITEUP_TIER} {UNPRICED_REASON} "
         doors = WRITEUP_DOORS
         summary = f"{len(sent['formats_requested'])} format ({', '.join(sent['formats_requested'])}) at {WRITEUP_TIER}"
-    elif flow == "video-export":
-        if not COURSE_ID.match(course_id or ""):
-            raise ValueError(f"--course-video-export takes a course id (letters, digits, _ and -), got {course_id!r}")
-        payload = ""   # the export route takes no body
-        est = export_estimate()
+    elif flow in ("video-export", "scorm-export"):
+        what = "course" if flow == "video-export" else "class"
+        if not TARGET_ID.match(target_id or ""):
+            raise ValueError(f"--{'course-video-export' if what == 'course' else 'scorm-export'} takes a {what} id "
+                             f"(letters, digits, _ and -), got {target_id!r}")
         needs_ack, reason = True, f"{UNPRICED_REASON} "
-        doors = export_doors(course_id)
-        summary = f"one video stitched from course {course_id}'s lesson masters"
+        if flow == "video-export":
+            payload = ""   # the route declares no body
+            est, doors = export_estimate(), export_doors(target_id)
+            summary = f"one video stitched from course {target_id}'s lesson masters"
+        else:
+            payload = "{}"   # ExportScormRequest's defaults
+            est, doors = scorm_estimate(), scorm_doors(target_id)
+            summary = f"class {target_id} as a SCORM package"
     else:
         raise ValueError(f"no flow {flow!r}: one of {', '.join(FLOWS)}")
     detail = list(est.detail)
@@ -256,10 +285,11 @@ def _differs(label: str, want: Any, got: Any) -> List[str]:
     return [] if want == got else [f"{label}: sent {json.dumps(want)}, stored {json.dumps(got)}"]
 
 
-def check_stored(flow: str, sent: Dict[str, Any], snapshot: Any, *, created_id: str) -> List[str]:
+def check_stored(flow: str, sent: Dict[str, Any], snapshot: Any, *, created_id: str,
+                 target_id: str = "") -> List[str]:
     """Every way the stored request differs from the one sent. ``[]`` means it stored what was sent. The trigger's
     reply said generation started, so a class or writeup still stored as a draft is a difference too, and so is an
-    export whose stored id is not the one the POST answered with."""
+    export whose stored id is not the one the POST answered with, or a package of another class."""
     if not isinstance(snapshot, dict):
         raise UnreadableSnapshot("the read is not a JSON object")
     out: List[str] = []
@@ -285,6 +315,11 @@ def check_stored(flow: str, sent: Dict[str, Any], snapshot: Any, *, created_id: 
         out += _differs("export_id", created_id, snapshot.get("export_id"))
         if snapshot.get("status") == "absent":
             out.append("status: the POST queued an export, and the course reports none")
+    elif flow == "scorm-export":
+        if snapshot.get("package_id") != created_id:
+            raise UnreadableSnapshot("the read is not this package")
+        out += _differs("class_id", target_id, snapshot.get("class_id"))
+        out += _differs("direction", "export", snapshot.get("direction"))
     else:
         raise ValueError(f"no flow {flow!r}: one of {', '.join(FLOWS)}")
     return out
@@ -301,19 +336,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--flow", required=True, choices=FLOWS)
     for name in ("--topic", "--duration", "--style", "--language"):
         p.add_argument(name, required=True)
-    p.add_argument("--course-id", default="")
+    p.add_argument("--target-id", default="", help="the course or class an export acts on")
     p.add_argument("--workers-src", default="")
     p.add_argument("--catalog-label", default="")
     c = sub.add_parser("check-stored", help="every way the stored request differs from the one sent, one per line")
     c.add_argument("--flow", required=True, choices=FLOWS)
-    c.add_argument("--requested", required=True, help="the exact body POSTed first ('' for an export)")
+    c.add_argument("--requested", required=True, help="the exact body POSTed first ('' when none was)")
     c.add_argument("--created-id", required=True, help="the id the create's reply named")
+    c.add_argument("--target-id", default="", help="the course or class an export acts on")
     c.add_argument("--snapshot", required=True, help="the read-back GET's JSON, or - for stdin")
     args = ap.parse_args(argv)
     if args.cmd == "plan":
         try:
             out = plan(args.flow, topic=args.topic, duration=args.duration, style=args.style,
-                       language=args.language, course_id=args.course_id, workers_src=args.workers_src,
+                       language=args.language, target_id=args.target_id, workers_src=args.workers_src,
                        catalog_label=args.catalog_label)
         except (vj.PricingUnavailable, ValueError) as exc:
             print(f"cannot plan this {args.flow}: {exc}", file=sys.stderr)
@@ -322,7 +358,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     try:
         lines = check_stored(args.flow, json.loads(args.requested) if args.requested else {},
-                             vj._read_snapshot(args.snapshot), created_id=args.created_id)
+                             vj._read_snapshot(args.snapshot), created_id=args.created_id,
+                             target_id=args.target_id)
     except UnreadableSnapshot as exc:
         print(f"the read-back is unreadable: {exc}", file=sys.stderr)
         return 2
