@@ -2,6 +2,25 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-11-07 — the verification job can create the smallest class, writeup and course video export (`--class`: 3 lessons at medium ~$0.49-6.20 plus 5 unpriced LLM calls; `--writeup` and `--course-video-export`: unpriced; every run ACK-gated; $0 change on every other run)
+
+**Files:** `scripts/create_verification_job.sh`, `scripts/verification_flows.py` (new), `scripts/verification_job.py`,
+`tests/test_verification_flows.py` (new), `tests/test_create_verification_job.py`, this entry.
+
+**What each run buys.** A `--class` run is `POST /v1/classes` (3 lessons x `--duration`, 3 questions each, autopilot)
+and its one trigger, `POST /v1/classes/<id>/curriculum/generate`: one syllabus LLM call, then 3 lesson podcast jobs
+and 4 quiz LLM calls. The class door stores no tier, so each lesson runs at medium; a lesson sends no visuals key and
+its owner is a real account, so it is priced as a course episode is, with up to 4 paid stills through the producer's
+own still quote: ~$0.16-2.07 a lesson at the 10 s default, ~$0.49-6.20 for the three (workers origin/main
+`ae972a27`). The syllabus and quiz calls are not priced: no class is stored, so they have no measurement.
+A `--writeup` run is `POST /v1/writeups` (one format, `linkedin_post`) and `POST /v1/writeups/<id>/generate`: one
+research call and the format's generate passes, at medium, none priced for the same reason. A
+`--course-video-export <course_id>` run is one `POST /v1/courses/<id>/continuous-video`: compute only, zero credits
+and no provider, not priced because this script carries no Cloud Run rate. Each estimate says what it leaves out, and
+every run of the three needs the ACK. The other modes send the bytes they sent before.
+
+**Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
+
 ## 2026-11-03 — the acceptance gate grades a job that asked for no visuals as its audio (cost-NEUTRAL per unit)
 
 **Files:** `scripts/acceptance_gate.py`, `scripts/verification_job.py` (the producer's reasons and its one workers

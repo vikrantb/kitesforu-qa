@@ -65,7 +65,8 @@ class Harness:
         self.ack = root / "FOUNDER_SPEND_ACK"
         self.copy = root / "scripts"
         self.copy.mkdir()
-        shutil.copy2(SCRIPTS / "verification_job.py", self.copy / "verification_job.py")
+        for name in ("verification_job.py", "verification_flows.py"):
+            shutil.copy2(SCRIPTS / name, self.copy / name)
         (root / "src" / "kitesforu_qa").mkdir(parents=True)
         # The package files the script and verification_job.py read: the terminal list and the ONE
         # readiness rule (stdlib only).
