@@ -53,6 +53,8 @@ UNPRICED_REASON = "est=unknown"
 #: door takes 1 character, the writeup door 3 unstripped. A topic the worker refuses is a class or writeup whose
 #: trigger says it started and that never runs, so the plan refuses it before anything is sent.
 TOPIC_MIN_CHARS = 3
+#: The course-workers stage each flow's trigger reaches first, the one that refuses a shorter topic.
+_FIRST_STAGE = {"class": "class initiator", "writeup": "writeup research stage"}
 
 #: gpt-4o's $ per 1M input and output tokens: kitesforu-course-workers ``common/pricing.py``. gpt-4o has no
 #: ``model_catalog.csv`` row, so the course-workers fallback maps hold its rate.
@@ -66,10 +68,10 @@ COVER_DETAIL = ("not priced: the cover (kitesforu-covercore): 1 concept call (at
                 "does not cap), all gpt-4.1-mini")
 
 
-def refuse_a_topic_the_workers_refuse(topic: str) -> None:
+def refuse_a_topic_the_worker_refuses(flow: str, topic: str) -> None:
     if len(topic.strip()) < TOPIC_MIN_CHARS:
         raise ValueError(f"--topic must hold at least {TOPIC_MIN_CHARS} characters besides spaces, got {topic!r}: "
-                         "the api would accept it, and the worker would refuse it while the trigger says it started")
+                         f"course-workers' {_FIRST_STAGE[flow]} refuses a shorter one, and the {flow} never runs")
 
 
 @dataclass(frozen=True)
@@ -308,8 +310,8 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
          workers_src: str, catalog_label: str) -> Dict[str, Any]:
     """The flow's plan in the shape ``verification_job.py plan`` emits, plus its doors. As there, the estimate and
     the ACK decision read the serialized payload, the same string curl sends, never the dict it came from."""
-    if flow in ("class", "writeup"):
-        refuse_a_topic_the_workers_refuse(topic)
+    if flow in _FIRST_STAGE:
+        refuse_a_topic_the_worker_refuses(flow, topic)
     if flow == "class":
         payload = json.dumps(build_class_body(topic=topic, duration=duration, style=style, language=language))
         sent = json.loads(payload)

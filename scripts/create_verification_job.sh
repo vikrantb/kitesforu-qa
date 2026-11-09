@@ -35,7 +35,8 @@
 #   ./create_verification_job.sh --writeup                    # the smallest WRITEUP (POST /v1/writeups, one format,
 #     linkedin_post), then POST /v1/writeups/<id>/generate. It takes --topic, the owner flags and --dry-run. It runs
 #     at medium, its research and generate calls are priced from the booked writeups, and the cover's calls are NOT,
-#     so it needs the ACK. --class and --writeup refuse a --topic under 3 characters, which their worker refuses.
+#     so it needs the ACK. --class and --writeup refuse a --topic under 3 characters (spaces aside), which their
+#     first worker refuses.
 #   ./create_verification_job.sh --course-video-export <course_id> --on-behalf-of user_…  # POST
 #     /v1/courses/<course_id>/continuous-video with no body, as the course's owner: one video stitched from the
 #     lesson masters the course already rendered. Compute only and zero credits, but NOT priced (this script carries
