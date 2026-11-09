@@ -10,7 +10,7 @@ the POSTs and the exit codes, as it does for a podcast and a course. Two command
 ``plan``          the body, its doors, its estimate and its ACK decision, as one JSON object;
 ``check-stored``  every way the stored request differs from the one sent, one per line.
 
-THE FOUR DOORS (kitesforu-api origin/main, kitesforu-schemas 2.85.0, the version the api locks)
+THE FOUR DOORS (kitesforu-api origin/main, kitesforu-schemas 2.86.0, the version the api locks)
 ----------------------------------------------------------------------------------------------
 * **A class** is two POSTs. ``POST /v1/classes`` (``CreateClassRequest``) writes a $0 draft and is not behind the
   creation gate; ``POST /v1/classes/{id}/curriculum/generate`` (``services/classes/generation.py``
@@ -48,6 +48,29 @@ FLOWS = ("class", "writeup", "video-export", "scorm-export")
 #: unknown as $0, so the price shown says what it leaves out and the run needs the ACK.
 UNPRICED_REASON = "est=unknown"
 
+#: The shortest topic the workers run. course-workers' class initiator refuses a topic under 3 characters, and its
+#: writeup research stage one under 3 once stripped (``validate_input`` in each), after the api accepted it: the class
+#: door takes 1 character, the writeup door 3 unstripped. A topic the worker refuses is a class or writeup whose
+#: trigger says it started and that never runs, so the plan refuses it before anything is sent.
+TOPIC_MIN_CHARS = 3
+
+#: gpt-4o's $ per 1M input and output tokens: kitesforu-course-workers ``common/pricing.py``. gpt-4o has no
+#: ``model_catalog.csv`` row, so the course-workers fallback maps hold its rate.
+GPT_4O_USD_PER_MILLION = (2.50, 10.00)
+
+#: The calls a class or writeup makes for its cover, which no estimate here prices. course-workers' class initiator and
+#: writeup research stage each acquire one through kitesforu-covercore, and the code caps no candidate image's size.
+COVER_CALLS = "the cover's 1 concept call and up to 4 vision checks (gpt-4.1-mini)"
+COVER_DETAIL = ("not priced: the cover (kitesforu-covercore): 1 concept call (at most 200 output tokens) and up to 4 "
+                "vision relevance checks (at most 20 output tokens each, plus a candidate image whose size the code "
+                "does not cap), all gpt-4.1-mini")
+
+
+def refuse_a_topic_the_workers_refuse(topic: str) -> None:
+    if len(topic.strip()) < TOPIC_MIN_CHARS:
+        raise ValueError(f"--topic must hold at least {TOPIC_MIN_CHARS} characters besides spaces, got {topic!r}: "
+                         "the api would accept it, and the worker would refuse it while the trigger says it started")
+
 
 @dataclass(frozen=True)
 class Doors:
@@ -70,6 +93,12 @@ CLASS_LESSONS = 3
 CLASS_QUESTIONS_PER_LESSON = 3
 #: ``subject`` is required (``min_length=1``) and reaches the curriculum prompt. Synthetic, like the default topic.
 CLASS_SUBJECT = "General"
+#: A K-12 class must name its grade. ``CreateClassRequest`` defaults ``grade_level`` to "" and ``audience_type`` to
+#: k12, and the api stores that class and starts it, but course-workers' class initiator refuses it ("grade_level is
+#: required for K-12 classes", ``validate_input``), so the class would sit in syllabus_generation with nothing running.
+#: Grade 5 is one of the grades the K-12 form offers (kitesforu-frontend ``hooks/useClassForm.ts`` GRADE_LEVELS).
+CLASS_AUDIENCE = "k12"
+CLASS_GRADE_LEVEL = "Grade 5"
 
 CLASS_DOORS = Doors(noun="class", create="/v1/classes", id_key="class_id", read="/v1/classes/{id}",
                     trigger="/v1/classes/{id}/curriculum/generate", started="curriculum generation started")
@@ -85,18 +114,50 @@ LESSON_TIER = vj.COURSE_TIER_WHEN_UNSTORED
 CLASS_CALL_MAX_TOKENS = 4000
 
 
+@dataclass(frozen=True)
+class MeasuredCall:
+    """One kind of class LLM call in the private backup of the classes deleted on 2026-11-08 (read-only, aggregates
+    only): how many record their token counts, every one gpt-4o, and $ per call at :data:`GPT_4O_USD_PER_MILLION`."""
+    n: int
+    median_usd: float
+    max_usd: float
+    max_input_tokens: int
+
+
+#: 14 of the backup's 50 classes record their syllabus call, and all 131 quiz docs their quiz call.
+SYLLABUS_CALL = MeasuredCall(n=14, median_usd=0.00937, max_usd=0.01698, max_input_tokens=939)
+QUIZ_CALL = MeasuredCall(n=131, median_usd=0.01260, max_usd=0.02497, max_input_tokens=1552)
+
+
+def capped_call_usd(input_tokens: int) -> float:
+    """One gpt-4o call with its output at :data:`CLASS_CALL_MAX_TOKENS`. The code caps no input, so the caller names
+    it."""
+    rate_in, rate_out = GPT_4O_USD_PER_MILLION
+    return (input_tokens * rate_in + CLASS_CALL_MAX_TOKENS * rate_out) / 1_000_000
+
+
+def class_llm_usd(quizzes: int) -> Tuple[float, float, float]:
+    """The syllabus call and ``quizzes`` quiz calls, as ``(at the medians, at the maxima, capped)``: the measured
+    calls, and every output at the code's cap with the input at the measured maximum."""
+    return (SYLLABUS_CALL.median_usd + quizzes * QUIZ_CALL.median_usd,
+            SYLLABUS_CALL.max_usd + quizzes * QUIZ_CALL.max_usd,
+            capped_call_usd(SYLLABUS_CALL.max_input_tokens) + quizzes * capped_call_usd(QUIZ_CALL.max_input_tokens))
+
+
 def build_class_body(*, topic: str, duration: str, style: str, language: str) -> Dict[str, Any]:
     """The ``POST /v1/classes`` body. Every key is a declared ``CreateClassRequest`` field: the model drops an
     undeclared key without an error."""
     return {
         "topic": topic,
         "subject": CLASS_SUBJECT,
+        "grade_level": CLASS_GRADE_LEVEL,
         "total_lessons": CLASS_LESSONS,
         "lesson_duration_min": float(duration),
         "questions_per_lesson": CLASS_QUESTIONS_PER_LESSON,
         "style": style,
         "language": language,
         "generation_mode": "autopilot",
+        "audience_type": CLASS_AUDIENCE,
     }
 
 
@@ -113,22 +174,27 @@ def class_lesson_body(body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def class_estimate(body: Dict[str, Any], *, images: Optional[vj.ImageQuote]) -> vj.Estimate:
-    """The lessons are priced as the episodes the orchestrator creates; the syllabus and quiz calls are NOT, and say
-    so: no class is stored to measure them."""
+    """The lessons are priced as the episodes the orchestrator creates, and the syllabus and quiz calls from their
+    measurements and the code's caps. The cover's calls are NOT priced, and say so."""
     n = int(body["total_lessons"])
     lesson = vj.estimate(class_lesson_body(body), images=images)
     if lesson.low is None or lesson.high is None:
         raise vj.PricingUnavailable(f"a lesson at {LESSON_TIER} has no priced band: {lesson.text}")
-    lo, hi = n * lesson.low, n * lesson.high
     quizzes = class_quiz_calls(body)
-    text = (f"unknown = {n} lesson episode(s) at {LESSON_TIER} ~{vj._span(lo, hi)} (each {lesson.text}) + NOT PRICED: "
-            f"the class syllabus (1 LLM call) and {quizzes} quiz calls (one per lesson and a cumulative one)")
+    llm_lo, llm_at_max, llm_hi = class_llm_usd(quizzes)
+    lo, hi = llm_lo + n * lesson.low, llm_hi + n * lesson.high
+    text = (f"unknown = ~{vj._span(lo, hi)} priced: the syllabus and {quizzes} quiz calls (one per lesson and a "
+            f"cumulative one) ~{vj._span(llm_lo, llm_hi)} + {n} lesson episode(s) at {LESSON_TIER} "
+            f"~{vj._span(n * lesson.low, n * lesson.high)} (each {lesson.text}) + NOT PRICED: {COVER_CALLS}")
     detail = [
         f"lessons: the class door stores no tier, so each lesson job names none and the api runs it at {LESSON_TIER}",
-        "not priced: no class is stored, so its LLM calls have no measurement (read-only Firestore, "
-        "2026-11-07: no `classes` collection, against 237 `courses` read the same way). Each call is capped at "
-        f"{CLASS_CALL_MAX_TOKENS} output tokens. Not added either: the cover's concept call (covercore, one "
-        "small-model call capped at 200 output tokens)",
+        f"the syllabus and quiz calls: gpt-4o, the model each service's failover chain leads with. The low end is "
+        f"their medians in the private backup of the classes deleted on 2026-11-08 ({SYLLABUS_CALL.n} syllabus "
+        f"calls, median {vj._usd(SYLLABUS_CALL.median_usd)} and max {vj._usd(SYLLABUS_CALL.max_usd)}; "
+        f"{QUIZ_CALL.n} quiz calls, median {vj._usd(QUIZ_CALL.median_usd)} and max {vj._usd(QUIZ_CALL.max_usd)}), "
+        f"{vj._usd(llm_at_max)} at their maxima. The high end is every output at the code's {CLASS_CALL_MAX_TOKENS}"
+        "-token cap, with the input at those maxima",
+        COVER_DETAIL,
     ] + list(lesson.detail)
     return vj.Estimate(text=text, low=None, high=None, detail=detail)
 
@@ -154,6 +220,15 @@ WRITEUP_DOORS = Doors(noun="writeup", create="/v1/writeups", id_key="writeup_id"
 #: doc and publishes none, and the course-workers stages resolve an absent tier to medium (``tier_models``).
 WRITEUP_TIER = "medium"
 
+#: What a writeup's research and generate calls are booked at, in $. course-workers books every writeup token at the
+#: model's INPUT rate (``calculate_llm_cost`` given no output count), so a booked figure is a floor of the bill, and
+#: at most ``GPT_4O_USD_PER_MILLION[1] / [0]`` (4x) below it. The median is over the 47 writeups in the private backup
+#: of the writeups deleted on 2026-11-08 that record a booked cost (of 58; the most was $0.036). The planner-v2 figure
+#: is the one MEASURED writeup of that arm, a medium blog_post of 1500 words (kitesforu-course-workers COST_CHANGELOG
+#: 2026-07-27, against $0.0139 on the single-shot arm); a writeup may run either arm.
+WRITEUP_BOOKED_MEDIAN_USD = 0.00836
+WRITEUP_PLANNER_V2_BOOKED_USD = 0.0360
+
 
 def build_writeup_body(*, topic: str) -> Dict[str, Any]:
     """The ``POST /v1/writeups`` body: the topic and one format, both declared ``CreateWriteupRequest`` fields."""
@@ -161,16 +236,22 @@ def build_writeup_body(*, topic: str) -> Dict[str, Any]:
 
 
 def writeup_estimate(body: Dict[str, Any]) -> vj.Estimate:
+    """Research and one format's generate, from the booked writeups: the median booked cost, up to the planner-v2
+    writeup's tokens all billed at gpt-4o's output rate. The cover's calls are NOT priced, and say so."""
     formats = list(body.get("formats_requested") or [])
-    text = (f"unknown = NOT PRICED: research (1 LLM call) + generate ({len(formats)} format(s): {', '.join(formats)}; "
-            "how many passes each runs is the serving worker's flags)")
+    rate_in, rate_out = GPT_4O_USD_PER_MILLION
+    lo, hi = WRITEUP_BOOKED_MEDIAN_USD, WRITEUP_PLANNER_V2_BOOKED_USD * rate_out / rate_in
+    text = (f"unknown = ~{vj._span(lo, hi)} priced: research (1 LLM call) + generate ({len(formats)} format(s): "
+            f"{', '.join(formats)}) at {WRITEUP_TIER} + NOT PRICED: {COVER_CALLS}")
     detail = [
         f"tier: the writeup door stores none, so its stages run at {WRITEUP_TIER}",
-        "not priced: no writeup is stored, so its calls have no measurement (read-only Firestore, "
-        "2026-11-07: no `writeups` collection). The one recorded figure, kitesforu-course-workers COST_CHANGELOG "
-        "2026-07-27: a medium blog_post (1500 words) booked $0.011 single-shot to $0.029 planner-v2 for research + "
-        "generate, every token at the input rate, before the passes added since; this format targets 250 words",
-        "not added: the cover's concept call (covercore, one small-model call capped at 200 output tokens)",
+        f"research + generate: the low end is the median booked cost of the 47 writeups in the private backup of the "
+        f"writeups deleted on 2026-11-08 that record one (max $0.036). The high end is the one MEASURED planner-v2 "
+        f"writeup (kitesforu-course-workers COST_CHANGELOG 2026-07-27: a medium blog_post of 1500 words, "
+        f"{vj._usd(WRITEUP_PLANNER_V2_BOOKED_USD)} booked, $0.0139 on the single-shot arm) with every token billed at "
+        f"gpt-4o's output rate: course-workers books every writeup token at the input rate. This format targets 250 "
+        f"words",
+        COVER_DETAIL,
     ]
     return vj.Estimate(text=text, low=None, high=None, detail=detail)
 
@@ -179,9 +260,9 @@ def writeup_estimate(body: Dict[str, Any]) -> vj.Estimate:
 # The two exports: compute over what a course or class already holds
 # ---------------------------------------------------------------------------------------------
 
-#: The course or class an export acts on is one path segment that is not a flag. Anything else would change the route
-#: the POST reaches.
-TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+#: The course or class an export acts on is one path segment that is not a flag, matched whole: a trailing newline is
+#: not part of an id. Anything else would change the route the POST reaches.
+TARGET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 def export_doors(course_id: str) -> Doors:
@@ -211,9 +292,8 @@ def scorm_estimate() -> vj.Estimate:
     text = ("unknown = compute only, NOT PRICED: the lms-export worker zips what the class already holds into a SCORM "
             "package; it calls no paid provider (kitesforu-lms needs only GCP clients and lxml)")
     detail = [
-        "not priced: this script carries no Cloud Run rate, and no package is stored to measure (read-only Firestore, "
-        "2026-11-07: no `scorm_packages` collection). The api charges the owner a flat credit fee for it, refunded "
-        "when the worker fails",
+        "not priced: this script carries no Cloud Run rate. The api charges the owner a flat credit fee for it, "
+        "refunded when the worker fails",
         "the api refuses it (400, nothing charged) unless the class is completed or partial: run it on a --class that "
         "has finished",
     ]
@@ -228,6 +308,8 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
          workers_src: str, catalog_label: str) -> Dict[str, Any]:
     """The flow's plan in the shape ``verification_job.py plan`` emits, plus its doors. As there, the estimate and
     the ACK decision read the serialized payload, the same string curl sends, never the dict it came from."""
+    if flow in ("class", "writeup"):
+        refuse_a_topic_the_workers_refuse(topic)
     if flow == "class":
         payload = json.dumps(build_class_body(topic=topic, duration=duration, style=style, language=language))
         sent = json.loads(payload)
@@ -245,7 +327,7 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
         summary = f"{len(sent['formats_requested'])} format ({', '.join(sent['formats_requested'])}) at {WRITEUP_TIER}"
     elif flow in ("video-export", "scorm-export"):
         what = "course" if flow == "video-export" else "class"
-        if not TARGET_ID.match(target_id or ""):
+        if not TARGET_ID.fullmatch(target_id or ""):
             raise ValueError(f"--{'course-video-export' if what == 'course' else 'scorm-export'} takes a {what} id "
                              f"(letters, digits, _ and -), got {target_id!r}")
         needs_ack, reason = True, f"{UNPRICED_REASON} "
@@ -276,9 +358,11 @@ class UnreadableSnapshot(ValueError):
     """The read is not the flow's stored doc: an error page, an auth failure, an empty transport."""
 
 
-#: The class settings the body sets, compared one by one with ``settings.*`` of ``GET /v1/classes/{id}``.
+#: What the class body sets, compared one by one with ``GET /v1/classes/{id}``: the class's own fields, and its
+#: ``settings.*``.
+_CLASS_FIELDS = ("topic", "subject", "grade_level")
 _CLASS_SETTINGS = ("total_lessons", "lesson_duration_min", "questions_per_lesson", "generation_mode", "style",
-                   "language")
+                   "language", "audience_type")
 
 
 def _differs(label: str, want: Any, got: Any) -> List[str]:
@@ -296,7 +380,7 @@ def check_stored(flow: str, sent: Dict[str, Any], snapshot: Any, *, created_id: 
     if flow == "class":
         if snapshot.get("class_id") != created_id or not isinstance(snapshot.get("settings"), dict):
             raise UnreadableSnapshot("the read carries no settings for this class")
-        for key in ("topic", "subject"):
+        for key in _CLASS_FIELDS:
             out += _differs(key, sent[key], snapshot.get(key))
         for key in _CLASS_SETTINGS:
             out += _differs(f"settings.{key}", sent[key], snapshot["settings"].get(key))

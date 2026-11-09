@@ -7,12 +7,14 @@ separately, so every exit code can be reached. Every id and topic here is synthe
 
 The contract pins read the doors from the producers they describe, at ``origin/main``: kitesforu-api's routes,
 kitesforu-schemas' request models (under the workers venv, which carries them), kitesforu-workers' still grant and
-kitesforu-course-workers' writeup formats. Each SKIPS, and says so, only when that checkout or interpreter is absent.
+kitesforu-course-workers' writeup formats, input checks, LLM caps and rates. Each SKIPS, and says so, only when that
+checkout or interpreter is absent.
 
 Offline and $0.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -21,7 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
@@ -86,7 +88,7 @@ def headers(call: List[str]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# The three flows, as a run sends them and a fake api answers them (synthetic ids)
+# The four flows, as a run sends them and a fake api answers them (synthetic ids)
 # ---------------------------------------------------------------------------------------------
 
 OWNER = ("--on-behalf-of", "user_abc123")
@@ -94,8 +96,9 @@ COURSE_ID = "course_test_1"
 CLASS_ID = "cls_done_1"
 
 EXPECTED_CLASS_BODY = (
-    '{"topic": "pipeline verification", "subject": "General", "total_lessons": 3, "lesson_duration_min": 0.167, '
-    '"questions_per_lesson": 3, "style": "Explainer", "language": "en-US", "generation_mode": "autopilot"}'
+    '{"topic": "pipeline verification", "subject": "General", "grade_level": "Grade 5", "total_lessons": 3, '
+    '"lesson_duration_min": 0.167, "questions_per_lesson": 3, "style": "Explainer", "language": "en-US", '
+    '"generation_mode": "autopilot", "audience_type": "k12"}'
 )
 EXPECTED_WRITEUP_BODY = '{"topic": "pipeline verification", "formats_requested": ["linkedin_post"]}'
 
@@ -113,11 +116,13 @@ EXPORT_ACCEPTED = json.dumps({"status": "pending", "export_id": "course_export_1
                               "source_fingerprint": "0123456789abcdef", "included_count": 2, "skipped": []})
 
 
-def class_stored(status: str = "syllabus_generation", **settings) -> str:
-    """``GET /v1/classes/<id>``: the class doc's model dump, its settings as the body set them unless overridden."""
+def class_stored(status: str = "syllabus_generation", fields: Optional[Dict[str, Any]] = None, **settings) -> str:
+    """``GET /v1/classes/<id>``: the class doc's model dump, its fields and settings as the body set them unless
+    overridden."""
     sent = json.loads(EXPECTED_CLASS_BODY)
+    own = {k: sent[k] for k in verification_flows._CLASS_FIELDS}
     base = {k: sent[k] for k in verification_flows._CLASS_SETTINGS}
-    return json.dumps({"class_id": "cls_test_1", "topic": sent["topic"], "subject": sent["subject"], "status": status,
+    return json.dumps({"class_id": "cls_test_1", **own, **(fields or {}), "status": status,
                        "settings": {**base, "quiz_enabled": True, "mastery_threshold": 0.7, **settings}})
 
 
@@ -309,16 +314,143 @@ def test_the_writeup_format_is_the_smallest_target():
 
 
 # ---------------------------------------------------------------------------------------------
+# The worker after the door: every body a flow sends is one the first course-workers stage runs
+# ---------------------------------------------------------------------------------------------
+
+def _worker_check(path: str, worker: str) -> Callable[[Dict[str, Any]], None]:
+    """``<worker>.validate_input`` at course-workers origin/main, run as the worker's own code: the method's source,
+    taken whole by ``ast`` and executed beside the module's real ``WorkerValidationError``. It raises on a message the
+    worker refuses."""
+    source = _origin_main_file(COURSE_WORKERS_REPO, path)
+    errors: Dict[str, Any] = {}
+    exec(compile(_origin_main_file(COURSE_WORKERS_REPO, "src/workers/exceptions.py"), "exceptions.py", "exec"), errors)
+    cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == worker)
+    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "validate_input")
+    namespace: Dict[str, Any] = {"Dict": Dict, "Any": Any, "WorkerValidationError": errors["WorkerValidationError"]}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), path, "exec"), namespace)
+    return lambda message: namespace["validate_input"](None, message)
+
+
+#: Per flow: the stage that reads the trigger's message first, and the message kitesforu-api publishes to it, built
+#: from the request as the api stores it. ``api`` names the api's own lines that fill each key the stage reads.
+WORKER_DOORS = {
+    "class": {
+        "stage": ("src/workers/stages/class_initiator/worker.py", "ClassInitiatorWorker"),
+        "message": lambda r: {"class_id": "cls_synthetic", "user_id": "user_synthetic", "topic": r["topic"],
+                              "subject": r["subject"], "grade_level": r["grade_level"],
+                              "num_lessons": r["total_lessons"], "lesson_duration_min": r["lesson_duration_min"],
+                              "audience_type": r["audience_type"] or "k12"},
+        "api": {"src/api/services/classes/crud.py": ("topic=request.topic,", "subject=request.subject,",
+                                                     "grade_level=request.grade_level,",
+                                                     "total_lessons=request.total_lessons,",
+                                                     "lesson_duration_min=request.lesson_duration_min,",
+                                                     'audience_type=request.audience_type or "k12",'),
+                "src/api/services/classes/pubsub.py": ('"topic": class_obj.topic,', '"subject": class_obj.subject,',
+                                                       '"grade_level": class_obj.grade_level,',
+                                                       '"num_lessons": settings.total_lessons if settings',
+                                                       '"lesson_duration_min": settings.lesson_duration_min if',
+                                                       '"audience_type": settings.audience_type if settings')},
+        "runs": [(), ("--topic", "binary search trees", "--style", "Interview", "--language", "fr-FR",
+                      "--duration", "1.0"), ("--topic", "abc")],
+        # The class 289730a95 sent, and a topic the api takes and the initiator does not.
+        "refused": [({"grade_level": None, "audience_type": None}, "grade_level is required for K-12 classes"),
+                    ({"topic": "ab"}, "Topic must be at least 3 characters")],
+    },
+    "writeup": {
+        "stage": ("src/workers/stages/writeup_research/worker.py", "WriteupResearchWorker"),
+        "message": lambda r: {"writeup_id": "wrt_synthetic", "user_id": "user_synthetic", "topic": r["topic"]},
+        "api": {"src/api/services/writeups/crud.py": ("topic=request.topic,",),
+                "src/api/services/writeups/generation.py": ('"writeup_id": writeup_id,', '"topic": writeup.topic,')},
+        "runs": [(), ("--topic", "binary search trees"), ("--topic", "abc")],
+        "refused": [({"topic": "  ab  "}, "Topic must be at least 3 characters")],
+    },
+}
+
+#: Run under the workers interpreter: each body as the api's own request model stores it, its defaults filled.
+_STORED_REQUEST_PROBE = r'''
+import json, sys
+from kitesforu_schemas import CreateClassRequest, CreateWriteupRequest
+model = {"class": CreateClassRequest, "writeup": CreateWriteupRequest}[sys.argv[1]]
+print(json.dumps([model.model_validate(body).model_dump(mode="json") for body in json.loads(sys.stdin.read())]))
+'''
+
+
+@pytest.mark.parametrize("flow_src,flow", [("class", "class"), ("writeup", "writeup")], indirect=["flow_src"])
+def test_every_body_a_flow_sends_is_one_its_worker_runs(harness, flow_src, flow):
+    """The api stores and starts a class or writeup that its first course-workers stage then refuses, and the trigger
+    still says generation started: a class with no grade level, a class topic under 3 characters, a writeup topic
+    under 3 once stripped. So every body a flow sends, as the api's own request model stores it and its own lines
+    publish it, passes that stage's own ``validate_input``; the refused shapes fail it, and the script refuses the
+    short topic before anything is planned or sent."""
+    py = _workers_python()
+    if not py:
+        pytest.skip("no kitesforu-workers venv to import kitesforu_schemas from (set KFU_WORKERS_PYTHON): "
+                    "SKIPPED, not passed")
+    door = WORKER_DOORS[flow]
+    check = _worker_check(*door["stage"])
+    for path, lines in door["api"].items():
+        source = _origin_main_file(API_REPO, path)
+        assert all(line in source for line in lines), [line for line in lines if line not in source]
+    bodies = []
+    for extra in door["runs"]:
+        r = harness.run(*FLOWS[flow]["args"], *extra, "--dry-run", env=env_for(flow, flow_src))
+        assert r.returncode == 0, (extra, r.stderr)
+        bodies.append(json.loads(r.stdout))
+    refused = [{k: v for k, v in {**bodies[0], **change}.items() if v is not None} for change, _ in door["refused"]]
+    probe = subprocess.run([py, "-I", "-c", _STORED_REQUEST_PROBE, flow], input=json.dumps(bodies + refused),
+                           capture_output=True, text=True, timeout=120)
+    assert probe.returncode == 0, probe.stderr[-2000:]
+    stored = json.loads(probe.stdout.strip().splitlines()[-1])
+    assert len(stored) == len(bodies) + len(refused), stored
+    for request in stored[:len(bodies)]:
+        check(door["message"](request))   # raises if the stage would refuse what this body asks for
+    for (change, why), request in zip(door["refused"], stored[len(bodies):]):
+        with pytest.raises(Exception, match=why):
+            check(door["message"](request))
+        if "topic" in change:
+            r = harness.run(*FLOWS[flow]["args"], "--topic", change["topic"], "--dry-run", env=env_for(flow, flow_src))
+            assert r.returncode == 1 and "--topic must hold at least 3 characters" in r.stderr, (r.returncode, r.stderr)
+            assert r.stdout == ""
+    assert harness.calls() == []
+
+
+def test_the_class_llm_bound_is_the_codes_own():
+    """The class's syllabus and quiz calls are priced as gpt-4o with every output capped at 4000 tokens: the model
+    each call defaults to and the cap it sends, in course-workers' own call sites, at course-workers' own rates."""
+    for path in ("src/workers/stages/class_syllabus/worker.py",
+                 "src/workers/stages/class_orchestrator/quiz_generator.py"):
+        source = _origin_main_file(COURSE_WORKERS_REPO, path)
+        assert re.search(r'^DEFAULT_LLM_MODEL = "gpt-4o"$', source, flags=re.M), path
+        caps = re.findall(r"call_llm_json\((?:[^()]|\([^()]*\))*?max_tokens=(\d+)", source)
+        assert caps and set(caps) == {str(verification_flows.CLASS_CALL_MAX_TOKENS)}, (path, caps)
+    pricing = _origin_main_file(COURSE_WORKERS_REPO, "src/workers/common/pricing.py")
+    found = [re.search(rf'{name} = \{{[^}}]*"gpt-4o": ([\d.]+)', pricing)
+             for name in ("_LLM_INPUT_FALLBACK_PER_MILLION", "_LLM_OUTPUT_PER_MILLION")]
+    rates = tuple(float(m.group(1)) for m in found if m)
+    assert rates == verification_flows.GPT_4O_USD_PER_MILLION, rates
+
+
+# ---------------------------------------------------------------------------------------------
 # The estimates: what is priced, what is not, and the ACK
 # ---------------------------------------------------------------------------------------------
 
-def test_a_class_is_priced_as_its_lessons_and_names_the_calls_it_cannot_price():
+def test_a_class_is_priced_as_its_lessons_and_its_llm_calls_and_names_the_cover():
     body = json.loads(EXPECTED_CLASS_BODY)
     lesson = verification_job.estimate(verification_job.implied_episode_body(0.167, "medium"), images=_IMAGES)
     est = verification_flows.class_estimate(body, images=_IMAGES)
+    # 1 syllabus + 4 quiz calls: at the backup's medians, and with every output at 4000 tokens and the input at the
+    # backup's maxima (939 and 1552 tokens), at gpt-4o's $2.50 in and $10.00 out per 1M tokens.
+    llm_lo = 0.00937 + 4 * 0.01260
+    llm_hi = (939 * 2.50 + 4000 * 10.00) / 1e6 + 4 * (1552 * 2.50 + 4000 * 10.00) / 1e6
+    assert verification_flows.class_llm_usd(4) == pytest.approx((llm_lo, 0.01698 + 4 * 0.02497, llm_hi))
+    span = verification_job._span
     assert est.low is None and est.high is None and est.text.startswith("unknown = "), est.text
-    assert f"3 lesson episode(s) at medium ~{verification_job._span(3 * lesson.low, 3 * lesson.high)}" in est.text
-    assert "the class syllabus (1 LLM call) and 4 quiz calls" in est.text
+    total = span(llm_lo + 3 * lesson.low, llm_hi + 3 * lesson.high)
+    assert est.text.startswith(f"unknown = ~{total} priced: "), est.text
+    assert f"the syllabus and 4 quiz calls (one per lesson and a cumulative one) ~{span(llm_lo, llm_hi)} + " in est.text
+    assert f"3 lesson episode(s) at medium ~{span(3 * lesson.low, 3 * lesson.high)}" in est.text
+    assert est.text.endswith("+ NOT PRICED: the cover's 1 concept call and up to 4 vision checks (gpt-4.1-mini)")
+    assert any(d.startswith("not priced: the cover") for d in est.detail), est.detail
     with pytest.raises(verification_job.PricingUnavailable):
         verification_flows.class_estimate(body, images=None)   # a still it cannot price is a refusal, never a guess
 
@@ -327,10 +459,23 @@ def test_the_class_estimate_follows_its_lessons_and_their_length():
     body = {**json.loads(EXPECTED_CLASS_BODY), "total_lessons": 4, "lesson_duration_min": 1.0}
     lesson = verification_job.estimate(verification_job.implied_episode_body(1.0, "medium"), images=_IMAGES)
     est = verification_flows.class_estimate(body, images=_IMAGES)
+    llm_lo, _, llm_hi = verification_flows.class_llm_usd(5)
     assert f"4 lesson episode(s) at medium ~{verification_job._span(4 * lesson.low, 4 * lesson.high)}" in est.text
-    assert "5 quiz calls" in est.text
+    assert f"the syllabus and 5 quiz calls (one per lesson and a cumulative one) " \
+           f"~{verification_job._span(llm_lo, llm_hi)}" in est.text
     assert verification_flows.class_ack_decision(body) == (True, "tier=medium duration=1.0min paid_stills=4 "
                                                                  "est=unknown ")
+
+
+def test_a_writeup_is_priced_from_the_booked_writeups_and_names_the_cover():
+    """From the median booked writeup to the measured planner-v2 writeup with every token billed at gpt-4o's output
+    rate, 4 times the input rate it was booked at."""
+    est = verification_flows.writeup_estimate(json.loads(EXPECTED_WRITEUP_BODY))
+    assert est.low is None and est.high is None, est
+    assert est.text == ("unknown = ~$0.008-0.14 priced: research (1 LLM call) + generate (1 format(s): linkedin_post) "
+                        "at medium + NOT PRICED: the cover's 1 concept call and up to 4 vision checks (gpt-4.1-mini)")
+    assert any("every token billed at gpt-4o's output rate" in d for d in est.detail), est.detail
+    assert any(d.startswith("not priced: the cover") for d in est.detail), est.detail
 
 
 #: Run under the workers interpreter: the producer's grant for one class lesson, the job the orchestrator creates.
@@ -367,9 +512,13 @@ def test_a_class_lesson_may_buy_the_stills_a_course_episode_may(workers_src):
         == verification_job.COURSE_EPISODE_IMPLIED_STILLS
 
 
-@pytest.mark.parametrize("estimate", [verification_flows.writeup_estimate(json.loads(EXPECTED_WRITEUP_BODY)),
-                                      verification_flows.export_estimate()])
-def test_an_unmeasured_flow_prints_no_number_and_says_why(estimate):
+@pytest.mark.parametrize("estimate", [
+    lambda: verification_flows.class_estimate(json.loads(EXPECTED_CLASS_BODY), images=_IMAGES),
+    lambda: verification_flows.writeup_estimate(json.loads(EXPECTED_WRITEUP_BODY)),
+    verification_flows.export_estimate, verification_flows.scorm_estimate,
+], ids=["class", "writeup", "video-export", "scorm-export"])
+def test_an_estimate_with_an_unpriced_term_has_no_total_and_says_why(estimate):
+    estimate = estimate()
     assert estimate.low is None and estimate.high is None, estimate
     assert estimate.text.startswith("unknown = ") and "NOT PRICED" in estimate.text, estimate.text
     assert estimate.detail and any("not priced" in d for d in estimate.detail), estimate.detail
@@ -436,11 +585,92 @@ def test_an_export_never_reads_a_flag_as_its_id(harness, flag, what):
 
 
 @pytest.mark.parametrize("flow", ["video-export", "scorm-export"])
-@pytest.mark.parametrize("target_id", ["", "--dry-run", "-x", "a/b", "a b", "a?b=1", "../x"])
+@pytest.mark.parametrize("target_id", ["", "--dry-run", "-x", "a/b", "a b", "a?b=1", "../x", "abc\n"])
 def test_an_id_that_is_not_one_path_segment_is_refused(flow, target_id):
     with pytest.raises(ValueError):
         verification_flows.plan(flow, topic="t", duration="0.167", style="Explainer", language="en-US",
                                 target_id=target_id, workers_src="", catalog_label="")
+
+
+#: Every mode, the arguments that choose it, and each flag it takes that carries a value (an export's id has its own
+#: guard, pinned above).
+VALUE_FLAGS = {
+    "podcast": ((), ("--topic", "--duration", "--tier", "--style", "--language", "--format", "--content-rating",
+                     "--motion-clips", "--paid-stills", "--source-writeup", "--on-behalf-of", "--on-behalf-of-email")),
+    "course": (("--course", *OWNER), ("--topic", "--duration", "--tier", "--style", "--language", "--on-behalf-of",
+                                      "--on-behalf-of-email")),
+    "class": (FLOWS["class"]["args"], ("--topic", "--duration", "--style", "--language", "--on-behalf-of",
+                                       "--on-behalf-of-email")),
+    "writeup": (FLOWS["writeup"]["args"], ("--topic", "--on-behalf-of", "--on-behalf-of-email")),
+    "video-export": (FLOWS["video-export"]["args"], ("--on-behalf-of", "--on-behalf-of-email")),
+    "scorm-export": (FLOWS["scorm-export"]["args"], ("--on-behalf-of", "--on-behalf-of-email")),
+}
+
+
+@pytest.mark.parametrize("mode,flag", [(m, f) for m, (_, flags) in VALUE_FLAGS.items() for f in flags])
+def test_a_value_flag_never_reads_a_flag_or_nothing_as_its_value(harness, workers_src, mode, flag):
+    """``--topic --dry-run`` in the hour after an ACK used to send a real run whose topic is "--dry-run", and a value
+    flag left last ended on bash's unbound-variable error with exit 0. Each is refused before anything is planned."""
+    harness.fresh_ack()
+    args = VALUE_FLAGS[mode][0]
+    env = {**(FLOWS[mode]["env"] if mode in FLOWS else {}), "WORKERS_SRC": workers_src}
+    swallowed = harness.run(*args, flag, "--dry-run", env=env)
+    assert swallowed.returncode == 1, (swallowed.returncode, swallowed.stderr)
+    assert f"{flag} needs a value, not the flag --dry-run. Nothing was sent." in swallowed.stderr, swallowed.stderr
+    last = harness.run(*args, flag, env=env)
+    assert last.returncode == 1 and f"{flag} needs a value. Nothing was sent." in last.stderr, (last.returncode,
+                                                                                               last.stderr)
+    assert harness.calls() == [] and swallowed.stdout == last.stdout == ""
+
+
+SCRIPT_TEXT = (QA / "scripts" / "create_verification_job.sh").read_text()
+
+
+def _parser_arms() -> Dict[str, str]:
+    """The argument loop's case arms, flag -> its body: every flag a run can be given."""
+    loop = SCRIPT_TEXT.split('while [[ $# -gt 0 ]]; do', 1)[1].split("\ndone\n", 1)[0]
+    return dict(re.findall(r"^    (--[a-z-]+(?:\|--[a-z-]+)*)\)\s*(.*)$", loop, flags=re.M))
+
+
+def test_every_flag_that_takes_a_value_is_guarded():
+    """A flag added later gets the guard: every arm that shifts its value off calls ``require_value``, and those arms
+    are the value flags pinned above (the exports' id, which may be absent, has its own)."""
+    arms = _parser_arms()
+    assert {"--topic", "--dry-run", "--course-video-export|--scorm-export"} <= set(arms), sorted(arms)
+    takes_value = {flag for flag, body in arms.items() if "shift 2" in body and "|" not in flag}
+    guarded = {flag for flag, body in arms.items() if body.startswith('require_value "$@";')}
+    assert takes_value == guarded == set(VALUE_FLAGS["podcast"][1]), (sorted(takes_value), sorted(guarded))
+
+
+#: Per flow, each value flag it takes: a value that is not its default, and the body key that carries it.
+FLAG_IN_BODY = {
+    "class": {"--topic": ("binary search trees", "topic", "binary search trees"),
+              "--duration": ("1.0", "lesson_duration_min", 1.0),
+              "--style": ("Interview", "style", "Interview"),
+              "--language": ("fr-FR", "language", "fr-FR")},
+    "writeup": {"--topic": ("binary search trees", "topic", "binary search trees")},
+}
+
+
+@pytest.mark.parametrize("flow_src,flow", [("class", "class"), ("writeup", "writeup")], indirect=["flow_src"])
+def test_every_flag_a_flow_takes_reaches_its_body(harness, flow_src, flow):
+    """A flag a flow takes and its body ignores is the silent no-op the refusals exist to stop, on an ACK-gated run."""
+    extra = [a for flag, (value, _, _) in FLAG_IN_BODY[flow].items() for a in (flag, value)]
+    r = harness.run(*FLOWS[flow]["args"], *extra, "--dry-run", env=env_for(flow, flow_src))
+    assert r.returncode == 0, r.stderr
+    body = json.loads(r.stdout)
+    for flag, (_, key, want) in FLAG_IN_BODY[flow].items():
+        assert body[key] == want, (flag, key, body)
+
+
+def test_the_flags_a_flow_takes_are_the_ones_its_body_carries():
+    """The shell's allowlist (``_takes``) against :data:`FLAG_IN_BODY`: a flag added to a flow's list without a body
+    key behind it turns this red."""
+    takes = dict(re.findall(r'^  ([a-z-]+)\)\s+_takes="([^"]*)"$', SCRIPT_TEXT, flags=re.M))
+    assert set(takes) == set(FLOWS), takes
+    for flow, listed in takes.items():
+        mode_flag = FLOWS[flow]["args"][0]
+        assert set(listed.split()) - {mode_flag} == set(FLAG_IN_BODY.get(flow) or {}), (flow, listed)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -540,9 +770,18 @@ def test_a_trigger_transport_failure_says_the_generation_may_have_started(harnes
 
 @pytest.mark.parametrize("flow_src,flow,stored,needle", [
     ("class", "class", class_stored(total_lessons=5), "settings.total_lessons: sent 3, stored 5"),
+    ("class", "class", class_stored(audience_type="corporate"),
+     'settings.audience_type: sent "k12", stored "corporate"'),
     ("class", "class", class_stored(status="draft"), "the class is stored as draft"),
+    ("class", "class", class_stored(fields={"topic": "another topic"}),
+     'topic: sent "pipeline verification", stored "another topic"'),
+    ("class", "class", class_stored(fields={"subject": "Science"}), 'subject: sent "General", stored "Science"'),
+    ("class", "class", class_stored(fields={"grade_level": ""}), 'grade_level: sent "Grade 5", stored ""'),
     ("writeup", "writeup", writeup_stored(formats_requested=["blog_post"]),
      'formats_requested: sent ["linkedin_post"], stored ["blog_post"]'),
+    ("writeup", "writeup", writeup_stored(status="draft"), "the writeup is stored as draft"),
+    ("writeup", "writeup", writeup_stored(topic="another topic"),
+     'topic: sent "pipeline verification", stored "another topic"'),
     ("video-export", "video-export", export_stored(export_id="course_other"),
      'export_id: sent "course_export_1", stored "course_other"'),
     ("video-export", "video-export", export_stored(status="absent", export_id=None), "the course reports none"),
@@ -623,17 +862,17 @@ def test_what_was_sent_stored_as_sent_reads_back_clean(flow, sent, stored, creat
 # The record
 # ---------------------------------------------------------------------------------------------
 
-def test_help_documents_the_three_flows(harness):
+def test_help_documents_the_four_flows(harness):
     r = harness.run("--help")
     assert r.returncode == 0
-    for needle in ("--class", "/v1/classes", "curriculum/generate", "autopilot", "--writeup", "/v1/writeups",
-                   "linkedin_post", "--course-video-export <course_id>", "continuous-video", "NOT priced", "the ACK",
-                   "--scorm-export <class_id>", "/export/scorm", "completed or partial",
-                   "409", "user_…", "reads back what\n#   the api STORED"):
+    for needle in ("--class", "/v1/classes", "curriculum/generate", "autopilot", "a K-12 class at Grade 5", "--writeup",
+                   "/v1/writeups", "linkedin_post", "under 3 characters", "--course-video-export <course_id>",
+                   "continuous-video", "NOT priced", "the ACK", "--scorm-export <class_id>", "/export/scorm",
+                   "completed or partial", "409", "user_…", "reads back what\n#   the api STORED"):
         assert needle in r.stdout, needle
 
 
-def test_the_cost_changelog_records_the_three_flows():
+def test_the_cost_changelog_records_the_four_flows():
     sections = (QA / "COST_CHANGELOG.md").read_text().split("\n## ")[1:]
     entry = next((s for s in sections if s.startswith("2026-11-07 — the verification job can create the smallest "
                                                       "class, writeup, course video export and SCORM export")), "")

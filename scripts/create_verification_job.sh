@@ -26,15 +26,16 @@
 #     an owner Clerk has no email for (the key's own identity, any test_… id). It prices
 #     through the workers tree, as a purchase does.
 #   ./create_verification_job.sh --class --on-behalf-of user_…  # the smallest CLASS the api accepts (POST /v1/classes:
-#     3 lessons x --duration, 3 questions each, autopilot), then its one trigger, POST
+#     a K-12 class at Grade 5, 3 lessons x --duration, 3 questions each, autopilot), then its one trigger, POST
 #     /v1/classes/<id>/curriculum/generate: in autopilot the syllabus worker starts the lessons itself. It takes
 #     --topic --duration --style --language, the owner flags and --dry-run. Each lesson runs at medium (the class door
-#     stores no tier) and is priced as a course episode is, through the workers tree; the syllabus and quiz LLM calls
-#     are NOT priced (no class is stored to measure them), so it needs the ACK. Like --course, it refuses
-#     any owner but a user_… id: the orchestrator creates each lesson on the owner's behalf.
+#     stores no tier) and is priced as a course episode is, through the workers tree, and the syllabus and quiz LLM
+#     calls from their measurements and the code's caps; the cover's calls are NOT priced, so it needs the ACK. Like
+#     --course, it refuses any owner but a user_… id: the orchestrator creates each lesson on the owner's behalf.
 #   ./create_verification_job.sh --writeup                    # the smallest WRITEUP (POST /v1/writeups, one format,
 #     linkedin_post), then POST /v1/writeups/<id>/generate. It takes --topic, the owner flags and --dry-run. It runs
-#     at medium and its LLM calls are NOT priced (no writeup is stored to measure them), so it needs the ACK.
+#     at medium, its research and generate calls are priced from the booked writeups, and the cover's calls are NOT,
+#     so it needs the ACK. --class and --writeup refuse a --topic under 3 characters, which their worker refuses.
 #   ./create_verification_job.sh --course-video-export <course_id> --on-behalf-of user_…  # POST
 #     /v1/courses/<course_id>/continuous-video with no body, as the course's owner: one video stitched from the
 #     lesson masters the course already rendered. Compute only and zero credits, but NOT priced (this script carries
@@ -181,7 +182,7 @@ PAID_STILLS_GIVEN="false"  # set when --paid-stills is passed explicitly (valida
 # (verification_flows.py plan).
 MODE="podcast"
 MODE_FLAG=""        # the flag that chose MODE, for the messages that name it
-TARGET_ID=""        # the course or class an export acts on""
+TARGET_ID=""        # the course or class an export acts on
 GIVEN=()            # every --flag passed, so a mode can refuse the ones its request cannot carry
 set_mode() {        # set_mode <mode> <its flag>
   if [[ "$MODE" != "podcast" && "$MODE" != "$1" ]]; then
@@ -190,16 +191,29 @@ set_mode() {        # set_mode <mode> <its flag>
   fi
   MODE="$1"; MODE_FLAG="$2"
 }
+# A flag that takes a value refuses a missing value, and a value that is itself a flag: `--topic --dry-run` would
+# otherwise read --dry-run as the topic and send the run the dry run was meant to rehearse, and a flag left last
+# would end the script on bash's own unbound-variable error, which the EXIT trap turns into exit 0.
+require_value() {   # require_value <flag> [<the words after it>...]
+  if [[ $# -lt 2 ]]; then
+    echo "$1 needs a value. Nothing was sent." >&2
+    exit 1
+  fi
+  if [[ "$2" == --* ]]; then
+    echo "$1 needs a value, not the flag $2. Nothing was sent." >&2
+    exit 1
+  fi
+}
 
 while [[ $# -gt 0 ]]; do
   [[ "$1" == --* ]] && GIVEN+=("$1")
   case "$1" in
-    --topic)    TOPIC="$2"; shift 2 ;;
-    --duration) DURATION="$2"; shift 2 ;;
-    --tier)     TIER="$2"; shift 2 ;;
-    --style)    STYLE="$2"; shift 2 ;;
-    --language) LANGUAGE="$2"; shift 2 ;;
-    --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
+    --topic)    require_value "$@"; TOPIC="$2"; shift 2 ;;
+    --duration) require_value "$@"; DURATION="$2"; shift 2 ;;
+    --tier)     require_value "$@"; TIER="$2"; shift 2 ;;
+    --style)    require_value "$@"; STYLE="$2"; shift 2 ;;
+    --language) require_value "$@"; LANGUAGE="$2"; shift 2 ;;
+    --format)   require_value "$@"; FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --short)    SHORT="true"; shift ;;   # Social Short path (9:16, kinetic captions, assembly)
     --visuals)  VISUALS="true"; shift ;;
     --visuals-auto) VISUALS="auto"; shift ;;  # T3-SAFE: send NEITHER wants_visuals nor
@@ -222,9 +236,9 @@ while [[ $# -gt 0 ]]; do
                     # _is_nonfiction=True, which makes it LOOK like an ordering race; it is not,
                     # the blueprint simply did not exist at decision time.
                     # ⇒ pair it with --duration (>0.5 needs the FOUNDER_SPEND_ACK file).
-    --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
-    --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
-    --paid-stills)  PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
+    --content-rating) require_value "$@"; CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
+    --motion-clips) require_value "$@"; MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
+    --paid-stills)  require_value "$@"; PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
     --dry-run)  DRY_RUN="true"; shift ;;
     --course)   set_mode course --course; shift ;;
     --class)    set_mode class --class; shift ;;
@@ -235,12 +249,12 @@ while [[ $# -gt 0 ]]; do
                 if [[ "$1" == --scorm-export ]]; then set_mode scorm-export "$1"; else set_mode video-export "$1"; fi
                 if [[ $# -gt 1 && "$2" != -* ]]; then TARGET_ID="$2"; shift 2; else shift; fi ;;
     --wait)     WAIT="true"; shift ;;
-    --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
-    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
+    --source-writeup) require_value "$@"; SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
+    --on-behalf-of) require_value "$@"; ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
                     # VISIBILITY (2026-08-28): the default test_user_e2e's jobs NEVER render in the
                     # signed-in Playwright library (different account). A job that must be OBSERVED
                     # on the beta surface needs --on-behalf-of <the browser test account's user_… id>.
-    --on-behalf-of-email) ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
+    --on-behalf-of-email) require_value "$@"; ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
     # Print the header comment block: every line up to the first that is not a comment, minus the
     # shebang. A fixed `head -12` was a duplicated constant coupled to the header's length, and
     # two new header lines pushed `--dry-run`, the short-form caveat and `Auth:` out of the help
@@ -644,10 +658,12 @@ print("started" if "curriculum generation started" in message.lower() else (mess
 fi
 
 # ---- A class or writeup: the trigger that starts the draft's generation ----------------------------------------
-# The create made a $0 draft, and this POST is what runs and charges it. Its outcome is classified as the create's
-# is: a 4xx refused it before anything ran or was charged (the creation gate's 403, a state 400, the rate limit's
-# 429), so the draft exists and nothing will run: exit 5. A transport failure, a 5xx, or a reply that does not say
-# generation started leaves it unknown whether it started: exit 8, which never invites a re-run.
+# The create made a $0 draft, and this POST is what runs it. A writeup's trigger charges its credits; a class's
+# charges none (start_curriculum_generation deducts nothing; the class's charge is POST /v1/classes/<id>/generate, which
+# autopilot never calls). Its outcome is classified as the create's is: a 4xx refused it before anything ran or was
+# charged (the creation gate's 403, a state 400, the rate limit's 429), so the draft exists and nothing will run:
+# exit 5. A transport failure, a 5xx, or a reply that does not say generation started leaves it unknown whether it
+# started: exit 8, which never invites a re-run.
 if [[ -n "$TRIGGER_PATH" ]]; then
   TRIGGER_URL=$(route_for "$TRIGGER_PATH" "$JOB_ID")
   TRIGGER_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$TRIGGER_URL" "${HDR_ARGS[@]}" \
