@@ -351,8 +351,9 @@ WORKER_DOORS = {
                                                        '"lesson_duration_min": settings.lesson_duration_min if',
                                                        '"audience_type": settings.audience_type if settings')},
         "runs": [(), ("--topic", "binary search trees", "--style", "Interview", "--language", "fr-FR",
-                      "--duration", "1.0"), ("--topic", "abc")],
-        # The class 289730a95 sent, and a topic the api takes and the initiator does not.
+                      "--duration", "1.0"), ("--topic", "abc"), ("--topic", "ab ")],
+        # The class 289730a95 sent, and a topic the api takes and the initiator does not. The initiator counts a
+        # topic as sent, spaces included, so "ab " runs where "ab" does not.
         "refused": [({"grade_level": None, "audience_type": None}, "grade_level is required for K-12 classes"),
                     ({"topic": "ab"}, "Topic must be at least 3 characters")],
     },
@@ -473,9 +474,11 @@ def test_a_writeup_is_priced_from_the_booked_writeups_and_names_the_cover():
     est = verification_flows.writeup_estimate(json.loads(EXPECTED_WRITEUP_BODY))
     assert est.low is None and est.high is None, est
     assert est.text == ("unknown = ~$0.008-0.14 priced: research (1 LLM call) + generate (1 format(s): linkedin_post) "
-                        "at medium + NOT PRICED: the cover's 1 concept call and up to 4 vision checks (gpt-4.1-mini)")
+                        "at medium + NOT PRICED: the cover's 1 concept call and up to 4 vision checks (gpt-4.1-mini), "
+                        "and the craft pass")
     assert any("every token billed at gpt-4o's output rate" in d for d in est.detail), est.detail
     assert any(d.startswith("not priced: the cover") for d in est.detail), est.detail
+    assert any(d.startswith("not priced: the single-shot arm's craft pass") for d in est.detail), est.detail
 
 
 #: Run under the workers interpreter: the producer's grant for one class lesson, the job the orchestrator creates.
@@ -620,7 +623,10 @@ def test_a_value_flag_never_reads_a_flag_or_nothing_as_its_value(harness, worker
     last = harness.run(*args, flag, env=env)
     assert last.returncode == 1 and f"{flag} needs a value. Nothing was sent." in last.stderr, (last.returncode,
                                                                                                last.stderr)
-    assert harness.calls() == [] and swallowed.stdout == last.stdout == ""
+    dashed = harness.run(*args, flag, "-h", env=env)   # the script's one single-dash flag
+    assert dashed.returncode == 1 and f"{flag} needs a value, not the flag -h. Nothing was sent." in dashed.stderr, (
+        dashed.returncode, dashed.stderr)
+    assert harness.calls() == [] and swallowed.stdout == last.stdout == dashed.stdout == ""
 
 
 SCRIPT_TEXT = (QA / "scripts" / "create_verification_job.sh").read_text()

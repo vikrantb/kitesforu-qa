@@ -69,8 +69,10 @@ COVER_DETAIL = ("not priced: the cover (kitesforu-covercore): 1 concept call (at
 
 
 def refuse_a_topic_the_worker_refuses(flow: str, topic: str) -> None:
-    if len(topic.strip()) < TOPIC_MIN_CHARS:
-        raise ValueError(f"--topic must hold at least {TOPIC_MIN_CHARS} characters besides spaces, got {topic!r}: "
+    # The writeup stage strips the topic before it counts; the class initiator counts it as sent.
+    counted, besides = (topic.strip(), " besides spaces") if flow == "writeup" else (topic, "")
+    if len(counted) < TOPIC_MIN_CHARS:
+        raise ValueError(f"--topic must hold at least {TOPIC_MIN_CHARS} characters{besides}, got {topic!r}: "
                          f"course-workers' {_FIRST_STAGE[flow]} refuses a shorter one, and the {flow} never runs")
 
 
@@ -227,7 +229,9 @@ WRITEUP_TIER = "medium"
 #: at most ``GPT_4O_USD_PER_MILLION[1] / [0]`` (4x) below it. The median is over the 47 writeups in the private backup
 #: of the writeups deleted on 2026-11-08 that record a booked cost (of 58; the most was $0.036). The planner-v2 figure
 #: is the one MEASURED writeup of that arm, a medium blog_post of 1500 words (kitesforu-course-workers COST_CHANGELOG
-#: 2026-07-27, against $0.0139 on the single-shot arm); a writeup may run either arm.
+#: 2026-07-27, against $0.0139 on the single-shot arm). Which arm a format takes is the serving worker's flags and
+#: the format's writing profile. The single-shot arm's craft pass, one gpt-4o call of at most 6,000 output tokens, is
+#: booked by none of them (``craft_pass.py`` discards its usage), so it is in no figure here.
 WRITEUP_BOOKED_MEDIAN_USD = 0.00836
 WRITEUP_PLANNER_V2_BOOKED_USD = 0.0360
 
@@ -244,7 +248,7 @@ def writeup_estimate(body: Dict[str, Any]) -> vj.Estimate:
     rate_in, rate_out = GPT_4O_USD_PER_MILLION
     lo, hi = WRITEUP_BOOKED_MEDIAN_USD, WRITEUP_PLANNER_V2_BOOKED_USD * rate_out / rate_in
     text = (f"unknown = ~{vj._span(lo, hi)} priced: research (1 LLM call) + generate ({len(formats)} format(s): "
-            f"{', '.join(formats)}) at {WRITEUP_TIER} + NOT PRICED: {COVER_CALLS}")
+            f"{', '.join(formats)}) at {WRITEUP_TIER} + NOT PRICED: {COVER_CALLS}, and the craft pass")
     detail = [
         f"tier: the writeup door stores none, so its stages run at {WRITEUP_TIER}",
         f"research + generate: the low end is the median booked cost of the 47 writeups in the private backup of the "
@@ -254,6 +258,8 @@ def writeup_estimate(body: Dict[str, Any]) -> vj.Estimate:
         f"gpt-4o's output rate: course-workers books every writeup token at the input rate. This format targets 250 "
         f"words",
         COVER_DETAIL,
+        "not priced: the single-shot arm's craft pass, 1 gpt-4o call of at most 6,000 output tokens (about $0.06 at "
+        "that cap), which course-workers books none of",
     ]
     return vj.Estimate(text=text, low=None, high=None, detail=detail)
 

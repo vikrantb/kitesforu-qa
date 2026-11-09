@@ -25,7 +25,8 @@ checks, gpt-4.1-mini), which is not priced because the code caps no candidate im
 and no provider, not priced because this script carries no Cloud Run rate. A `--scorm-export <class_id>` run is one
 `POST /v1/classes/<id>/export/scorm` for a finished class: compute only and no provider, charged to the owner as a
 flat credit fee, not priced for the same reason. Each estimate says what it leaves out, and every run of the four
-needs the ACK. The other modes send the bytes they sent before.
+needs the ACK. The other modes send the bytes they sent before, except that a value flag given a flag or nothing
+now refuses and sends nothing.
 
 **Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
 
