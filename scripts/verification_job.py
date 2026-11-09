@@ -603,11 +603,16 @@ def build_course_body(*, topic: str, duration: str, tier: str, style: str, langu
 
 
 def course_episode_body(course: Dict[str, Any], tier: str) -> Dict[str, Any]:
-    """One episode of ``course`` at ``tier``, in the keys :func:`estimate` and :func:`ack_decision` read. The
-    orchestrator creates each episode through ``POST /v1/podcasts`` with the course's episode duration and no visuals
-    key. ``visual_options`` here is not sent: it states the implied paid stills
+    """One episode of ``course`` at ``tier``: :func:`implied_episode_body` at the course's episode duration."""
+    return implied_episode_body(float(course.get("episode_duration_min") or 0), tier)
+
+
+def implied_episode_body(duration_min: float, tier: str) -> Dict[str, Any]:
+    """One episode an orchestrator creates on its owner's behalf, in the keys :func:`estimate` and
+    :func:`ack_decision` read. The course and class orchestrators each create one through ``POST /v1/podcasts`` with
+    the parent's duration and no visuals key. ``visual_options`` here is not sent: it states the implied paid stills
     (:data:`COURSE_EPISODE_IMPLIED_STILLS`), so the estimate and the ACK count what the episode may buy."""
-    return {"quality_tier": tier, "duration_min": float(course.get("episode_duration_min") or 0),
+    return {"quality_tier": tier, "duration_min": float(duration_min),
             "visual_options": {"real_images": True, "max_images": COURSE_EPISODE_IMPLIED_STILLS, "motion_clips": 0}}
 
 
@@ -983,19 +988,7 @@ def _course_plan(args: argparse.Namespace) -> Dict[str, Any]:
                                            style=args.style, language=args.language))
     sent = json.loads(payload)   # as in _plan: the estimate and the ACK decision read the bytes curl sends
     course_episode_tiers(sent["quality_tier"])   # the tier rule first: a premium ask is refused for what it is
-    if not args.workers_src:
-        raise PricingUnavailable("each episode may buy paid stills, and no --workers-src was given to price them")
-    noise = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
-            image_quote = quote_paid_images(_workers(args.workers_src))
-    except Exception as exc:
-        tail = "\n".join(noise.getvalue().strip().splitlines()[-15:])
-        if tail:
-            print(f"(workers output before the failure)\n{tail}", file=sys.stderr)
-        if isinstance(exc, PricingUnavailable):
-            raise
-        raise PricingUnavailable(f"the workers selector raised {type(exc).__name__}: {exc}") from exc
+    image_quote = episode_stills_quote(args.workers_src)
     tiers = course_episode_tiers(sent["quality_tier"])
     needs_ack, reason = course_ack_decision(sent)
     est = course_estimate(sent, images=image_quote)
@@ -1010,6 +1003,24 @@ def _course_plan(args: argparse.Namespace) -> Dict[str, Any]:
     return {"payload": payload, "est": est.text, "est_low": est.low, "est_high": est.high,
             "est_detail": detail, "needs_ack": needs_ack, "ack_reason": reason, "warnings": warn,
             "course_episodes": sent["total_episodes"], "episode_tiers": " and ".join(tiers)}
+
+
+def episode_stills_quote(workers_src: str) -> ImageQuote:
+    """The producer's price for the paid stills an orchestrated episode may buy, with the producer's own output kept
+    off stdout (which carries only the plan's JSON) and shown only when pricing fails, when it explains something."""
+    if not workers_src:
+        raise PricingUnavailable("each episode may buy paid stills, and no --workers-src was given to price them")
+    noise = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(noise), contextlib.redirect_stderr(noise):
+            return quote_paid_images(_workers(workers_src))
+    except Exception as exc:
+        tail = "\n".join(noise.getvalue().strip().splitlines()[-15:])
+        if tail:
+            print(f"(workers output before the failure)\n{tail}", file=sys.stderr)
+        if isinstance(exc, PricingUnavailable):
+            raise
+        raise PricingUnavailable(f"the workers selector raised {type(exc).__name__}: {exc}") from exc
 
 
 def _read_snapshot(arg: str) -> Any:

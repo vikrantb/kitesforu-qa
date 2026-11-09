@@ -2,6 +2,34 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-11-07 — the verification job can create the smallest class, writeup, course video export and SCORM export (`--class`: ~$0.55-6.42 a run at medium; `--writeup`: ~$0.008-0.14; each plus its cover's unpriced calls; `--course-video-export` and `--scorm-export`: unpriced; every run ACK-gated; $0 change on every other run)
+
+**Files:** `scripts/create_verification_job.sh`, `scripts/verification_flows.py` (new), `scripts/verification_job.py`,
+`tests/test_verification_flows.py` (new), `tests/test_create_verification_job.py`, this entry.
+
+**What each run buys.** A `--class` run is `POST /v1/classes` (a K-12 class at Grade 5: 3 lessons x `--duration`, 3
+questions each, autopilot) and its one trigger, `POST /v1/classes/<id>/curriculum/generate`: one syllabus LLM call,
+then 3 lesson podcast jobs and 4 quiz LLM calls. The class door stores no tier, so each lesson runs at medium; a lesson
+sends no visuals key and its owner is a real account, so it is priced as a course episode is, with up to 4 paid stills
+through the producer's own still quote: ~$0.16-2.07 a lesson at the 10 s default, ~$0.49-6.20 for the three (workers
+origin/main `db8ff789`). The five LLM calls are gpt-4o, ~$0.060-0.22: the low end is their medians in the private
+backup of the classes deleted on 2026-11-08 (14 syllabus and 131 quiz calls record their tokens), the high end every
+output at the code's 4000-token cap. That is ~$0.55-6.42 a run.
+A `--writeup` run is `POST /v1/writeups` (one format, `linkedin_post`) and `POST /v1/writeups/<id>/generate`: one
+research call and the format's generate passes, at medium, ~$0.008-0.14. The low end is the median booked cost of the
+47 writeups in the same backup that record one. The high end is the one measured planner-v2 writeup ($0.036 booked,
+kitesforu-course-workers COST_CHANGELOG 2026-07-27) with every token at gpt-4o's output rate, because course-workers
+books every writeup token at the input rate. Neither prices the cover (covercore: 1 concept call and up to 4 vision
+checks, gpt-4.1-mini), which is not priced because the code caps no candidate image's size. A
+`--course-video-export <course_id>` run is one `POST /v1/courses/<id>/continuous-video`: compute only, zero credits
+and no provider, not priced because this script carries no Cloud Run rate. A `--scorm-export <class_id>` run is one
+`POST /v1/classes/<id>/export/scorm` for a finished class: compute only and no provider, charged to the owner as a
+flat credit fee, not priced for the same reason. Each estimate says what it leaves out, and every run of the four
+needs the ACK. The other modes send the bytes they sent before, except that a value flag given a flag or nothing
+now refuses and sends nothing.
+
+**Pricing-page implication:** none. No product's per-unit cost moves; this records what the verification tool buys.
+
 ## 2026-11-03 — the acceptance gate grades a job that asked for no visuals as its audio (cost-NEUTRAL per unit)
 
 **Files:** `scripts/acceptance_gate.py`, `scripts/verification_job.py` (the producer's reasons and its one workers

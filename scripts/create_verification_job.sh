@@ -25,6 +25,30 @@
 #     but a user_… id: each episode is created on the owner's behalf, and the creation gate is expected to refuse
 #     an owner Clerk has no email for (the key's own identity, any test_… id). It prices
 #     through the workers tree, as a purchase does.
+#   ./create_verification_job.sh --class --on-behalf-of user_…  # the smallest CLASS the api accepts (POST /v1/classes:
+#     a K-12 class at Grade 5, 3 lessons x --duration, 3 questions each, autopilot), then its one trigger, POST
+#     /v1/classes/<id>/curriculum/generate: in autopilot the syllabus worker starts the lessons itself. It takes
+#     --topic --duration --style --language, the owner flags and --dry-run. Each lesson runs at medium (the class door
+#     stores no tier) and is priced as a course episode is, through the workers tree, and the syllabus and quiz LLM
+#     calls from their measurements and the code's caps; the cover's calls are NOT priced, so it needs the ACK. Like
+#     --course, it refuses any owner but a user_… id: the orchestrator creates each lesson on the owner's behalf.
+#   ./create_verification_job.sh --writeup                    # the smallest WRITEUP (POST /v1/writeups, one format,
+#     linkedin_post), then POST /v1/writeups/<id>/generate. It takes --topic, the owner flags and --dry-run. It runs
+#     at medium, its research and generate calls are priced from the booked writeups, and the cover's calls are NOT,
+#     so it needs the ACK. --class refuses a --topic under 3 characters, and --writeup one under 3 once its spaces
+#     are stripped, as their first workers count them.
+#   ./create_verification_job.sh --course-video-export <course_id> --on-behalf-of user_…  # POST
+#     /v1/courses/<course_id>/continuous-video with no body, as the course's owner: one video stitched from the
+#     lesson masters the course already rendered. Compute only and zero credits, but NOT priced (this script carries
+#     no Cloud Run rate), so it needs the ACK. The api answers 409, nothing queued, unless 2 or more lessons have a
+#     video master. It takes the owner flags and --dry-run.
+#   ./create_verification_job.sh --scorm-export <class_id> --on-behalf-of user_…  # POST
+#     /v1/classes/<class_id>/export/scorm with {} (the request model's defaults), as the class's owner: the class
+#     zipped as a SCORM package by the lms-export worker. Compute only, charged in credits, NOT priced (no Cloud Run
+#     rate here), so it needs the ACK. The api answers 400, nothing charged, unless the class is completed or partial.
+#     It takes the owner flags and --dry-run, and is read back on GET /v1/scorm/packages/<package_id>.
+#   Each of these four refuses --wait and every flag its request cannot carry, and after the POST reads back what
+#   the api STORED (GET <its read route>, printed as its status URL).
 #
 # The estimate is computed FROM the body that is sent. A purchase (clips, stills, relimage bases,
 # character plates) is priced by the kitesforu-workers functions that select and price it, at origin/main
@@ -38,11 +62,14 @@
 #                        job id in the reply), OR the script stopped for a reason it did not explain once the
 #                        POST had gone out (a failing command, or SIGTERM/SIGHUP/SIGINT). An owner short on
 #                        CREDITS lands here too: the api answers that refusal with HTTP 500, not a 4xx.
+#                        A class or writeup whose generation trigger's outcome is unknown is here too: the draft
+#                        exists (its id is printed) and its generation MAY have started.
 #                        Check the owner's library before re-running.
 #   THE JOB WAS CREATED (its id is printed): 0 ok · 4 --wait ran out (NOT a result) · 5 ended with
-#                        nothing to grade, or a course whose curriculum generation did not start
-#                        · 6 the api stored LESS than asked · 7 the stored request could
-#                        not be read · 9 its status could not be read while waiting
+#                        nothing to grade, or a course whose curriculum generation did not start, or a class or
+#                        writeup whose generation trigger the api refused (a $0 draft; nothing charged)
+#                        · 6 the api stored LESS than asked (a class, writeup or export: other than sent)
+#                        · 7 the stored request could not be read · 9 its status could not be read while waiting
 #   A signal BEFORE the POST exits 128+N, the shell's own convention: nothing was sent.
 #
 # Auth: TEST_API_KEY env var, or fetched from Secret Manager (kitesforu-dev).
@@ -71,7 +98,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 WORKERS_TREE=""
 POST_STATE="unsent"   # unsent | sent (outcome unknown) | rejected (HTTP 4xx) | created (JOB_ID known)
 JOB_ID=""
-NOUN="job"            # what the POST creates: a podcast "job", or with --course a "course" (JOB_ID is its id)
+NOUN="job"            # what the POST creates: a podcast "job", a "course", a "class"... (JOB_ID is its id)
 EXPLAINED="false"
 SIGNALLED=""
 SLEEP_PID=""
@@ -100,8 +127,8 @@ trap 'on_signal HUP 129' HUP
 trap 'on_signal INT 130' INT
 # The kitesforu-workers checkout whose origin/main prices a purchased clip or still: its own
 # selector and catalog, read from a temporary `git archive`, never from the working tree (a lane's
-# feature branch is not what serves). Read when the job buys clips, and for every --course (its episodes may buy
-# paid stills). Same root as ACK_FILE.
+# feature branch is not what serves). Read when the job buys clips, and for every --course and --class (their
+# episodes and lessons may buy paid stills). Same root as ACK_FILE.
 WORKERS_REPO="${KFU_WORKERS_REPO:-/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-workers}"
 # THE INTERPRETER THAT IMPORTS THE PRODUCER IS THE PRODUCER'S. Pricing imports workers.*, so it needs the
 # workers dependencies; it used to run under whichever python3 was first on PATH, and a bare PATH refused
@@ -151,16 +178,43 @@ DRY_RUN="false"     # --dry-run: print the POST URL, headers, body and estimate,
 PAID_STILLS="on"    # --paid-stills on|off: with --motion-clips, buy paid stills too (on) or clips only
                     # (off). How many, and why, is decided beside the body: verification_job.py.
 PAID_STILLS_GIVEN="false"  # set when --paid-stills is passed explicitly (validated below)
-COURSE="false"      # --course: POST /v1/courses, the smallest course the api accepts (verification_job.py course-plan)
+# What the run creates: a podcast; --course, the smallest course (verification_job.py course-plan); --class, --writeup,
+# --course-video-export <course_id> or --scorm-export <class_id>, each the smallest request its door accepts
+# (verification_flows.py plan).
+MODE="podcast"
+MODE_FLAG=""        # the flag that chose MODE, for the messages that name it
+TARGET_ID=""        # the course or class an export acts on
+GIVEN=()            # every --flag passed, so a mode can refuse the ones its request cannot carry
+set_mode() {        # set_mode <mode> <its flag>
+  if [[ "$MODE" != "podcast" && "$MODE" != "$1" ]]; then
+    echo "$MODE_FLAG and $2 are two different runs: pick one. Nothing was sent." >&2
+    exit 1
+  fi
+  MODE="$1"; MODE_FLAG="$2"
+}
+# A flag that takes a value refuses a missing value, and a value that is itself a flag: `--topic --dry-run` would
+# otherwise read --dry-run as the topic and send the run the dry run was meant to rehearse, and a flag left last
+# would end the script on bash's own unbound-variable error, which the EXIT trap turns into exit 0.
+require_value() {   # require_value <flag> [<the words after it>...]
+  if [[ $# -lt 2 ]]; then
+    echo "$1 needs a value. Nothing was sent." >&2
+    exit 1
+  fi
+  if [[ "$2" == -* ]]; then
+    echo "$1 needs a value, not the flag $2. Nothing was sent." >&2
+    exit 1
+  fi
+}
 
 while [[ $# -gt 0 ]]; do
+  [[ "$1" == --* ]] && GIVEN+=("$1")
   case "$1" in
-    --topic)    TOPIC="$2"; shift 2 ;;
-    --duration) DURATION="$2"; shift 2 ;;
-    --tier)     TIER="$2"; shift 2 ;;
-    --style)    STYLE="$2"; shift 2 ;;
-    --language) LANGUAGE="$2"; shift 2 ;;
-    --format)   FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
+    --topic)    require_value "$@"; TOPIC="$2"; shift 2 ;;
+    --duration) require_value "$@"; DURATION="$2"; shift 2 ;;
+    --tier)     require_value "$@"; TIER="$2"; shift 2 ;;
+    --style)    require_value "$@"; STYLE="$2"; shift 2 ;;
+    --language) require_value "$@"; LANGUAGE="$2"; shift 2 ;;
+    --format)   require_value "$@"; FORMAT="$2"; shift 2 ;;  # drama|panel — exercises multi-voice casting cheaply
     --short)    SHORT="true"; shift ;;   # Social Short path (9:16, kinetic captions, assembly)
     --visuals)  VISUALS="true"; shift ;;
     --visuals-auto) VISUALS="auto"; shift ;;  # T3-SAFE: send NEITHER wants_visuals nor
@@ -183,18 +237,25 @@ while [[ $# -gt 0 ]]; do
                     # _is_nonfiction=True, which makes it LOOK like an ordering race; it is not,
                     # the blueprint simply did not exist at decision time.
                     # ⇒ pair it with --duration (>0.5 needs the FOUNDER_SPEND_ACK file).
-    --content-rating) CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
-    --motion-clips) MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
-    --paid-stills)  PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
+    --content-rating) require_value "$@"; CONTENT_RATING="$2"; shift 2 ;;  # g|pg|pg_13|r — sets body.content_rating
+    --motion-clips) require_value "$@"; MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
+    --paid-stills)  require_value "$@"; PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
     --dry-run)  DRY_RUN="true"; shift ;;
-    --course)   COURSE="true"; shift ;;
+    --course)   set_mode course --course; shift ;;
+    --class)    set_mode class --class; shift ;;
+    --writeup)  set_mode writeup --writeup; shift ;;
+    # The id is the next word unless that word is a flag: `--course-video-export --dry-run` must never read
+    # --dry-run as the id and send the POST the dry run was meant to rehearse. A missing id is refused at the plan.
+    --course-video-export|--scorm-export)
+                if [[ "$1" == --scorm-export ]]; then set_mode scorm-export "$1"; else set_mode video-export "$1"; fi
+                if [[ $# -gt 1 && "$2" != -* ]]; then TARGET_ID="$2"; shift 2; else shift; fi ;;
     --wait)     WAIT="true"; shift ;;
-    --source-writeup) SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
-    --on-behalf-of) ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
+    --source-writeup) require_value "$@"; SOURCE_WRITEUP="$2"; shift 2 ;;  # C3-4: verify figure ADOPTION from a writeup
+    --on-behalf-of) require_value "$@"; ON_BEHALF_OF="$2"; shift 2 ;;  # a CLERK USER ID (user_…/test_…), NOT an email.
                     # VISIBILITY (2026-08-28): the default test_user_e2e's jobs NEVER render in the
                     # signed-in Playwright library (different account). A job that must be OBSERVED
                     # on the beta surface needs --on-behalf-of <the browser test account's user_… id>.
-    --on-behalf-of-email) ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
+    --on-behalf-of-email) require_value "$@"; ON_BEHALF_OF_EMAIL="$2"; shift 2 ;;  # the ADDRESS, sent as X-On-Behalf-Of-Email
     # Print the header comment block: every line up to the first that is not a comment, minus the
     # shebang. A fixed `head -12` was a duplicated constant coupled to the header's length, and
     # two new header lines pushed `--dry-run`, the short-form caveat and `Auth:` out of the help
@@ -203,6 +264,9 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+# A class, writeup or export is one of verification_flows.py's flows; a podcast and a course are not.
+FLOW=""
+case "$MODE" in class|writeup|video-export|scorm-export) FLOW="$MODE" ;; esac
 
 # ---- Duration: a number of minutes, or nothing below means anything ------------------------
 # A non-numeric value used to reach the clip warning first ("for a 0s episode") and die later at the
@@ -212,7 +276,7 @@ done
 # ---- --course takes only what a course request carries ------------------------------------------
 # Every other flag shapes a podcast body or polls a podcast's /status, so with --course it would do nothing:
 # refused here, before anything is planned or sent (the same rule as --paid-stills without clips below).
-if [[ "$COURSE" == "true" ]]; then
+if [[ "$MODE" == "course" ]]; then
   _podcast_only=()
   [[ "$WAIT" == "true" ]] && _podcast_only+=("--wait")
   [[ "$VISUALS" == "true" ]] && _podcast_only+=("--visuals")
@@ -241,6 +305,43 @@ if [[ "$COURSE" == "true" ]]; then
   fi
 fi
 
+# ---- --class, --writeup and the two exports take only what their request carries -------------------------------
+# Each names the flags it takes, and any other flag passed would do nothing to its request: refused here, before
+# anything is planned or sent. --tier is one: neither the class nor the writeup door has a tier field (each runs at
+# medium), and an export sends no field of its own.
+_takes=""
+case "$MODE" in
+  class)        _takes="--class --topic --duration --style --language"
+                _carries="the topic, the lesson duration, the style, the language and the owner" ;;
+  writeup)      _takes="--writeup --topic"
+                _carries="the topic and the owner" ;;
+  video-export) _takes="--course-video-export"
+                _carries="the course id and the owner" ;;
+  scorm-export) _takes="--scorm-export"
+                _carries="the class id and the owner" ;;
+esac
+if [[ -n "$_takes" ]]; then
+  _takes="$_takes --on-behalf-of --on-behalf-of-email --dry-run"
+  _cannot=()
+  for _f in ${GIVEN[@]+"${GIVEN[@]}"}; do
+    [[ " $_takes " == *" $_f "* ]] || _cannot+=("$_f")
+  done
+  if (( ${#_cannot[@]} > 0 )); then
+    echo "$MODE_FLAG does not take ${_cannot[*]}: its request carries only $_carries. Nothing was sent." >&2
+    [[ " ${_cannot[*]} " == *" --wait "* ]] \
+      && echo "To follow it, read the status URL it prints (the --wait loop reads a podcast's)." >&2
+    exit 1
+  fi
+fi
+# The class orchestrator creates each lesson as --course's creates each episode: SERVICE_API_KEY and X-On-Behalf-Of
+# alone, so the same owner rule holds, for the same reason (expected from the code; not observed on a live class).
+if [[ "$MODE" == "class" && "$ON_BEHALF_OF" != user_* ]]; then
+  echo "--class needs --on-behalf-of <user_…>: each lesson is created on its owner's behalf, and the creation gate is" >&2
+  echo "expected to refuse an owner with no Clerk email, which the key's own identity and test_… ids are (from the" >&2
+  echo "code and the current gate config; not observed on a live class). Nothing was sent." >&2
+  exit 1
+fi
+
 # ---- Motion clips: validate, and never let the $0 default opt the job OUT of visuals --------
 [[ "$MOTION_CLIPS" =~ ^[0-3]$ ]] || { echo "--motion-clips must be 0-3 (the API's VisualOptions bound), got: $MOTION_CLIPS" >&2; exit 1; }
 if [[ "$MOTION_CLIPS" != "0" && "$VISUALS" == "false" ]]; then
@@ -267,11 +368,11 @@ if [[ "$PAID_STILLS_GIVEN" == "true" && "$MOTION_CLIPS" == "0" ]]; then
 fi
 
 # ---- The producer: a temporary tree of kitesforu-workers origin/main, under the workers interpreter ---
-# Read when the job buys clips (and the stills that ride with them), to price them; for every --course, whose
-# episodes may buy paid stills; and before a --wait for a video, to read the producer's by-design no-video
-# reasons. WORKERS_SRC=<tree>/src overrides it, and the tree's ../config/model_catalog.csv is the catalog. A
-# podcast that buys nothing priced and waits for no video needs no tree, so the T3 default path reads no repo
-# and runs no git.
+# Read when the job buys clips (and the stills that ride with them), to price them; for every --course and --class,
+# whose episodes and lessons may buy paid stills; and before a --wait for a video, to read the producer's
+# by-design no-video reasons. WORKERS_SRC=<tree>/src overrides it, and the tree's ../config/model_catalog.csv is the
+# catalog. A podcast that buys nothing priced and waits for no video needs no tree, so the T3 default path reads no
+# repo and runs no git.
 WORKERS_SRC_FOR_PLAN=""
 CATALOG_LABEL=""
 # `ensure_workers_tree "<what it is for>"`: sets WORKERS_SRC_FOR_PLAN (and CATALOG_LABEL) once, or says why it
@@ -305,9 +406,9 @@ if [[ "$MOTION_CLIPS" != "0" ]]; then
   ensure_workers_tree "price the clips this job buys" \
     || { echo "Refusing the purchase: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
-elif [[ "$COURSE" == "true" ]]; then
+elif [[ "$MODE" == "course" || "$MODE" == "class" ]]; then
   ensure_workers_tree "price the paid stills each episode may buy" \
-    || { echo "Refusing the course: it cannot be priced. Nothing was sent." >&2; exit 1; }
+    || { echo "Refusing the $MODE: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
 fi
 
@@ -317,11 +418,16 @@ fi
 # and shared nothing with it: round 2 began buying stills while the printed estimate stayed
 # byte-identical (qa #175 round-2 cost D1/D2). A purchase it cannot price is a refusal (exit 1),
 # not a guess.
-if [[ "$COURSE" == "true" ]]; then
+if [[ "$MODE" == "course" ]]; then
   PLAN=$("$PLAN_PY" "$HERE/verification_job.py" course-plan \
     "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--language=$LANGUAGE" \
     "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
     || { echo "Refusing: the course request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
+elif [[ -n "$FLOW" ]]; then
+  PLAN=$("$PLAN_PY" "$HERE/verification_flows.py" plan "--flow=$FLOW" \
+    "--topic=$TOPIC" "--duration=$DURATION" "--style=$STYLE" "--language=$LANGUAGE" "--target-id=$TARGET_ID" \
+    "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
+    || { echo "Refusing: the $MODE_FLAG request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 else
   PLAN=$("$PLAN_PY" "$HERE/verification_job.py" plan \
     "--topic=$TOPIC" "--duration=$DURATION" "--tier=$TIER" "--style=$STYLE" "--visuals=$VISUALS" \
@@ -343,6 +449,17 @@ PLAN_WARNINGS=$(plan_field warnings)
 NEEDS_ACK=$(plan_field needs_ack)
 REASON=$(plan_field ack_reason)
 [[ -n "$PLAN_WARNINGS" ]] && printf '  %s\n' "$PLAN_WARNINGS" >&2
+# A flow's doors come from its plan, beside its body: where it is POSTed, the reply key naming what it made, the
+# trigger that starts a draft's generation (and the phrase its reply carries when it did), and the read route.
+TRIGGER_PATH=""
+if [[ -n "$FLOW" ]]; then
+  NOUN=$(plan_field noun)
+  CREATE_PATH=$(plan_field create_path)
+  ID_KEY=$(plan_field id_key)
+  TRIGGER_PATH=$(plan_field trigger_path)
+  STARTED=$(plan_field started)
+  READ_PATH=$(plan_field read_path)
+fi
 print_est_detail() { [[ -n "$EST_DETAIL" ]] && while IFS= read -r _l; do echo "    $_l" >&2; done <<< "$EST_DETAIL"; return 0; }
 
 # ---- Ladder gate: anything beyond T3 needs a fresh founder ack -------------------
@@ -378,16 +495,23 @@ POST_URL="$API_BASE/v1/podcasts"
 # What the POST creates, the reply key that names it, and the route its status is read on.
 ID_KEYS=(job_id id)
 STATUS_ROUTE="podcasts"
-if [[ "$COURSE" == "true" ]]; then
+if [[ "$MODE" == "course" ]]; then
   POST_URL="$API_BASE/v1/courses"
   NOUN="course"
   ID_KEYS=(course_id)
   STATUS_ROUTE="courses"
+elif [[ -n "$FLOW" ]]; then
+  POST_URL="$API_BASE$CREATE_PATH"
+  ID_KEYS=("$ID_KEY")
 fi
+# A route with the id the create's reply named in place of "{id}".
+route_for() { printf '%s%s' "$API_BASE" "${1//"{id}"/$2}"; }
 
-if [[ "$COURSE" == "true" ]]; then
+if [[ "$MODE" == "course" ]]; then
   echo "Creating verification course: $(plan_field course_episodes) episodes x ${DURATION}min, quality_tier=$TIER asked," \
        "episodes priced at $(plan_field episode_tiers), lang=$LANGUAGE est=$EST" >&2
+elif [[ -n "$FLOW" ]]; then
+  echo "Creating verification $NOUN: $(plan_field summary) est=$EST" >&2
 else
   echo "Creating verification job: tier=$TIER duration=${DURATION}min visuals=$VISUALS lang=$LANGUAGE est=$EST" >&2
 fi
@@ -455,10 +579,14 @@ if [[ "$DRY_RUN" == "true" ]]; then
       [[ "$_h" == "-H" ]] && continue
       if [[ "$_h" == Authorization:* ]]; then echo "  -H 'Authorization: Bearer <TEST_API_KEY redacted>'"; else echo "  -H '$_h'"; fi
     done
+    [[ -z "$PAYLOAD" ]] && echo "  (no body)"
+    if [[ -n "$TRIGGER_PATH" ]]; then
+      echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (no body; the same headers minus Content-Type)"
+    fi
   } >&2
   # The BODY alone goes to stdout, so `--dry-run 2>/dev/null | jq .` works. Every banner above is
-  # on stderr for the same reason (round-1 code critic NIT).
-  echo "$PAYLOAD"
+  # on stderr for the same reason (round-1 code critic NIT). An export's POST has no body, so nothing.
+  if [[ -n "$PAYLOAD" ]]; then echo "$PAYLOAD"; fi
   exit 0
 fi
 
@@ -467,8 +595,10 @@ fi
 # A transport failure or a timeout can follow the api's write, so it is "a job MAY exist" (exit 8), never
 # a plain failure a caller would retry.
 POST_STATE="sent"
+DATA_ARGS=()
+[[ -n "$PAYLOAD" ]] && DATA_ARGS=(-d "$PAYLOAD")
 POST_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$POST_URL" "${POST_HDR_ARGS[@]}" \
-  -d "$PAYLOAD" -w $'\n%{http_code}') || {
+  ${DATA_ARGS[@]+"${DATA_ARGS[@]}"} -w $'\n%{http_code}') || {
   _rc=$?
   _how="curl exit $_rc"; (( _rc == 28 )) && _how="timed out, curl exit 28"
   echo "POST failed at the transport level ($_how). The $NOUN MAY have been created and charged:" >&2
@@ -490,6 +620,10 @@ if [[ -z "$JOB_ID" ]]; then
     # that can follow a create, the Idempotency-Key 409, needs a header this script does not send.
     # The course door's 4xx are of the same kind: auth (401), the creation gate (403) and request validation (422)
     # all run before create_course_endpoint, which answers every error of its own with a 500 (routes/courses/crud.py).
+    # So are the class and writeup doors' (auth, validation and the rate limit before the handler, which answers its
+    # own errors with a 500: routes/classes/crud.py, routes/writeups/crud.py), the video export's 404 and 409, raised
+    # before its dispatch transaction writes anything (services/exports/continuous_video.py), and the SCORM export's
+    # 400, 402, 403 and 404, all raised before its charge and its package record (routes/scorm/packages.py).
     POST_STATE="rejected"
     echo "The api REJECTED the request (HTTP $HTTP_CODE) before creating a $NOUN; nothing was charged. Response:" >&2
     echo "$RESP" >&2
@@ -501,12 +635,18 @@ if [[ -z "$JOB_ID" ]]; then
   finish 8
 fi
 POST_STATE="created"
+STATUS_URL="$API_BASE/v1/$STATUS_ROUTE/$JOB_ID/status"
+[[ -n "$FLOW" ]] && STATUS_URL=$(route_for "$READ_PATH" "$JOB_ID")
 echo "${ID_KEYS[0]}=$JOB_ID  (est $EST)"
-echo "status: $API_BASE/v1/$STATUS_ROUTE/$JOB_ID/status"
+echo "status: $STATUS_URL"
+# An export already ready for this exact set of lessons answers 200 with its read body: nothing new was queued.
+if [[ "$FLOW" == "video-export" && "$HTTP_CODE" == "200" ]]; then
+  echo "  already ready for this exact set of lessons: nothing was queued, and the stored export is the one to grade" >&2
+fi
 # A course is created whether or not its curriculum generation starts: create_course_endpoint kicks it fail-open and
 # says which in the reply's message ("Course created — curriculum generation started." or "... Generate curriculum to
 # proceed.", kitesforu-api routes/courses/crud.py). A draft that never starts runs nothing, so it is exit 5.
-if [[ "$COURSE" == "true" ]]; then
+if [[ "$MODE" == "course" ]]; then
   _kick=$(printf '%s' "$RESP" | python3 -c '
 import json, sys
 message = str(json.load(sys.stdin).get("message") or "")
@@ -518,6 +658,74 @@ print("started" if "curriculum generation started" in message.lower() else (mess
   fi
 fi
 
+# ---- A class or writeup: the trigger that starts the draft's generation ----------------------------------------
+# The create made a $0 draft, and this POST is what runs it. A writeup's trigger charges its credits; a class's
+# charges none (start_curriculum_generation deducts nothing; the class's charge is POST /v1/classes/<id>/generate, which
+# autopilot never calls). Its outcome is classified as the create's is: a 4xx refused it before anything ran or was
+# charged (the creation gate's 403, a state 400, the rate limit's 429), so the draft exists and nothing will run:
+# exit 5. A transport failure, a 5xx, or a reply that does not say generation started leaves it unknown whether it
+# started: exit 8, which never invites a re-run.
+if [[ -n "$TRIGGER_PATH" ]]; then
+  TRIGGER_URL=$(route_for "$TRIGGER_PATH" "$JOB_ID")
+  TRIGGER_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$TRIGGER_URL" "${HDR_ARGS[@]}" \
+    -w $'\n%{http_code}') || {
+    _rc=$?
+    _how="curl exit $_rc"; (( _rc == 28 )) && _how="timed out, curl exit 28"
+    echo "The $NOUN WAS created, but its generation trigger failed at the transport level ($_how): its generation MAY" >&2
+    echo "have started. Read $STATUS_URL before re-running." >&2
+    finish 8
+  }
+  TRIGGER_CODE="${TRIGGER_OUT##*$'\n'}"
+  TRIGGER_RESP="${TRIGGER_OUT%$'\n'*}"
+  _started=$(printf '%s' "$TRIGGER_RESP" | python3 -c '
+import json, sys
+message = str(json.load(sys.stdin).get("message") or "")
+print("yes" if sys.argv[1] in message.lower() else "no")' "$STARTED" 2>/dev/null) || _started="no"
+  if [[ "$TRIGGER_CODE" =~ ^2[0-9][0-9]$ && "$_started" == "yes" ]]; then
+    echo "  the $NOUN's generation started (POST $TRIGGER_URL, HTTP $TRIGGER_CODE)" >&2
+  elif [[ "$TRIGGER_CODE" =~ ^4[0-9][0-9]$ ]]; then
+    echo "The $NOUN WAS created as a \$0 draft, but the api REFUSED its generation trigger (HTTP $TRIGGER_CODE): nothing" >&2
+    echo "will run, and nothing was charged. Response:" >&2
+    echo "$TRIGGER_RESP" >&2
+    finish 5
+  else
+    echo "The $NOUN WAS created, but its generation trigger answered HTTP ${TRIGGER_CODE:-none} without saying it started:" >&2
+    echo "its generation MAY have started. Read $STATUS_URL before re-running. Response:" >&2
+    echo "$TRIGGER_RESP" >&2
+    finish 8
+  fi
+fi
+
+# ---- A class, writeup or export: read back what the api STORED --------------------------------------------------
+# The same three reads as a T4's, on the flow's own read route (the status URL printed above), compared with the body
+# sent by verification_flows.py check-stored: 6 = it stored other than was sent, 7 = it could not be read. In both the
+# class, writeup or export WAS created.
+if [[ -n "$FLOW" ]]; then
+  _readback="unread"
+  DIFFERS=""
+  for _attempt in 1 2 3; do
+    _snap=$(curl -sS --connect-timeout 10 --max-time 20 "$STATUS_URL" "${HDR_ARGS[@]}" 2>/dev/null) || _snap=""
+    if DIFFERS=$(printf '%s' "$_snap" | python3 "$HERE/verification_flows.py" check-stored "--flow=$FLOW" \
+                   "--requested=$PAYLOAD" "--created-id=$JOB_ID" "--target-id=$TARGET_ID" --snapshot - 2>/dev/null); then
+      _readback="read"
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$_readback" != "read" ]]; then
+    echo "UNVERIFIED: $NOUN $JOB_ID WAS created, but what the api stored could not be read back (3 attempts)." >&2
+    echo "Read $STATUS_URL before grading it, and before re-running anything." >&2
+    finish 7
+  fi
+  if [[ -n "$DIFFERS" ]]; then
+    echo "THE API STORED OTHER THAN THIS SCRIPT SENT. The $NOUN $JOB_ID WAS created as stored:" >&2
+    while IFS= read -r _l; do echo "  $_l" >&2; done <<< "$DIFFERS"
+    echo "The estimate above does not describe it. Read $STATUS_URL before re-running." >&2
+    finish 6
+  fi
+  echo "  read back: the api stored the $NOUN as sent" >&2
+fi
+
 # ---- Read back what the api STORED, for every run the ACK gate priced -------------------------
 # The api clamps a FREE subscription silently. `podcast_services.create_job` drops visual_options
 # (`visual_options_resolved = None` when not tier_is_paid) and lowers any quality above `medium`,
@@ -525,8 +733,8 @@ fi
 # will never render. `GET /status` echoes the stored request (`inputs`, `quality_tier`).
 # 6 = stored less than asked; 7 = could not read it. In both the job WAS created.
 # A course has nothing here to read back: /v1/podcasts/<id>/status does not serve a course, and the estimate above
-# prices every tier its episodes can run at.
-if [[ "$NEEDS_ACK" == "true" && "$COURSE" != "true" ]]; then
+# prices every tier its episodes can run at. A class, writeup or export was read back on its own route above.
+if [[ "$NEEDS_ACK" == "true" && "$MODE" == "podcast" ]]; then
   _readback="unread"
   SHORTFALL=""
   for _attempt in 1 2 3; do
