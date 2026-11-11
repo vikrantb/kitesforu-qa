@@ -1014,7 +1014,7 @@ def test_the_quote_never_reads_a_sheet_catalog(tmp_path, monkeypatch):
     # Read into a local first: pytest explains a failing assert by printing every object in it, and
     # os.environ there would print the whole environment.
     sheet_id = os.environ.get("MODEL_CATALOG_SHEET_ID")
-    assert sheet_id is None
+    assert sheet_id is None, "MODEL_CATALOG_SHEET_ID survived the quote's import"
 
 
 @pytest.mark.parametrize("args,needle", [
