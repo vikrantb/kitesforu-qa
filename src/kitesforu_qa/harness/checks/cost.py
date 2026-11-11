@@ -6,6 +6,12 @@ chars, surfaced as the emerald 'actual' badge). These checks RECOMPUTE the expec
 the persisted tts_segment_logs and compare to what was reported — so the fix can NEVER silently
 regress (the harness is the discovery engine: a future change that re-introduces the over-report
 fails here).
+
+A RE-VOICED JOB CANNOT BE CHECKED AGAINST ITS LOGS. costs.tts counts every render of the run, and
+the logs keep the take that shipped: a regen's replaced or discarded take was billed and left no
+row. So when the record counts more renders than the logs hold, the expected cost is what the
+record says it billed (costs.tts_providers, characters per provider) at the real rates. That still
+catches a wrong price, and a record that leaves out a render the logs kept falls back to the logs.
 """
 # per-M-char USD rates — mirror kitesforu-workers cost_calculator._TTS_USD_PER_M_CHARS.
 from datetime import datetime, timezone
@@ -28,20 +34,65 @@ def _predates_reconcile(art) -> bool:
         return False
 
 
-def _expected_tts_from_logs(art):
-    """Recompute TTS cost from the REAL provider + chars per segment. None if nothing priceable."""
+def _is_billed(row) -> bool:
+    """Did a provider bill for this row? Not a failed row, and not a reused take: no provider was
+    called for it, and an earlier pass paid. Mirrors workers' job_cost_writer.is_billed_render."""
+    return isinstance(row, dict) and row.get("success") is not False and not row.get("reused")
+
+
+def _priced(chars_by_provider):
+    """USD for {provider: chars} at the real rates. None if nothing is priceable."""
     total = 0.0
     seen = False
-    for r in art.tts_segment_logs:
-        if not isinstance(r, dict) or r.get("success") is False:
-            continue
-        rate = _TTS_RATE.get(str(r.get("provider") or "").lower())
-        chars = int(r.get("text_length") or 0)
+    for provider, chars in chars_by_provider.items():
+        rate = _TTS_RATE.get(provider)
         if rate is None or chars <= 0:
             continue
         total += rate * chars / 1_000_000
         seen = True
     return total if seen else None
+
+
+def _billed_chars_in_logs(art):
+    chars_by_provider: dict[str, int] = {}
+    for r in art.tts_segment_logs:
+        if _is_billed(r):
+            provider = str(r.get("provider") or "").lower()
+            chars_by_provider[provider] = chars_by_provider.get(provider, 0) + int(r.get("text_length") or 0)
+    return chars_by_provider
+
+
+def _expected_tts_from_logs(art):
+    """Recompute TTS cost from the REAL provider + chars of each billed row. None if nothing priceable."""
+    return _priced(_billed_chars_in_logs(art))
+
+
+def _billed_chars_in_record(art):
+    """{provider: chars} the record says a re-voiced job billed; None when the logs can check it.
+
+    None unless the record counts more renders than the logs hold billed rows, names only
+    providers with a known rate, and holds at least what the logs kept: a record short of its own
+    logs, as when it names the wrong provider, is not believed over them."""
+    renders = ((art.costs.get("tts") or {}).get("meta") or {}).get("renders")
+    recorded = art.costs.get("tts_providers")
+    billed_rows = sum(1 for r in art.tts_segment_logs if _is_billed(r))
+    if not isinstance(renders, int) or renders <= billed_rows or not isinstance(recorded, dict):
+        return None
+    chars_by_provider = {str(p).lower(): int(c or 0) for p, c in recorded.items()}
+    if any(p not in _TTS_RATE for p in chars_by_provider):
+        return None
+    logged = _billed_chars_in_logs(art)
+    if any(chars_by_provider.get(p, 0) < c for p, c in logged.items()):
+        return None
+    return chars_by_provider
+
+
+def _expected_tts(art):
+    """(expected USD, what it was priced from): the record on a re-voiced job, the logs otherwise."""
+    recorded = _billed_chars_in_record(art)
+    if recorded is not None:
+        return _priced(recorded), "the record's billed chars"
+    return _expected_tts_from_logs(art), "logs"
 
 
 @check("cost.tts_actual_present", dimension="cost-correctness", severity="high")
@@ -57,23 +108,23 @@ def tts_actual_present(art):
 
 @check("cost.tts_actual_matches_logs", dimension="cost-correctness", severity="high")
 def tts_actual_matches_logs(art):
-    "costs.tts_usd_actual must equal the real provider x chars from the logs (the reconciliation)."
+    "costs.tts_usd_actual must equal the real provider x chars billed (the reconciliation)."
     if _predates_reconcile(art):
         skip("job predates the costs.tts_usd_actual reconcile fix (2026-06-22)")
-    expected = _expected_tts_from_logs(art)
+    expected, source = _expected_tts(art)
     if expected is None:
         skip("no priceable tts_segment_logs")
     val = art.costs.get("tts_usd_actual")
     if val is None:
         return False, "tts_usd_actual missing but priceable logs exist"
     ok = abs(float(val) - expected) <= max(0.001, expected * 0.05)
-    return ok, f"reported {val} vs expected {expected:.6f} from logs"
+    return ok, f"reported {val} vs expected {expected:.6f} from {source}"
 
 
 @check("cost.no_provider_mismatch_overcount", dimension="cost-correctness", severity="critical")
 def no_provider_mismatch_overcount(art):
-    "The 18x class: reported TTS must not be priced at a provider the logs never rendered."
-    expected = _expected_tts_from_logs(art)
+    "The 18x class: reported TTS must not be priced at a provider the job never rendered on."
+    expected, _source = _expected_tts(art)
     if expected is None:
         skip("no priceable logs")
     val = art.costs.get("tts_usd_actual")
