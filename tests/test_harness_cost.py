@@ -91,7 +91,12 @@ def test_a_re_voiced_record_short_of_its_own_billed_chars_fails():
 
 
 def test_a_job_whose_record_counts_only_its_logged_renders_is_still_checked_against_the_logs():
-    """No re-voice, so the logs can check it: the record's own characters are not believed instead."""
+    """No re-voice, so the logs can check it: a record holding more than they do is not believed."""
+    logs = [{"provider": "inworld", "text_length": 6000, "success": True}]
+    assert _failed(_re_voiced(_record(0.12, {"inworld": 12000}, 1), logs)) == {"tts_actual_matches_logs"}
+
+
+def test_the_18x_on_a_job_with_a_render_count_still_fails_both_checks():
     logs = [{"provider": "inworld", "text_length": 6000, "success": True}]
     assert _failed(_re_voiced(_record(1.0998, {"elevenlabs": 6000}, 1), logs)) == {
         "tts_actual_matches_logs", "no_provider_mismatch_overcount"}
