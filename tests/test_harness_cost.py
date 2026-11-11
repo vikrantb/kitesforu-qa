@@ -45,10 +45,26 @@ def _record(actual, providers, renders):
             "tts_usd_actual": actual, "tts_providers": providers, "total_usd_estimate": actual}
 
 
-def _failed(doc):
+_TTS_CHECKS = ("tts_actual_matches_logs", "no_provider_mismatch_overcount")
+
+
+def _run(doc):
+    """The cost-correctness results for ``doc``. A check that raised fails the test, so a crash is
+    never read as a verdict."""
     sr = run_dimension(Artifact.from_doc(doc), "cost-correctness")
-    return {name for name in ("tts_actual_matches_logs", "no_provider_mismatch_overcount")
-            if any(name in i for i in sr.issues)}
+    raised = {c["check_id"]: c["error"] for c in sr.data["checks"] if c["error"] is not None}
+    assert not raised, f"checks raised: {raised}"
+    return sr
+
+
+def _failed(doc):
+    return {name for name in _TTS_CHECKS if any(name in i for i in _run(doc).issues)}
+
+
+def _skipped(doc):
+    """{check: why it skipped} for the two TTS-cost checks."""
+    return {c["check_id"].removeprefix("cost."): c["evidence"] for c in _run(doc).data["checks"]
+            if c["skipped"] and c["check_id"].removeprefix("cost.") in _TTS_CHECKS}
 
 
 def test_expected_tts_from_logs():
@@ -84,6 +100,39 @@ def test_a_re_voiced_record_naming_a_provider_the_logs_contradict_still_fails_bo
     """The 18x class by label: the record bills ElevenLabs, and the take it shipped rendered on inworld."""
     assert _failed(_re_voiced(_record(1.55805, {"elevenlabs": 8500}, 3))) == {
         "tts_actual_matches_logs", "no_provider_mismatch_overcount"}
+
+
+def test_a_re_voiced_record_naming_another_provider_for_a_reused_line_still_fails_both_checks():
+    """The 18x class by label on a reused line: its row says inworld rendered it, and the record bills
+    that first pass as ElevenLabs."""
+    assert _failed(_re_voiced(_record(1.1248, {"elevenlabs": 6000, "inworld": 2500}, 3))) == {
+        "tts_actual_matches_logs", "no_provider_mismatch_overcount"}
+
+
+def test_a_re_voiced_job_whose_reused_line_rendered_where_its_record_says_matches_it():
+    """The legitimate twin: the first pass ran on ElevenLabs, and the reused line's row says so."""
+    logs = [_TAKE[0], {**_TAKE[1], "provider": "elevenlabs"}]
+    assert _failed(_re_voiced(_record(1.1248, {"elevenlabs": 6000, "inworld": 2500}, 3), logs)) == set()
+
+
+def test_a_reused_line_billed_for_less_than_its_directed_text_still_bears_out_its_record():
+    """Line 0 re-voiced on openai; line 1 reused, its render billed for 3000 of its 4000 directed
+    characters, as when the provider is not sent a tag. No other inworld render covers the gap."""
+    logs = [{"provider": "openai", "text_length": 2500, "success": True}, _TAKE[1]]
+    assert _failed(_re_voiced(_record(0.0885, {"openai": 4500, "inworld": 3000}, 3), logs)) == set()
+
+
+def test_a_record_with_no_logs_to_check_it_is_not_believed():
+    """With no rows the record cannot be checked, so both checks skip, whatever it says."""
+    doc = {"job_id": "n", "status": "completed", "costs": _record(1.0998, {"elevenlabs": 6000}, 2)}
+    assert set(_skipped(doc)) == set(_TTS_CHECKS)
+
+
+def test_a_re_voiced_record_naming_a_provider_with_no_rate_is_not_checked():
+    """It cannot be priced, and the logs cannot check a re-voiced job: both checks skip, and say why."""
+    skipped = _skipped(_re_voiced(_record(0.0866, {"inworld": 8500, "azure": 100}, 3)))
+    assert set(skipped) == set(_TTS_CHECKS)
+    assert all("no rate: azure" in why for why in skipped.values()), skipped
 
 
 def test_a_re_voiced_record_short_of_its_own_billed_chars_fails():

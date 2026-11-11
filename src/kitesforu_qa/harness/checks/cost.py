@@ -7,11 +7,14 @@ the persisted tts_segment_logs and compare to what was reported — so the fix c
 regress (the harness is the discovery engine: a future change that re-introduces the over-report
 fails here).
 
-A RE-VOICED JOB CANNOT BE CHECKED AGAINST ITS LOGS. costs.tts counts every render of the run, and
-the logs keep the take that shipped: a regen's replaced or discarded take was billed and left no
-row. So when the record counts more renders than the logs hold, the expected cost is what the
-record says it billed (costs.tts_providers, characters per provider) at the real rates. That still
-catches a wrong price, and a record that leaves out a render the logs kept falls back to the logs.
+A RE-VOICED JOB CANNOT BE CHECKED AGAINST ITS LOGS ALONE. The logs keep the take that shipped, with
+a $0 row for each line it reused from an earlier pass. When costs.tts.meta.renders counts more
+renders than the logs hold billed rows, the record also paid for takes that left no row: a regen's
+replaced or discarded take. Then the expected cost is what the record says it billed
+(costs.tts_providers, characters per provider) at the real rates, believed only when it holds, on
+each provider the logs name, what they show was billed there. That still catches a wrong price, and
+a record naming the wrong provider for a take the logs keep. It cannot catch a wrong provider on a
+take that left no row, and a record naming a provider with no rate is not checked.
 """
 # per-M-char USD rates — mirror kitesforu-workers cost_calculator._TTS_USD_PER_M_CHARS.
 from datetime import datetime, timezone
@@ -36,8 +39,21 @@ def _predates_reconcile(art) -> bool:
 
 def _is_billed(row) -> bool:
     """Did a provider bill for this row? Not a failed row, and not a reused take: no provider was
-    called for it, and an earlier pass paid. Mirrors workers' job_cost_writer.is_billed_render."""
+    called for it, and an earlier pass paid. Mirrors is_billed_render, which kitesforu-workers #3388
+    adds to its job_cost_writer."""
     return isinstance(row, dict) and row.get("success") is not False and not row.get("reused")
+
+
+def _is_reused(row) -> bool:
+    """Is this row a take reused from an earlier pass? That pass billed its render, on the provider
+    the row names."""
+    return isinstance(row, dict) and row.get("success") is not False and bool(row.get("reused"))
+
+
+# A reused row's text_length is its directed line's length, while the render it reuses was billed
+# for the text that provider was sent, which can be shorter: a tag the provider is not sent. So a
+# record bears out a reused line when it holds this share of the line's characters.
+_LEAST_BILLED_SHARE_OF_A_REUSED_LINE = 0.7
 
 
 def _priced(chars_by_provider):
@@ -53,13 +69,25 @@ def _priced(chars_by_provider):
     return total if seen else None
 
 
-def _billed_chars_in_logs(art):
+def _chars_by_provider(rows):
     chars_by_provider: dict[str, int] = {}
-    for r in art.tts_segment_logs:
-        if _is_billed(r):
-            provider = str(r.get("provider") or "").lower()
-            chars_by_provider[provider] = chars_by_provider.get(provider, 0) + int(r.get("text_length") or 0)
+    for r in rows:
+        provider = str(r.get("provider") or "").lower()
+        chars_by_provider[provider] = chars_by_provider.get(provider, 0) + int(r.get("text_length") or 0)
     return chars_by_provider
+
+
+def _billed_chars_in_logs(art):
+    return _chars_by_provider(r for r in art.tts_segment_logs if _is_billed(r))
+
+
+def _chars_the_logs_show_billed(art):
+    """{provider: the fewest characters the run billed there, by the take the logs keep}: every billed
+    row, and each reused line at the least share its render billed."""
+    shown = {p: float(c) for p, c in _billed_chars_in_logs(art).items()}
+    for p, c in _chars_by_provider(r for r in art.tts_segment_logs if _is_reused(r)).items():
+        shown[p] = shown.get(p, 0.0) + c * _LEAST_BILLED_SHARE_OF_A_REUSED_LINE
+    return shown
 
 
 def _expected_tts_from_logs(art):
@@ -68,31 +96,38 @@ def _expected_tts_from_logs(art):
 
 
 def _billed_chars_in_record(art):
-    """{provider: chars} the record says a re-voiced job billed; None when the logs can check it.
+    """{provider: chars} the record says a re-voiced job billed; None when the logs can check the job
+    or contradict the record.
 
-    None unless the record counts more renders than the logs hold billed rows, names only
-    providers with a known rate, and holds at least what the logs kept: a record short of its own
-    logs, as when it names the wrong provider, is not believed over them."""
+    None unless the logs hold rows, the record counts more renders than they hold billed rows, and
+    on each provider the logs name the record holds what they show was billed there. A record that
+    names the wrong provider for a take the logs keep falls short on the real one, and is not
+    believed over them."""
+    if not art.tts_segment_logs:
+        return None
     renders = ((art.costs.get("tts") or {}).get("meta") or {}).get("renders")
     recorded = art.costs.get("tts_providers")
     billed_rows = sum(1 for r in art.tts_segment_logs if _is_billed(r))
     if not isinstance(renders, int) or renders <= billed_rows or not isinstance(recorded, dict):
         return None
     chars_by_provider = {str(p).lower(): int(c or 0) for p, c in recorded.items()}
-    if any(p not in _TTS_RATE for p in chars_by_provider):
-        return None
-    logged = _billed_chars_in_logs(art)
-    if any(chars_by_provider.get(p, 0) < c for p, c in logged.items()):
+    shown = _chars_the_logs_show_billed(art)
+    if any(chars_by_provider.get(p, 0) < c for p, c in shown.items()):
         return None
     return chars_by_provider
 
 
 def _expected_tts(art):
-    """(expected USD, what it was priced from): the record on a re-voiced job, the logs otherwise."""
+    """(expected USD, what it was priced from): the record on a re-voiced job its logs bear out, the
+    logs otherwise. Skips the check when that record names a provider with no rate: the record
+    cannot be priced, and the logs cannot check a re-voiced job."""
     recorded = _billed_chars_in_record(art)
-    if recorded is not None:
-        return _priced(recorded), "the record's billed chars"
-    return _expected_tts_from_logs(art), "logs"
+    if recorded is None:
+        return _expected_tts_from_logs(art), "logs"
+    unrated = sorted(p for p in recorded if p not in _TTS_RATE)
+    if unrated:
+        skip(f"the record names a provider with no rate: {', '.join(unrated)}")
+    return _priced(recorded), "the record's billed chars"
 
 
 @check("cost.tts_actual_present", dimension="cost-correctness", severity="high")
