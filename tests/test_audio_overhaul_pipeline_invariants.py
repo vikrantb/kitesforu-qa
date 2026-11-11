@@ -11,7 +11,8 @@ Run modes:
 2. **Targeted**: ``KFU_QA_JOB_IDS=<id1>,<id2>`` runs the asserts against a
    specific set of jobs.
 3. **Recent-N**: when no IDs supplied, fetches the most recent ``N``
-   completed fiction jobs (default 3) from the test user account.
+   completed fiction jobs (default 3) of the account ``KFU_QA_USER_ID`` names.
+   A live run that names neither job ids nor a user is a usage error.
 
 Invariants covered (one test class per PR):
 
@@ -58,9 +59,16 @@ import pytest
 
 LIVE_RUN = os.environ.get("KFU_QA_LIVE_PIPELINE") in ("1", "true", "yes")
 PROJECT = os.environ.get("KFU_QA_PROJECT", "kitesforu-dev")
-TEST_USER = os.environ.get("KFU_QA_USER_ID", "user_34TxSranKmP4y9i0whR51hvfS6s")
+TEST_USER = os.environ.get("KFU_QA_USER_ID", "")  # a public repo carries no real account id
+JOB_IDS = os.environ.get("KFU_QA_JOB_IDS", "").strip()
 RECENT_N = int(os.environ.get("KFU_QA_RECENT_N", "3"))
 
+
+if LIVE_RUN and not (TEST_USER or JOB_IDS):
+    pytest.fail(
+        "KFU_QA_LIVE_PIPELINE=1 needs KFU_QA_JOB_IDS (Targeted mode) or KFU_QA_USER_ID (Recent-N mode).",
+        pytrace=False,
+    )
 
 pytestmark = pytest.mark.skipif(
     not LIVE_RUN,
