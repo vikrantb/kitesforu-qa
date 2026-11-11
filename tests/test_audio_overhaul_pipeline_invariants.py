@@ -58,13 +58,13 @@ import pytest
 
 LIVE_RUN = os.environ.get("KFU_QA_LIVE_PIPELINE") in ("1", "true", "yes")
 PROJECT = os.environ.get("KFU_QA_PROJECT", "kitesforu-dev")
-TEST_USER = os.environ.get("KFU_QA_USER_ID", "user_34TxSranKmP4y9i0whR51hvfS6s")
+TEST_USER = os.environ.get("KFU_QA_USER_ID", "")  # a public repo carries no real account id
 RECENT_N = int(os.environ.get("KFU_QA_RECENT_N", "3"))
 
 
 pytestmark = pytest.mark.skipif(
-    not LIVE_RUN,
-    reason="Live pipeline invariant tests skipped (set KFU_QA_LIVE_PIPELINE=1).",
+    not (LIVE_RUN and TEST_USER),
+    reason="Live pipeline invariant tests skipped (set KFU_QA_LIVE_PIPELINE=1 and KFU_QA_USER_ID).",
 )
 
 
