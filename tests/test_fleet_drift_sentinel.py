@@ -192,10 +192,70 @@ def test_extract_writeup_features(fds) -> None:
     assert row["segment"] == "writeup"
     assert row["flags"]["figures_present"] is True
     assert row["flags"]["seo_present"] is True
-    assert row["flags"]["sources_present"] is True
+    assert row["flags"]["read_sources_present"] is True
     assert row["flags"]["credits_recorded"] is True
     assert row["numerics"]["figures_count"] == 3.0
     assert row["numerics"]["credits_used"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(("sources", "read"), [
+    ([{"url": "https://www.usgs.gov/volcanoes", "title": "Volcano Hazards"}], True),
+    ([{"title": "A recalled organisation", "url": None}, {"url": "http://example.org/a"}], True),
+    ([{"title": "A recalled organisation", "url": None, "snippet": "Named from memory."}], False),
+    ([{"title": "Not a web page", "url": "javascript:alert(1)"}], False),
+    ([{"title": "Bad host", "url": "http://["}, {"url": "https://"}, "A bare name"], False),
+    ([], False),
+    (None, False),
+])
+def test_a_writeup_counts_only_a_source_with_a_web_address(fds, sources, read) -> None:
+    doc = writeup_doc(_days_ago(1))
+    doc["formats_generated"]["blog_post"]["sources"] = sources
+    assert fds.extract_writeup_features(doc)["flags"]["read_sources_present"] is read
+
+
+def _writeups_listing(sources, days):
+    docs = []
+    for d in days:
+        doc = writeup_doc(_days_ago(d + 0.1))
+        doc["formats_generated"] = {"linkedin_post": {"seo": {"description": "d"}, "sources": sources}}
+        docs.append(doc)
+    return docs
+
+
+def test_writeups_that_stop_listing_recalled_names_are_no_collapse(fds) -> None:
+    """8 writeups a window: the prior ones list recalled names (url null), the trailing ones list none."""
+    cfg = fds.DriftConfig()
+    recalled = [{"title": "A recalled organisation", "url": None, "snippet": "Named from memory."}]
+    docs = _writeups_listing(recalled, range(8, 14)) + _writeups_listing(recalled, (8.5, 9.5))
+    docs += _writeups_listing([], range(0, 6)) + _writeups_listing([], (0.5, 1.5))
+    result = fds.run_sentinel(_rows(fds, docs, "extract_writeup_features"), NOW, cfg)
+    assert result["segments"]["writeup"] == {"trailing_n": 8, "prior_n": 8}
+    assert not [f for f in result["findings"] if "sources" in f["metric"]]
+    assert not fds.has_critical(result)
+
+
+def test_writeups_that_stop_listing_pages_they_read_still_collapse(fds) -> None:
+    """The positive control: the same 8-a-window shape with read pages in the prior window."""
+    cfg = fds.DriftConfig()
+    read = [{"title": "Volcano Hazards", "url": "https://www.usgs.gov/volcanoes"}]
+    docs = _writeups_listing(read, range(8, 14)) + _writeups_listing(read, (8.5, 9.5))
+    docs += _writeups_listing([], range(0, 6)) + _writeups_listing([], (0.5, 1.5))
+    result = fds.run_sentinel(_rows(fds, docs, "extract_writeup_features"), NOW, cfg)
+    collapses = [f for f in result["findings"] if f["metric"] == "read_sources_present"]
+    assert [(f["kind"], f["severity"]) for f in collapses] == [("collapse", "CRITICAL")]
+
+
+def test_a_baseline_saved_with_the_old_sources_metric_is_no_collapse(fds) -> None:
+    """A cold-start baseline written before the rename carries sources_present; it has no twin now."""
+    cfg = fds.DriftConfig()
+    baseline = {"writeup": {"n_jobs": 8, "numerics": {},
+                            "features": {"sources_present": {"n": 8, "pos": 8, "p": 1.0},
+                                         "completed": {"n": 8, "pos": 8, "p": 1.0}}}}
+    docs = _writeups_listing([], range(0, 6)) + _writeups_listing([], (0.5, 1.5))
+    result = fds.run_sentinel(_rows(fds, docs, "extract_writeup_features"), NOW, cfg, baseline=baseline)
+    assert result["segments"]["writeup"]["prior_source"] == "baseline"
+    assert not [f for f in result["findings"] if "sources" in f["metric"]]
+    assert not fds.has_critical(result)
 
 
 def test_extract_writeup_bare(fds) -> None:
