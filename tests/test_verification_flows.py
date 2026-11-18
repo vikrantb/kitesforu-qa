@@ -145,6 +145,17 @@ def export_stored(status: str = "pending", export_id: Optional[str] = "course_ex
                        "stale": False})
 
 
+REQUEST_WORDS = "A warm one-minute short about how bread rises, told like a grandparent in the kitchen"
+SESSION_ANSWERED = json.dumps({"session_id": "sess_test_1", "understanding": [], "questions": [], "can_add_detail": True})
+EXECUTED = json.dumps({"content_id": "job_req_1", "content_type": "podcast", "redirect_url": "/watch/job_req_1"})
+
+
+def request_stored(duration: float = 0.167, tier: str = "low", job_id: str = "job_req_1") -> str:
+    """``GET /v1/podcasts/<id>/status`` for the job the execute made: the stored request echoed as ``inputs``."""
+    return json.dumps({"job_id": job_id, "status": "queued", "quality_tier": tier,
+                       "inputs": {"duration_min": duration, "quality_tier": tier}})
+
+
 #: Per flow: the arguments that choose it, the replies of a run that goes well, its id line and its status URL.
 FLOWS: Dict[str, dict] = {
     "class": {"args": ("--class", *OWNER), "noun": "class",
@@ -167,14 +178,22 @@ FLOWS: Dict[str, dict] = {
                      "stored": scorm_stored, "id_line": "package_id=pkg_test_1",
                      "create": f"{DEAD}/v1/classes/{CLASS_ID}/export/scorm", "trigger": None,
                      "status": f"{DEAD}/v1/scorm/packages/pkg_test_1"},
+    "request": {"args": ("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low"),
+                "noun": "Smart Create request",
+                "env": {"STUB_POST_RESPONSE": SESSION_ANSWERED, "STUB_TRIGGER_RESPONSE": EXECUTED},
+                # The create answers a SESSION, printed whatever happens next; the job is named once execute makes it.
+                "stored": request_stored, "id_line": "session_id=sess_test_1",
+                "create": f"{DEAD}/v1/create/intake/gated", "trigger": f"{DEAD}/v1/create/execute",
+                "status": f"{DEAD}/v1/podcasts/job_req_1/status"},
 }
-TRIGGERED = ("class", "writeup")
+TRIGGERED = ("class", "writeup", "request")
 
 
 def env_for(flow: str, workers_src: Optional[str], **extra: str) -> Dict[str, str]:
-    """A class prices its lessons through the workers tree; a writeup and an export read no repo, and prove it."""
-    if flow == "class":
-        assert workers_src, "a class is priced through the workers tree"
+    """A class and a request price their episodes through the workers tree; a writeup and an export read no repo, and
+    prove it."""
+    if flow in ("class", "request"):
+        assert workers_src, "a class or a request is priced through the workers tree"
         tree = {"WORKERS_SRC": workers_src}
     else:
         tree = {"KFU_WORKERS_REPO": "/nonexistent"}
@@ -184,7 +203,7 @@ def env_for(flow: str, workers_src: Optional[str], **extra: str) -> Dict[str, st
 @pytest.fixture
 def flow_src(request):
     """The workers tree only the class needs: the other flows run without one."""
-    return request.getfixturevalue("workers_src") if request.param == "class" else None
+    return request.getfixturevalue("workers_src") if request.param in ("class", "request") else None
 
 
 def run_flow(harness: Harness, flow: str, src: Optional[str], *extra: str, stored: Optional[List[str]] = None,
@@ -599,7 +618,8 @@ def test_an_id_that_is_not_one_path_segment_is_refused(flow, target_id):
 #: guard, pinned above).
 VALUE_FLAGS = {
     "podcast": ((), ("--topic", "--duration", "--tier", "--style", "--language", "--format", "--content-rating",
-                     "--motion-clips", "--paid-stills", "--source-writeup", "--on-behalf-of", "--on-behalf-of-email")),
+                     "--motion-clips", "--paid-stills", "--source-writeup", "--on-behalf-of", "--on-behalf-of-email",
+                     "--request")),
     "course": (("--course", *OWNER), ("--topic", "--duration", "--tier", "--style", "--language", "--on-behalf-of",
                                       "--on-behalf-of-email")),
     "class": (FLOWS["class"]["args"], ("--topic", "--duration", "--style", "--language", "--on-behalf-of",
@@ -607,6 +627,7 @@ VALUE_FLAGS = {
     "writeup": (FLOWS["writeup"]["args"], ("--topic", "--on-behalf-of", "--on-behalf-of-email")),
     "video-export": (FLOWS["video-export"]["args"], ("--on-behalf-of", "--on-behalf-of-email")),
     "scorm-export": (FLOWS["scorm-export"]["args"], ("--on-behalf-of", "--on-behalf-of-email")),
+    "request": (FLOWS["request"]["args"], ("--duration", "--tier", "--on-behalf-of", "--on-behalf-of-email")),
 }
 
 
@@ -655,6 +676,14 @@ FLAG_IN_BODY = {
               "--style": ("Interview", "style", "Interview"),
               "--language": ("fr-FR", "language", "fr-FR")},
     "writeup": {"--topic": ("binary search trees", "topic", "binary search trees")},
+    "request": {"--duration": ("1.0", "target_duration_min", 1.0)},
+}
+
+#: Per flow, each flag it takes that its CREATE body does not carry, and where it goes instead. A request's tier rides
+#: the execute (the second POST), its 9:16 switch is a body key with no value, and --wait follows the job it makes.
+CARRIED_ELSEWHERE = {
+    "request": {"--tier": "the execute body", "--short": "short_video, a switch with no value",
+                "--wait": "follows the job the execute names"},
 }
 
 
@@ -676,7 +705,8 @@ def test_the_flags_a_flow_takes_are_the_ones_its_body_carries():
     assert set(takes) == set(FLOWS), takes
     for flow, listed in takes.items():
         mode_flag = FLOWS[flow]["args"][0]
-        assert set(listed.split()) - {mode_flag} == set(FLAG_IN_BODY.get(flow) or {}), (flow, listed)
+        assert set(listed.split()) - {mode_flag} == (set(FLAG_IN_BODY.get(flow) or {})
+                                                     | set(CARRIED_ELSEWHERE.get(flow) or {})), (flow, listed)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -696,7 +726,8 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
     assert headers(create) == ["Authorization: Bearer dummy-test-key", "X-On-Behalf-Of: user_abc123",
                                "X-On-Behalf-Of-Email: ops team@example.com", "Content-Type: application/json"]
     body = {"class": EXPECTED_CLASS_BODY, "writeup": EXPECTED_WRITEUP_BODY, "video-export": None,
-            "scorm-export": "{}"}[flow]
+            "scorm-export": "{}",
+            "request": json.dumps({"initial_text": REQUEST_WORDS, "target_duration_min": 0.167})}[flow]
     if body is None:
         assert "-d" not in create, "the video export's route declares no body"
     else:
@@ -705,8 +736,15 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
         assert len(sent) == 1, "an export has no trigger"
     else:
         trigger = sent[1]
-        assert len(sent) == 2 and url_of(trigger) == FLOWS[flow]["trigger"] and "-d" not in trigger
-        assert headers(trigger) == headers(create)[:-1], "the trigger carries the create's headers minus Content-Type"
+        assert len(sent) == 2 and url_of(trigger) == FLOWS[flow]["trigger"]
+        if flow == "request":
+            # The execute carries the session the intake answered and the tier, and names the job the run follows.
+            assert json.loads(trigger[trigger.index("-d") + 1]) == {"session_id": "sess_test_1", "quality_tier": "low"}
+            assert headers(trigger) == headers(create), "the execute is a JSON POST, as the create is"
+            assert "content_id=job_req_1" in r.stdout
+        else:
+            assert "-d" not in trigger
+            assert headers(trigger) == headers(create)[:-1], "the trigger carries the create's headers minus Content-Type"
     gets = [c for c in harness.calls("curl") if "POST" not in c]
     assert len(gets) == 1 and url_of(gets[0]) == FLOWS[flow]["status"], gets
 
@@ -892,17 +930,6 @@ def test_the_cost_changelog_records_the_four_flows():
 # ---------------------------------------------------------------------------------------------
 # --request: a Smart Create request in a user's own words (synthetic words; this repo is public)
 # ---------------------------------------------------------------------------------------------
-
-REQUEST_WORDS = "A warm one-minute short about how bread rises, told like a grandparent in the kitchen"
-SESSION_ANSWERED = json.dumps({"session_id": "sess_test_1", "understanding": [], "questions": [], "can_add_detail": True})
-EXECUTED = json.dumps({"content_id": "job_req_1", "content_type": "podcast", "redirect_url": "/watch/job_req_1"})
-
-
-def request_stored(duration: float = 0.167, tier: str = "low", job_id: str = "job_req_1") -> str:
-    """``GET /v1/podcasts/<id>/status`` for the job the execute made: the stored request echoed as ``inputs``."""
-    return json.dumps({"job_id": job_id, "status": "queued", "quality_tier": tier,
-                       "inputs": {"duration_min": duration, "quality_tier": tier}})
-
 
 def run_request(harness: Harness, workers_src: str, *extra: str, stored: Optional[List[str]] = None,
                 **env: str) -> subprocess.CompletedProcess:
