@@ -458,6 +458,7 @@ REASON=$(plan_field ack_reason)
 # trigger that starts a draft's generation (and the phrase its reply carries when it did), and the read route.
 TRIGGER_PATH=""
 RESULT_KEY=""      # a flow whose TRIGGER makes the thing (a request's execute) names it under this reply key
+READBACK="yes"     # a request whose execute made a course, class or writeup is not read back as a podcast job
 TRIGGER_BODY=""    # the trigger's JSON body, "{id}" standing for what the create answered ('' = no body)
 TRIGGER_SENT=""
 if [[ -n "$FLOW" ]]; then
@@ -692,23 +693,48 @@ if [[ -n "$TRIGGER_PATH" ]]; then
     _rc=$?
     _how="curl exit $_rc"; (( _rc == 28 )) && _how="timed out, curl exit 28"
     echo "The $NOUN WAS created, but its generation trigger failed at the transport level ($_how): its generation MAY" >&2
-    echo "have started. Read $STATUS_URL before re-running." >&2
+    if [[ -n "$RESULT_KEY" ]]; then
+      echo "have made a job. No job was named, so list the owner's newest jobs before re-running (session $JOB_ID)." >&2
+    else
+      echo "have started. Read $STATUS_URL before re-running." >&2
+    fi
     finish 8
   }
   TRIGGER_CODE="${TRIGGER_OUT##*$'\n'}"
   TRIGGER_RESP="${TRIGGER_OUT%$'\n'*}"
   if [[ -n "$RESULT_KEY" ]]; then
     # The trigger made the thing: started means it named it, and from here on the run follows THAT id.
-    _made=$(printf '%s' "$TRIGGER_RESP" | python3 -c 'import json, sys; print(json.load(sys.stdin).get(sys.argv[1]) or "")' \
-      "$RESULT_KEY" 2>/dev/null) || _made=""
+    # The execute names what it made (content_id) and its kind (content_type). A soft refusal answers 200 with an
+    # empty id and content_type "refused" (or a refusal_message) before anything is made: nothing ran, nothing charged.
+    read -r _made _made_type _refused < <(printf '%s' "$TRIGGER_RESP" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+made, kind = str(d.get(sys.argv[1]) or ""), str(d.get("content_type") or "")
+refused = "yes" if (kind == "refused" or (not made and d.get("refusal_message"))) else "no"
+print(made or "-", kind or "-", refused)' "$RESULT_KEY" 2>/dev/null) || { _made="-"; _made_type="-"; _refused="no"; }
+    [[ "$_made" == "-" ]] && _made=""
     _started="no"
+    if [[ "$TRIGGER_CODE" =~ ^2[0-9][0-9]$ && "$_refused" == "yes" ]]; then
+      echo "The api REFUSED the $NOUN at execute (HTTP $TRIGGER_CODE, a soft refusal): nothing was made and nothing was" >&2
+      echo "charged. Response:" >&2
+      echo "$TRIGGER_RESP" >&2
+      finish 5
+    fi
     if [[ -n "$_made" ]]; then
       _started="yes"
       echo "  the $NOUN (session $JOB_ID) made $RESULT_KEY=$_made" >&2
       JOB_ID="$_made"
-      STATUS_URL=$(route_for "$READ_PATH" "$JOB_ID")
+      # The execute routes by what the plan became: a course, class or writeup is read on its own route, and only a
+      # podcast job is read back against the request (verification_flows check_stored).
+      case "$_made_type" in
+        course)  STATUS_URL="$API_BASE/v1/courses/$JOB_ID/status"; READBACK="no" ;;
+        class)   STATUS_URL="$API_BASE/v1/classes/$JOB_ID"; READBACK="no" ;;
+        writeup) STATUS_URL="$API_BASE/v1/writeups/$JOB_ID"; READBACK="no" ;;
+        *)       STATUS_URL=$(route_for "$READ_PATH" "$JOB_ID"); READBACK="yes" ;;
+      esac
       echo "$RESULT_KEY=$JOB_ID"
       echo "status: $STATUS_URL"
+      [[ "$READBACK" == "no" ]] && echo "  the execute made a $_made_type, not a podcast job: it is not read back against the request" >&2
     fi
   else
     _started=$(printf '%s' "$TRIGGER_RESP" | python3 -c '
@@ -725,7 +751,11 @@ print("yes" if sys.argv[1] in message.lower() else "no")' "$STARTED" 2>/dev/null
     finish 5
   else
     echo "The $NOUN WAS created, but its generation trigger answered HTTP ${TRIGGER_CODE:-none} without saying it started:" >&2
-    echo "its generation MAY have started. Read $STATUS_URL before re-running. Response:" >&2
+    if [[ -n "$RESULT_KEY" ]]; then
+      echo "it named no job, so a job MAY exist: list the owner's newest jobs before re-running (session $JOB_ID). Response:" >&2
+    else
+      echo "its generation MAY have started. Read $STATUS_URL before re-running. Response:" >&2
+    fi
     echo "$TRIGGER_RESP" >&2
     finish 8
   fi
@@ -735,7 +765,7 @@ fi
 # The same three reads as a T4's, on the flow's own read route (the status URL printed above), compared with the body
 # sent by verification_flows.py check-stored: 6 = it stored other than was sent, 7 = it could not be read. In both the
 # class, writeup or export WAS created.
-if [[ -n "$FLOW" ]]; then
+if [[ -n "$FLOW" && "$READBACK" == "yes" ]]; then
   _readback="unread"
   DIFFERS=""
   for _attempt in 1 2 3; do

@@ -28,12 +28,14 @@ THE FIVE DOORS (kitesforu-api origin/main, kitesforu-schemas 2.86.0, the version
   (``routes/scorm/packages.py``). It queues the lms-export worker, which zips what the class already holds, and is
   read back on ``GET /v1/scorm/packages/{package_id}``.
 
-* **A Smart Create request** is the Creation Canvas's two POSTs, with the user's own words. ``POST /v1/create/intake/gated``
-  (``GatedIntakeRequest``: ``idea``, ``target_duration_min``, ``short_video``) runs the intake planner and answers a
-  ``session_id`` with its questions; ``POST /v1/create/execute`` (``ExecuteRequest``: ``session_id``, ``quality_tier``)
-  creates the job and answers its ``content_id``. Executing without answering the questions is what the canvas does
-  when the user taps Create before Done, so the job carries the words and none of the typed answers, as job d5ff7f55
-  did. The job is a podcast job, read back on ``GET /v1/podcasts/{id}/status``.
+* **A Smart Create request** is two POSTs with the user's own words. ``POST /v1/create/intake/gated``
+  (``GatedIntakeRequest``: ``idea``, ``target_duration_min``, ``short_video``) runs the gated intake and answers a
+  ``session_id``; ``POST /v1/create/execute`` executes THAT session with the canvas's execute options (``short_video``,
+  ``content_spec``, ``canvas_session_id``, the tier) and answers ``content_id`` and ``content_type``. This is NOT the
+  Creation Canvas's own path: the canvas executes a batch session from ``POST /v1/create/intake`` with ``body.plan``, so
+  the planner path here (``gated_execute_bridge``) is one users don't reach. It is a fixed, repeatable path for
+  before/after comparisons at T3; the exact canvas path is driven through the browser (the T4 re-run). A podcast job
+  is read back on ``GET /v1/podcasts/{id}/status``; a course, class or writeup the execute makes is not read back.
 
 Offline and $0: ``plan`` reads a local workers tree (a class's lessons may buy paid stills) and ``check-stored``
 reads text handed to it. No command here makes a network call.
@@ -409,7 +411,7 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
         payload = json.dumps(build_request_body(text=request, duration=duration, short=short))
         sent = json.loads(payload)
         episode = request_episode_body(sent, tier)
-        est = vj.estimate(episode, images=vj.episode_stills_quote(workers_src))
+        est = vj.estimate(episode, images=vj.episode_stills_quote(workers_src), short=short)
         est = vj.Estimate(text=est.text, low=est.low, high=est.high, detail=[*est.detail, REQUEST_PLANNER_DETAIL])
         needs_ack, reason = vj.ack_decision(episode)
         doors = REQUEST_DOORS

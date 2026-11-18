@@ -799,6 +799,9 @@ def test_the_trigger_is_classified_by_what_it_says_about_the_generation(harness,
                                                                          needle):
     harness.fresh_ack()
     r = run_flow(harness, flow, flow_src, STUB_TRIGGER_HTTP=http, STUB_TRIGGER_RESPONSE=reply)
+    if flow == "request" and needle == "its generation MAY have started":
+        # A request's trigger is the execute, which MAKES the job: it says a job may exist, and names the session.
+        needle = "a job MAY exist"
     assert r.returncode == rc and needle in r.stderr, (r.returncode, r.stderr)
     assert FLOWS[flow]["id_line"] in r.stdout, "the draft WAS created, so its id is printed"
     assert harness.gets() == 0, "a trigger that did not start was read back as if it had"
@@ -974,9 +977,10 @@ def test_a_request_without_short_sends_no_short_switch(harness, workers_src):
 
 
 def test_an_execute_that_names_no_job_is_not_called_started(harness, workers_src):
-    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=json.dumps({"refusal_message": "no"}))
+    # A 200 that names no job and refuses nothing (no content_id, no refusal_message): a job MAY exist.
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=json.dumps({"message": "accepted"}))
     assert r.returncode == 8, r.stderr
-    assert "MAY have started" in r.stderr
+    assert "a job MAY exist" in r.stderr
 
 
 def test_an_execute_the_api_refuses_is_exit_5(harness, workers_src):
@@ -1036,7 +1040,9 @@ def _model_fields(source: str, model: str) -> Dict[str, bool]:
     body = body.split("\nclass ", 1)[0]
     out: Dict[str, bool] = {}
     for m in re.finditer(r"^    ([a-z_]+): [^=\n]+(?:= (.*))?$", body, flags=re.M):
-        out[m.group(1)] = bool(m.group(2)) and m.group(2).lstrip().startswith(("Field(...", "Field(\n        ..."))
+        default = m.group(2)
+        # Required: no default at all (``x: str``), or a Field whose first argument is ``...``.
+        out[m.group(1)] = default is None or default.lstrip().startswith(("Field(...", "Field(\n        ..."))
     return out
 
 
@@ -1044,8 +1050,7 @@ def test_the_request_bodies_match_the_api_models_on_main():
     """The two bodies a request sends against the api's own models on origin/main: every key is a declared field, and
     every required field is sent. Round 0 sent `initial_text` (the plain intake's key) to the gated intake, which
     requires `idea`, and every unit test still passed because they pinned the body this module wrote."""
-    src = subprocess.run(["git", "-C", str(API_REPO), "show", "origin/main:src/api/routes/smart_create.py"],
-                         capture_output=True, text=True, check=True).stdout
+    src = _origin_main_file(API_REPO, "src/api/routes/smart_create.py")
     gated = _model_fields(src, "GatedIntakeRequest")
     sent = verification_flows.build_request_body(text="words", duration="1.0", short=True)
     assert set(sent) <= set(gated), (sorted(sent), sorted(gated))
@@ -1053,3 +1058,42 @@ def test_the_request_bodies_match_the_api_models_on_main():
     execute = _model_fields(src, "ExecuteRequest")
     trig = json.loads(verification_flows.request_trigger_body("low", short=True))
     assert set(trig) <= set(execute), (sorted(trig), sorted(execute))
+
+
+def test_a_soft_refusal_at_execute_is_exit_5_and_makes_nothing(harness, workers_src):
+    refused = json.dumps({"content_id": "", "content_type": "refused", "redirect_url": "",
+                          "refusal_message": "That request can't be made.", "refusal_reason": "policy"})
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=refused)
+    assert r.returncode == 5, r.stderr
+    assert "soft refusal" in r.stderr and "MAY" not in r.stderr
+    assert [c for c in harness.calls("curl") if "POST" not in c] == [], "a refusal reads nothing back"
+
+
+def test_an_execute_that_makes_a_course_is_followed_on_the_course_route_and_not_read_back(harness, workers_src):
+    course = json.dumps({"content_id": "course_req_1", "content_type": "course", "redirect_url": "/courses/course_req_1"})
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=course)
+    assert r.returncode == 0, r.stderr
+    assert f"status: {DEAD}/v1/courses/course_req_1/status" in r.stdout
+    assert "/v1/podcasts/" not in r.stdout
+    assert "not read back" in r.stderr
+
+
+def test_a_messages_before_the_job_is_named_never_point_at_a_session_as_a_job(harness, workers_src):
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=json.dumps({"message": "queued"}))
+    assert r.returncode == 8, r.stderr
+    assert "/v1/podcasts/sess_test_1" not in r.stdout + r.stderr
+    assert "session sess_test_1" in r.stderr
+
+
+def test_a_short_request_is_priced_with_the_born_short_term(harness, workers_src):
+    """The plan prices a --short request with the born-short term, as a --short podcast is priced; without --short it
+    carries none. Through the script's rehearsal, which prices with the workers interpreter."""
+    outs = {}
+    for flag in ((), ("--short",)):
+        harness.fresh_ack()
+        r = harness.run("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low", *flag, "--dry-run",
+                        env={"WORKERS_SRC": workers_src})
+        assert r.returncode == 0, r.stderr
+        outs[bool(flag)] = r.stdout + r.stderr
+    assert "born-short" in outs[True]
+    assert "born-short" not in outs[False]
