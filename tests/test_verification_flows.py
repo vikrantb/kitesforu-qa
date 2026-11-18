@@ -739,7 +739,8 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
         assert len(sent) == 2 and url_of(trigger) == FLOWS[flow]["trigger"]
         if flow == "request":
             # The execute carries the session the intake answered and the tier, and names the job the run follows.
-            assert json.loads(trigger[trigger.index("-d") + 1]) == {"session_id": "sess_test_1", "quality_tier": "low"}
+            assert json.loads(trigger[trigger.index("-d") + 1]) == {"session_id": "sess_test_1",
+                                                                     "canvas_session_id": "sess_test_1", "quality_tier": "low"}
             assert headers(trigger) == headers(create), "the execute is a JSON POST, as the create is"
             assert "content_id=job_req_1" in r.stdout
         else:
@@ -951,7 +952,10 @@ def test_a_request_sends_the_users_words_to_intake_then_executes_the_session_and
     assert [url_of(c) for c in sent] == [f"{DEAD}/v1/create/intake/gated", f"{DEAD}/v1/create/execute"]
     assert json.loads(body_of(sent[0])) == {"idea": REQUEST_WORDS, "target_duration_min": 0.167,
                                             "short_video": True}
-    assert json.loads(body_of(sent[1])) == {"session_id": "sess_test_1", "quality_tier": "low"}
+    # The canvas's execute: the session (also as canvas_session_id), the tier, and for a short the switch and its platform.
+    assert json.loads(body_of(sent[1])) == {"session_id": "sess_test_1", "canvas_session_id": "sess_test_1",
+                                            "quality_tier": "low", "short_video": True,
+                                            "content_spec": {"platforms": ["tiktok"]}}
     # From the execute on, the run follows the JOB, never the session.
     assert "content_id=job_req_1" in r.stdout
     assert f"status: {DEAD}/v1/podcasts/job_req_1/status" in r.stdout
@@ -965,6 +969,8 @@ def test_a_request_without_short_sends_no_short_switch(harness, workers_src):
     r = run_request(harness, workers_src)
     assert r.returncode == 0, r.stderr
     assert "short_video" not in json.loads(body_of(posts(harness)[0]))
+    execute = json.loads(body_of(posts(harness)[1]))
+    assert "short_video" not in execute and "content_spec" not in execute and "wants_visuals" not in execute
 
 
 def test_an_execute_that_names_no_job_is_not_called_started(harness, workers_src):
@@ -1020,7 +1026,7 @@ def test_a_request_dry_run_shows_the_execute_body_and_sends_nothing(harness, wor
     assert r.returncode == 0, r.stderr
     assert posts(harness) == []
     out = r.stdout + r.stderr   # the rehearsal prints its POST lines on stderr and the body on stdout
-    assert f'then POST {DEAD}/v1/create/execute   (the same headers) with {{"session_id": "<session_id>", "quality_tier": "low"}}' in out
+    assert f'then POST {DEAD}/v1/create/execute   (the same headers) with {{"session_id": "<session_id>", "canvas_session_id": "<session_id>", "quality_tier": "low"}}' in out
     assert "no body" not in out
 
 
@@ -1045,5 +1051,5 @@ def test_the_request_bodies_match_the_api_models_on_main():
     assert set(sent) <= set(gated), (sorted(sent), sorted(gated))
     assert {f for f, req in gated.items() if req} <= set(sent), gated
     execute = _model_fields(src, "ExecuteRequest")
-    trig = json.loads(verification_flows.request_trigger_body("low"))
+    trig = json.loads(verification_flows.request_trigger_body("low", short=True))
     assert set(trig) <= set(execute), (sorted(trig), sorted(execute))

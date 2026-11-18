@@ -344,9 +344,17 @@ def build_request_body(*, text: str, duration: str, short: bool) -> Dict[str, An
     return body
 
 
-def request_trigger_body(tier: str) -> str:
-    """The execute body, with ``{id}`` standing for the session the intake answered."""
-    return json.dumps({"session_id": "{id}", "quality_tier": tier})
+def request_trigger_body(tier: str, short: bool = False) -> str:
+    """The execute body the Creation Canvas sends (kitesforu-frontend ``CreationCanvas.tsx``'s mergedExecuteOpts), with
+    ``{id}`` standing for the session the intake answered: the session also as ``canvas_session_id``, the tier, and for a
+    short ``short_video`` with ``content_spec.platforms``. Without ``short_video`` the job is made as an audio episode
+    whatever the intake was told. Like the canvas, it sends no ``wants_visuals``: non-fiction renders its $0 visuals
+    without one, and ``true`` would unlock paid stills."""
+    body: Dict[str, Any] = {"session_id": "{id}", "canvas_session_id": "{id}", "quality_tier": tier}
+    if short:
+        body["short_video"] = True
+        body["content_spec"] = {"platforms": ["tiktok"]}
+    return json.dumps(body)
 
 
 def request_episode_body(sent: Dict[str, Any], tier: str) -> Dict[str, Any]:
@@ -416,7 +424,7 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
             "needs_ack": needs_ack, "ack_reason": reason, "warnings": [], "summary": summary, "noun": doors.noun,
             "create_path": doors.create, "id_key": doors.id_key, "trigger_path": doors.trigger,
             "started": doors.started, "read_path": doors.read, "result_key": doors.result_key,
-            "trigger_body": request_trigger_body(tier) if flow == "request" else ""}
+            "trigger_body": request_trigger_body(tier, short) if flow == "request" else ""}
 
 
 # ---------------------------------------------------------------------------------------------
