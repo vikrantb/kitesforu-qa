@@ -1012,3 +1012,13 @@ def test_the_request_read_back_refuses_another_job():
         verification_flows.check_stored("request", {"target_duration_min": 0.167}, json.loads(request_stored(job_id="other")),
                                         created_id="job_req_1", trigger_sent={"quality_tier": "low"})
 
+
+
+def test_a_request_dry_run_shows_the_execute_body_and_sends_nothing(harness, workers_src):
+    r = harness.run("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low", "--dry-run",
+                    env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, r.stderr
+    assert posts(harness) == []
+    out = r.stdout + r.stderr   # the rehearsal prints its POST lines on stderr and the body on stdout
+    assert f'then POST {DEAD}/v1/create/execute   (the same headers) with {{"session_id": "<session_id>", "quality_tier": "low"}}' in out
+    assert "no body" not in out

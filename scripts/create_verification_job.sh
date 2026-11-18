@@ -591,7 +591,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
     done
     [[ -z "$PAYLOAD" ]] && echo "  (no body)"
     if [[ -n "$TRIGGER_PATH" ]]; then
-      echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (no body; the same headers minus Content-Type)"
+      if [[ -n "$TRIGGER_BODY" ]]; then
+        echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (the same headers) with ${TRIGGER_BODY//"{id}"/<$ID_KEY>}"
+      else
+        echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (no body; the same headers minus Content-Type)"
+      fi
     fi
   } >&2
   # The BODY alone goes to stdout, so `--dry-run 2>/dev/null | jq .` works. Every banner above is
