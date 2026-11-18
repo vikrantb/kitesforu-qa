@@ -727,7 +727,7 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
                                "X-On-Behalf-Of-Email: ops team@example.com", "Content-Type: application/json"]
     body = {"class": EXPECTED_CLASS_BODY, "writeup": EXPECTED_WRITEUP_BODY, "video-export": None,
             "scorm-export": "{}",
-            "request": json.dumps({"initial_text": REQUEST_WORDS, "target_duration_min": 0.167})}[flow]
+            "request": json.dumps({"idea": REQUEST_WORDS, "target_duration_min": 0.167})}[flow]
     if body is None:
         assert "-d" not in create, "the video export's route declares no body"
     else:
@@ -949,7 +949,7 @@ def test_a_request_sends_the_users_words_to_intake_then_executes_the_session_and
     assert r.returncode == 0, r.stderr
     sent = posts(harness)
     assert [url_of(c) for c in sent] == [f"{DEAD}/v1/create/intake/gated", f"{DEAD}/v1/create/execute"]
-    assert json.loads(body_of(sent[0])) == {"initial_text": REQUEST_WORDS, "target_duration_min": 0.167,
+    assert json.loads(body_of(sent[0])) == {"idea": REQUEST_WORDS, "target_duration_min": 0.167,
                                             "short_video": True}
     assert json.loads(body_of(sent[1])) == {"session_id": "sess_test_1", "quality_tier": "low"}
     # From the execute on, the run follows the JOB, never the session.
@@ -1004,7 +1004,7 @@ def test_request_words_are_refused_when_empty_or_over_the_door_limit():
         verification_flows.build_request_body(text="x" * (verification_flows.REQUEST_TEXT_MAX + 1), duration="1.0",
                                               short=False)
     body = verification_flows.build_request_body(text="  keep my words  ", duration="1", short=False)
-    assert body == {"initial_text": "keep my words", "target_duration_min": 1.0}
+    assert body == {"idea": "keep my words", "target_duration_min": 1.0}
 
 
 def test_the_request_read_back_refuses_another_job():
@@ -1022,3 +1022,28 @@ def test_a_request_dry_run_shows_the_execute_body_and_sends_nothing(harness, wor
     out = r.stdout + r.stderr   # the rehearsal prints its POST lines on stderr and the body on stdout
     assert f'then POST {DEAD}/v1/create/execute   (the same headers) with {{"session_id": "<session_id>", "quality_tier": "low"}}' in out
     assert "no body" not in out
+
+
+def _model_fields(source: str, model: str) -> Dict[str, bool]:
+    """``{field: required}`` of one pydantic model in ``source``: a field is required when its default is ``...``."""
+    body = source.split(f"class {model}(BaseModel):", 1)[1]
+    body = body.split("\nclass ", 1)[0]
+    out: Dict[str, bool] = {}
+    for m in re.finditer(r"^    ([a-z_]+): [^=\n]+(?:= (.*))?$", body, flags=re.M):
+        out[m.group(1)] = bool(m.group(2)) and m.group(2).lstrip().startswith(("Field(...", "Field(\n        ..."))
+    return out
+
+
+def test_the_request_bodies_match_the_api_models_on_main():
+    """The two bodies a request sends against the api's own models on origin/main: every key is a declared field, and
+    every required field is sent. Round 0 sent `initial_text` (the plain intake's key) to the gated intake, which
+    requires `idea`, and every unit test still passed because they pinned the body this module wrote."""
+    src = subprocess.run(["git", "-C", str(API_REPO), "show", "origin/main:src/api/routes/smart_create.py"],
+                         capture_output=True, text=True, check=True).stdout
+    gated = _model_fields(src, "GatedIntakeRequest")
+    sent = verification_flows.build_request_body(text="words", duration="1.0", short=True)
+    assert set(sent) <= set(gated), (sorted(sent), sorted(gated))
+    assert {f for f, req in gated.items() if req} <= set(sent), gated
+    execute = _model_fields(src, "ExecuteRequest")
+    trig = json.loads(verification_flows.request_trigger_body("low"))
+    assert set(trig) <= set(execute), (sorted(trig), sorted(execute))

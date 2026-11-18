@@ -29,7 +29,7 @@ THE FIVE DOORS (kitesforu-api origin/main, kitesforu-schemas 2.86.0, the version
   read back on ``GET /v1/scorm/packages/{package_id}``.
 
 * **A Smart Create request** is the Creation Canvas's two POSTs, with the user's own words. ``POST /v1/create/intake/gated``
-  (``IntakeRequest``: ``initial_text``, ``target_duration_min``, ``short_video``) runs the intake planner and answers a
+  (``GatedIntakeRequest``: ``idea``, ``target_duration_min``, ``short_video``) runs the intake planner and answers a
   ``session_id`` with its questions; ``POST /v1/create/execute`` (``ExecuteRequest``: ``session_id``, ``quality_tier``)
   creates the job and answers its ``content_id``. Executing without answering the questions is what the canvas does
   when the user taps Create before Done, so the job carries the words and none of the typed answers, as job d5ff7f55
@@ -320,7 +320,7 @@ def scorm_estimate() -> vj.Estimate:
 # A Smart Create request: the user's words through the canvas's intake and execute doors
 # ---------------------------------------------------------------------------------------------
 
-#: ``IntakeRequest.initial_text``'s max_length on kitesforu-api main.
+#: ``GatedIntakeRequest.idea``'s max_length on kitesforu-api main (routes/smart_create.py).
 REQUEST_TEXT_MAX = 5000
 
 REQUEST_DOORS = Doors(noun="Smart Create request", create="/v1/create/intake/gated", id_key="session_id",
@@ -338,7 +338,7 @@ def build_request_body(*, text: str, duration: str, short: bool) -> Dict[str, An
         raise ValueError("--request needs the words a user would type, got none")
     if len(words) > REQUEST_TEXT_MAX:
         raise ValueError(f"--request takes at most {REQUEST_TEXT_MAX} characters (the intake door's limit), got {len(words)}")
-    body: Dict[str, Any] = {"initial_text": words, "target_duration_min": float(duration)}
+    body: Dict[str, Any] = {"idea": words, "target_duration_min": float(duration)}
     if short:
         body["short_video"] = True
     return body
@@ -405,7 +405,7 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
         est = vj.Estimate(text=est.text, low=est.low, high=est.high, detail=[*est.detail, REQUEST_PLANNER_DETAIL])
         needs_ack, reason = vj.ack_decision(episode)
         doors = REQUEST_DOORS
-        summary = (f"{len(sent['initial_text'])} characters of the user's words, {sent['target_duration_min']:g}min"
+        summary = (f"{len(sent['idea'])} characters of the user's words, {sent['target_duration_min']:g}min"
                    f"{' 9:16' if short else ''} at {tier}, through intake and execute")
     else:
         raise ValueError(f"no flow {flow!r}: one of {', '.join(FLOWS)}")
