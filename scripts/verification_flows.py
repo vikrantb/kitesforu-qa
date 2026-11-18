@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Every flow the verification job creates beside a podcast or a course, from its request to its read-back.
 
-``create_verification_job.sh --class``, ``--writeup``, ``--course-video-export <course_id>`` and
-``--scorm-export <class_id>`` each make the smallest request their api door accepts. Per flow, this module owns the
+``create_verification_job.sh --class``, ``--writeup``, ``--course-video-export <course_id>``,
+``--scorm-export <class_id>`` and ``--request "<words>"`` each make the smallest request their api door accepts. Per flow, this module owns the
 body, the :class:`Doors` it is POSTed to and read back on, the estimate and the ACK decision computed from the
 serialized body, and the comparison of what the api stored with what was sent. The shell owns the arguments, auth,
 the POSTs and the exit codes, as it does for a podcast and a course. Two commands:
@@ -10,7 +10,7 @@ the POSTs and the exit codes, as it does for a podcast and a course. Two command
 ``plan``          the body, its doors, its estimate and its ACK decision, as one JSON object;
 ``check-stored``  every way the stored request differs from the one sent, one per line.
 
-THE FOUR DOORS (kitesforu-api origin/main, kitesforu-schemas 2.86.0, the version the api locks)
+THE FIVE DOORS (kitesforu-api origin/main, kitesforu-schemas 2.86.0, the version the api locks)
 ----------------------------------------------------------------------------------------------
 * **A class** is two POSTs. ``POST /v1/classes`` (``CreateClassRequest``) writes a $0 draft and is not behind the
   creation gate; ``POST /v1/classes/{id}/curriculum/generate`` (``services/classes/generation.py``
@@ -28,6 +28,13 @@ THE FOUR DOORS (kitesforu-api origin/main, kitesforu-schemas 2.86.0, the version
   (``routes/scorm/packages.py``). It queues the lms-export worker, which zips what the class already holds, and is
   read back on ``GET /v1/scorm/packages/{package_id}``.
 
+* **A Smart Create request** is the Creation Canvas's two POSTs, with the user's own words. ``POST /v1/create/intake/gated``
+  (``IntakeRequest``: ``initial_text``, ``target_duration_min``, ``short_video``) runs the intake planner and answers a
+  ``session_id`` with its questions; ``POST /v1/create/execute`` (``ExecuteRequest``: ``session_id``, ``quality_tier``)
+  creates the job and answers its ``content_id``. Executing without answering the questions is what the canvas does
+  when the user taps Create before Done, so the job carries the words and none of the typed answers, as job d5ff7f55
+  did. The job is a podcast job, read back on ``GET /v1/podcasts/{id}/status``.
+
 Offline and $0: ``plan`` reads a local workers tree (a class's lessons may buy paid stills) and ``check-stored``
 reads text handed to it. No command here makes a network call.
 """
@@ -42,7 +49,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import verification_job as vj
 
-FLOWS = ("class", "writeup", "video-export", "scorm-export")
+FLOWS = ("class", "writeup", "video-export", "scorm-export", "request")
 
 #: The reason a flow whose estimate holds an unpriced term gives the ACK gate: an approval must never price an
 #: unknown as $0, so the price shown says what it leaves out and the run needs the ACK.
@@ -85,6 +92,7 @@ class Doors:
     read: str            # the route its stored request is read back on, and the status URL printed
     trigger: str = ""    # the route POSTed second, when the create makes only a draft
     started: str = ""    # the phrase the trigger's reply carries when generation started (lower case)
+    result_key: str = ""  # the trigger reply's key naming what it made, when the trigger (not the create) makes it
 
 
 # ---------------------------------------------------------------------------------------------
@@ -309,11 +317,51 @@ def scorm_estimate() -> vj.Estimate:
 
 
 # ---------------------------------------------------------------------------------------------
+# A Smart Create request: the user's words through the canvas's intake and execute doors
+# ---------------------------------------------------------------------------------------------
+
+#: ``IntakeRequest.initial_text``'s max_length on kitesforu-api main.
+REQUEST_TEXT_MAX = 5000
+
+REQUEST_DOORS = Doors(noun="Smart Create request", create="/v1/create/intake/gated", id_key="session_id",
+                      read="/v1/podcasts/{id}/status", trigger="/v1/create/execute", result_key="content_id")
+
+REQUEST_PLANNER_DETAIL = ("not priced: the intake planner, 1 LLM call on the api (a fraction of a cent), made by the first "
+                          "POST before anything is executed")
+
+
+def build_request_body(*, text: str, duration: str, short: bool) -> Dict[str, Any]:
+    """The gated intake body: the words as typed (stripped of edge whitespace only), the target length and the 9:16
+    switch. Empty or over-long words are refused here, before anything is sent."""
+    words = text.strip()
+    if not words:
+        raise ValueError("--request needs the words a user would type, got none")
+    if len(words) > REQUEST_TEXT_MAX:
+        raise ValueError(f"--request takes at most {REQUEST_TEXT_MAX} characters (the intake door's limit), got {len(words)}")
+    body: Dict[str, Any] = {"initial_text": words, "target_duration_min": float(duration)}
+    if short:
+        body["short_video"] = True
+    return body
+
+
+def request_trigger_body(tier: str) -> str:
+    """The execute body, with ``{id}`` standing for the session the intake answered."""
+    return json.dumps({"session_id": "{id}", "quality_tier": tier})
+
+
+def request_episode_body(sent: Dict[str, Any], tier: str) -> Dict[str, Any]:
+    """The job the execute creates, in the keys :func:`vj.estimate` and :func:`vj.ack_decision` read. It is priced as
+    the episode an orchestrator creates (:func:`vj.implied_episode_body`): the executor decides the job's visual options,
+    so the estimate and the ACK count the paid stills it may buy rather than none."""
+    return vj.implied_episode_body(float(sent["target_duration_min"]), tier)
+
+
+# ---------------------------------------------------------------------------------------------
 # The plan: body, doors, estimate and ACK decision, from the bytes sent
 # ---------------------------------------------------------------------------------------------
 
 def plan(flow: str, *, topic: str, duration: str, style: str, language: str, target_id: str,
-         workers_src: str, catalog_label: str) -> Dict[str, Any]:
+         workers_src: str, catalog_label: str, request: str = "", tier: str = "", short: bool = False) -> Dict[str, Any]:
     """The flow's plan in the shape ``verification_job.py plan`` emits, plus its doors. As there, the estimate and
     the ACK decision read the serialized payload, the same string curl sends, never the dict it came from."""
     if flow in _FIRST_STAGE:
@@ -347,6 +395,18 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
             payload = "{}"   # ExportScormRequest's defaults
             est, doors = scorm_estimate(), scorm_doors(target_id)
             summary = f"class {target_id} as a SCORM package"
+    elif flow == "request":
+        if not tier:
+            raise ValueError("--request needs a tier")
+        payload = json.dumps(build_request_body(text=request, duration=duration, short=short))
+        sent = json.loads(payload)
+        episode = request_episode_body(sent, tier)
+        est = vj.estimate(episode, images=vj.episode_stills_quote(workers_src))
+        est = vj.Estimate(text=est.text, low=est.low, high=est.high, detail=[*est.detail, REQUEST_PLANNER_DETAIL])
+        needs_ack, reason = vj.ack_decision(episode)
+        doors = REQUEST_DOORS
+        summary = (f"{len(sent['initial_text'])} characters of the user's words, {sent['target_duration_min']:g}min"
+                   f"{' 9:16' if short else ''} at {tier}, through intake and execute")
     else:
         raise ValueError(f"no flow {flow!r}: one of {', '.join(FLOWS)}")
     detail = list(est.detail)
@@ -355,7 +415,8 @@ def plan(flow: str, *, topic: str, duration: str, style: str, language: str, tar
     return {"payload": payload, "est": est.text, "est_low": est.low, "est_high": est.high, "est_detail": detail,
             "needs_ack": needs_ack, "ack_reason": reason, "warnings": [], "summary": summary, "noun": doors.noun,
             "create_path": doors.create, "id_key": doors.id_key, "trigger_path": doors.trigger,
-            "started": doors.started, "read_path": doors.read}
+            "started": doors.started, "read_path": doors.read, "result_key": doors.result_key,
+            "trigger_body": request_trigger_body(tier) if flow == "request" else ""}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -378,7 +439,7 @@ def _differs(label: str, want: Any, got: Any) -> List[str]:
 
 
 def check_stored(flow: str, sent: Dict[str, Any], snapshot: Any, *, created_id: str,
-                 target_id: str = "") -> List[str]:
+                 target_id: str = "", trigger_sent: Optional[Dict[str, Any]] = None) -> List[str]:
     """Every way the stored request differs from the one sent. ``[]`` means it stored what was sent. The trigger's
     reply said generation started, so a class or writeup still stored as a draft is a difference too, and so is an
     export whose stored id is not the one the POST answered with, or a package of another class."""
@@ -407,6 +468,20 @@ def check_stored(flow: str, sent: Dict[str, Any], snapshot: Any, *, created_id: 
         out += _differs("export_id", created_id, snapshot.get("export_id"))
         if snapshot.get("status") == "absent":
             out.append("status: the POST queued an export, and the course reports none")
+    elif flow == "request":
+        # The created id is the job the execute answered; the read is that job's /status.
+        if snapshot.get("job_id") not in (None, created_id) or "status" not in snapshot:
+            raise UnreadableSnapshot("the read is not this job's status")
+        raw_inputs = snapshot.get("inputs")
+        inputs: Dict[str, Any] = raw_inputs if isinstance(raw_inputs, dict) else {}
+        want_min = float(sent["target_duration_min"])
+        got_min = inputs.get("duration_min")
+        if got_min is None or abs(float(got_min) - want_min) > 1e-6:
+            out.append(f"duration_min: requested {want_min:g}, stored {json.dumps(got_min)}")
+        want_tier = (trigger_sent or {}).get("quality_tier")
+        got_tier = snapshot.get("quality_tier") or inputs.get("quality_tier")
+        if want_tier and got_tier != want_tier:
+            out.append(f"quality_tier: requested {want_tier}, stored {json.dumps(got_tier)}")
     elif flow == "scorm-export":
         if snapshot.get("package_id") != created_id:
             raise UnreadableSnapshot("the read is not this package")
@@ -431,18 +506,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--target-id", default="", help="the course or class an export acts on")
     p.add_argument("--workers-src", default="")
     p.add_argument("--catalog-label", default="")
+    p.add_argument("--request", default="", help="--request: the words a user would type")
+    p.add_argument("--tier", default="", help="--request: the quality tier the execute asks for")
+    p.add_argument("--short", default="false", choices=("true", "false"), help="--request: the 9:16 switch")
     c = sub.add_parser("check-stored", help="every way the stored request differs from the one sent, one per line")
     c.add_argument("--flow", required=True, choices=FLOWS)
     c.add_argument("--requested", required=True, help="the exact body POSTed first ('' when none was)")
     c.add_argument("--created-id", required=True, help="the id the create's reply named")
     c.add_argument("--target-id", default="", help="the course or class an export acts on")
     c.add_argument("--snapshot", required=True, help="the read-back GET's JSON, or - for stdin")
+    c.add_argument("--trigger-sent", default="", help="the exact body POSTed second ('' when none was)")
     args = ap.parse_args(argv)
     if args.cmd == "plan":
         try:
             out = plan(args.flow, topic=args.topic, duration=args.duration, style=args.style,
                        language=args.language, target_id=args.target_id, workers_src=args.workers_src,
-                       catalog_label=args.catalog_label)
+                       catalog_label=args.catalog_label, request=args.request, tier=args.tier,
+                       short=args.short == "true")
         except (vj.PricingUnavailable, ValueError) as exc:
             print(f"cannot plan this {args.flow}: {exc}", file=sys.stderr)
             return 1
@@ -451,7 +531,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         lines = check_stored(args.flow, json.loads(args.requested) if args.requested else {},
                              vj._read_snapshot(args.snapshot), created_id=args.created_id,
-                             target_id=args.target_id)
+                             target_id=args.target_id,
+                             trigger_sent=json.loads(args.trigger_sent) if args.trigger_sent else None)
     except UnreadableSnapshot as exc:
         print(f"the read-back is unreadable: {exc}", file=sys.stderr)
         return 2

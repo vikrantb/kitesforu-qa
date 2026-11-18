@@ -39,7 +39,7 @@ API_REPO = Path(os.environ.get("KFU_API_REPO") or "/Users/vikrantbhosale/gitproj
 COURSE_WORKERS_REPO = Path(os.environ.get("KFU_COURSE_WORKERS_REPO")
                            or "/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-course-workers")
 
-#: The stub: the trigger (a POST to ``*/generate``) answers from STUB_TRIGGER_*, every other POST from STUB_POST_*,
+#: The stub: the trigger (a POST to ``*/generate`` or a request's ``*/create/execute``) answers from STUB_TRIGGER_*, every other POST from STUB_POST_*,
 #: and each GET from the status sequence, as the harness's own stub does.
 FLOW_CURL_STUB = r"""#!/bin/bash
 { printf 'curl'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$STUB_LOG"
@@ -50,7 +50,7 @@ for a in "$@"; do
   [[ "$a" == *"%{http_code}"* ]] && w=1
 done
 if [[ -n "$post" ]]; then
-  p=STUB_POST; [[ "$url" == */generate ]] && p=STUB_TRIGGER
+  p=STUB_POST; [[ "$url" == */generate || "$url" == */create/execute ]] && p=STUB_TRIGGER
   ex="${p}_EXIT"; dl="${p}_DELAY"; rs="${p}_RESPONSE"; hc="${p}_HTTP"
   [[ -n "${!ex:-}" ]] && exit "${!ex}"
   [[ -n "${!dl:-}" ]] && /bin/sleep "${!dl}"
@@ -887,3 +887,101 @@ def test_the_cost_changelog_records_the_four_flows():
                    "scripts/create_verification_job.sh",
                    "scripts/verification_flows.py", "medium", "not priced", "Pricing-page implication"):
         assert needle in entry, needle
+
+
+# ---------------------------------------------------------------------------------------------
+# --request: a Smart Create request in a user's own words (synthetic words; this repo is public)
+# ---------------------------------------------------------------------------------------------
+
+REQUEST_WORDS = "A warm one-minute short about how bread rises, told like a grandparent in the kitchen"
+SESSION_ANSWERED = json.dumps({"session_id": "sess_test_1", "understanding": [], "questions": [], "can_add_detail": True})
+EXECUTED = json.dumps({"content_id": "job_req_1", "content_type": "podcast", "redirect_url": "/watch/job_req_1"})
+
+
+def request_stored(duration: float = 0.167, tier: str = "low", job_id: str = "job_req_1") -> str:
+    """``GET /v1/podcasts/<id>/status`` for the job the execute made: the stored request echoed as ``inputs``."""
+    return json.dumps({"job_id": job_id, "status": "queued", "quality_tier": tier,
+                       "inputs": {"duration_min": duration, "quality_tier": tier}})
+
+
+def run_request(harness: Harness, workers_src: str, *extra: str, stored: Optional[List[str]] = None,
+                **env: str) -> subprocess.CompletedProcess:
+    harness.fresh_ack()
+    harness.statuses(stored if stored is not None else [request_stored()])
+    return harness.run("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low", *extra,
+                       env={"STUB_POST_RESPONSE": SESSION_ANSWERED, "STUB_TRIGGER_RESPONSE": EXECUTED,
+                            "WORKERS_SRC": workers_src, **env})
+
+
+def body_of(call: List[str]) -> str:
+    return call[call.index("-d") + 1]
+
+
+def test_a_request_sends_the_users_words_to_intake_then_executes_the_session_and_follows_the_job(harness, workers_src):
+    r = run_request(harness, workers_src, "--short")
+    assert r.returncode == 0, r.stderr
+    sent = posts(harness)
+    assert [url_of(c) for c in sent] == [f"{DEAD}/v1/create/intake/gated", f"{DEAD}/v1/create/execute"]
+    assert json.loads(body_of(sent[0])) == {"initial_text": REQUEST_WORDS, "target_duration_min": 0.167,
+                                            "short_video": True}
+    assert json.loads(body_of(sent[1])) == {"session_id": "sess_test_1", "quality_tier": "low"}
+    # From the execute on, the run follows the JOB, never the session.
+    assert "content_id=job_req_1" in r.stdout
+    assert f"status: {DEAD}/v1/podcasts/job_req_1/status" in r.stdout
+    assert "sess_test_1/status" not in r.stdout
+    reads = [url_of(c) for c in harness.calls("curl") if "POST" not in c]
+    assert reads == [f"{DEAD}/v1/podcasts/job_req_1/status"]
+    assert "read back: the api stored the Smart Create request as sent" in r.stderr
+
+
+def test_a_request_without_short_sends_no_short_switch(harness, workers_src):
+    r = run_request(harness, workers_src)
+    assert r.returncode == 0, r.stderr
+    assert "short_video" not in json.loads(body_of(posts(harness)[0]))
+
+
+def test_an_execute_that_names_no_job_is_not_called_started(harness, workers_src):
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=json.dumps({"refusal_message": "no"}))
+    assert r.returncode == 8, r.stderr
+    assert "MAY have started" in r.stderr
+
+
+def test_an_execute_the_api_refuses_is_exit_5(harness, workers_src):
+    r = run_request(harness, workers_src, STUB_TRIGGER_HTTP="403",
+                    STUB_TRIGGER_RESPONSE=json.dumps({"detail": "creation gate"}))
+    assert r.returncode == 5, r.stderr
+
+
+def test_a_stored_tier_or_length_other_than_asked_is_exit_6(harness, workers_src):
+    r = run_request(harness, workers_src, stored=[request_stored(tier="medium")])
+    assert r.returncode == 6, r.stderr
+    assert "quality_tier: requested low, stored \"medium\"" in r.stderr
+    harness2_stored = [request_stored(duration=1.0)]
+    r = run_request(harness, workers_src, stored=harness2_stored)
+    assert r.returncode == 6 and "duration_min: requested 0.167, stored 1.0" in r.stderr
+
+
+@pytest.mark.parametrize("flag", [("--visuals",), ("--motion-clips", "1"), ("--style", "Storytelling"),
+                                  ("--topic", "something else")])
+def test_a_request_refuses_a_flag_its_request_cannot_carry(harness, workers_src, flag):
+    harness.fresh_ack()
+    r = harness.run("--request", REQUEST_WORDS, *flag, env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 1 and "Nothing was sent" in r.stderr, r.stderr
+    assert posts(harness) == []
+
+
+def test_request_words_are_refused_when_empty_or_over_the_door_limit():
+    with pytest.raises(ValueError):
+        verification_flows.build_request_body(text="   ", duration="1.0", short=True)
+    with pytest.raises(ValueError):
+        verification_flows.build_request_body(text="x" * (verification_flows.REQUEST_TEXT_MAX + 1), duration="1.0",
+                                              short=False)
+    body = verification_flows.build_request_body(text="  keep my words  ", duration="1", short=False)
+    assert body == {"initial_text": "keep my words", "target_duration_min": 1.0}
+
+
+def test_the_request_read_back_refuses_another_job():
+    with pytest.raises(verification_flows.UnreadableSnapshot):
+        verification_flows.check_stored("request", {"target_duration_min": 0.167}, json.loads(request_stored(job_id="other")),
+                                        created_id="job_req_1", trigger_sent={"quality_tier": "low"})
+
