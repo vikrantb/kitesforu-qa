@@ -9,6 +9,12 @@ fresh-context vision agent run on the emitted frames + manifest.
 Proven: on the real broken job 85ec6fc9 (topic "systematic discrimination", rendered 1080x1920 with
 16:9-authored clips) this FAILS on exactly the two defects the founder caught in 30s.
 
+A delivered video is graded on BOTH surfaces a viewer can open, each with the same deterministic probes and its own
+frames (``<frames_dir>/watch``, ``<frames_dir>/captioned``): the watch video the player streams, and the captioned MP4 a
+creator downloads and posts (``visual.video_burned_url``, else ``outputs.clips[0].clip_url``). ``surfaces`` reports each
+one's verdict, every issue names its ``surface``, and the verdict is the worse of the two. A job whose caption burn was on
+and that carries no captioned MP4 is a MAJOR.
+
 A job that asked for no visuals (the producer's opted-out reason) is graded as the AUDIO its listener opens, and says
 ``audio_only: true``: it is never failed for a video it never asked for. Every other job with no video is NOT
 SURFACED, a job the producer will never re-render included: it stamps those reasons on jobs that asked for a video too.
@@ -116,8 +122,15 @@ def _probe_dims(path: str) -> tuple[int, int, float]:
 
 def _extract_frames(mp4: str, out_dir: str) -> list[str]:
     """OBSERVE: one frame every ~3s across the FULL duration (never one hero frame). ffmpeg reads its stdin for
-    keys, so it is given none: inherited, it ate the job ids a shell loop feeds the gate."""
+    keys, so it is given none: inherited, it ate the job ids a shell loop feeds the gate.
+
+    A previous run's frames are removed first. The default directory is fixed per job and surface, and ffmpeg
+    overwrites only the names it writes, so a shorter master (a re-mux) left the old master's tail frames in place
+    and they were graded as this one's."""
     os.makedirs(out_dir, exist_ok=True)
+    for stale in _frames_in_order(out_dir):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(stale)
     subprocess.run(["ffmpeg", "-y", "-i", mp4, "-vf", "fps=1/3,scale=540:-1",
                     os.path.join(out_dir, "f_%05d.png")],
                    capture_output=True, stdin=subprocess.DEVNULL)
@@ -409,24 +422,25 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
         return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
                 "issues": [{"sev": "BLOCKER", "msg": "NOT SURFACED: visual.video_url empty"}]}
 
-    tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4")
-    if not _fetch_master(url, tmp):
-        return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
-                "issues": [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}]}
-    vw, vh, dur = _probe_dims(tmp)
-    if not (vw and vh):
-        # An error page or a truncated download saved under .mp4 has no video stream. Say so; never
-        # let it reach extraction and come back as zero frames.
-        return {"job_id": job_id, "verdict": "FAIL", "topic": topic,
-                "issues": [{"sev": "BLOCKER", "msg": f"NOT A VIDEO: the fetched artifact has no video stream ({url})"}]}
-    vertical = bool(vw and vh and vh > vw)
-
-    # PROBE — invariant A: authored clip orientation must match the render target.
     clip_aspects = sorted({str(c.get("aspect_ratio")) for c in clips if c.get("aspect_ratio")})
-    if vertical and any(a in ("16:9", "16x9", "1.78") for a in clip_aspects):
-        issues.append({"sev": "BLOCKER", "msg": (
-            f"ORIENTATION MISMATCH (=> CUT): video {vw}x{vh} (vertical) but clips authored "
-            f"{clip_aspects} -> 16:9 visuals crop-filled into 9:16, edges CUT")})
+    fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
+    # PRODUCE + PROBE + OBSERVE every video a viewer of this job can open, each on its own: the watch video the
+    # player streams and the captioned MP4 a creator downloads and posts. A defect in one is a defect in the job.
+    watch = _grade_surface(job_id, WATCH, url, "visual.video_url" if vis.get("video_url") else "visual.video_burned_url",
+                           clips, clip_aspects, fdir)
+    captioned_url, captioned_source = _captioned_video(vis, d)
+    if captioned_url and captioned_url == str(url).strip():
+        # One file serves both: graded once, and the captioned surface says which one it is.
+        captioned = {"url": captioned_url, "source": captioned_source, "same_file_as": WATCH,
+                     "verdict": watch["verdict"], "issues": []}
+    elif captioned_url:
+        captioned = _grade_surface(job_id, CAPTIONED, captioned_url, captioned_source, clips, clip_aspects, fdir)
+    else:
+        captioned = _missing_captioned(vis)
+    surfaces = {WATCH: watch, CAPTIONED: captioned}
+    issues.extend(watch["issues"])
+    issues.extend(captioned["issues"])
+
     # off-topic Veo on educational content (planner disqualifier).
     ct = str((d.get("audio_config") or {}).get("content_type") or d.get("content_type") or "").lower()
     genre = str(d.get("genre") or "").lower()
@@ -435,20 +449,105 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     # `video_hero` by degrade_ladder is not a Veo clip and must not count toward an off-topic finding.
     veo = [c for c in clips if is_delivered_hero_clip(c)]
     if edu and veo:
-        issues.append({"sev": "MAJOR", "msg": (
+        # The job's clips, so every surface shows them: named as the job's, not one file's.
+        issues.append({"sev": "MAJOR", "surface": "job", "msg": (
             f"OFF-TOPIC RISK: {len(veo)} abstract Veo video_hero clips on EDUCATIONAL content "
             f"('{topic[:48]}') -> prefer meaningful diagrams")})
 
-    # OBSERVE: emit frames for the independent vision/adversary step.
-    fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
-    frames = _extract_frames(tmp, fdir)
-    issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
-
-    return {"job_id": job_id, "topic": topic, "dims": [vw, vh], "duration": dur,
+    # The verdict is over every issue, so it is the worse of the two surfaces (and the job's own). `dims` and
+    # `duration` stay the watch video's, as they were before the captioned surface was graded.
+    return {"job_id": job_id, "topic": topic, "dims": watch.get("dims"), "duration": watch.get("duration"),
             "clip_aspects": clip_aspects, "verdict": _verdict(issues), "issues": issues,
-            "frames_dir": fdir, "num_frames": len(frames),
+            "surfaces": surfaces, "frames_dir": fdir,
+            "num_frames": sum(int(s.get("num_frames") or 0) for s in surfaces.values()),
             "persona": persona or None,
             "next": _adversary_brief(persona)}
+
+
+#: The two videos a delivered job puts in front of people. ``watch`` is what the Studio and watch players stream
+#: (``visual.video_url``, else the captioned file). ``captioned`` is the MP4 with captions burned in: the frontend's
+#: export downloads it (``visual.video_burned_url``), and a born-short's shareable clip points at it
+#: (``outputs.clips[0].clip_url``). Creators post that file, so a caption defect lives in it alone.
+WATCH, CAPTIONED = "watch", "captioned"
+
+
+def _grade_surface(job_id: str, surface: str, url: str, source: str, clips: list[dict], clip_aspects: list[str],
+                   fdir: str) -> dict[str, Any]:
+    """Fetch one surface's video and run every deterministic probe on it: fetchable, a video stream, the authored
+    orientation against its own dimensions (invariant A), and the pixel invariants on its own frames (B + C), which
+    land in ``<fdir>/<surface>``. Every issue carries ``surface``."""
+    out: dict[str, Any] = {"url": url, "source": source}
+
+    def done(issues: list[dict[str, str]], **found: Any) -> dict[str, Any]:
+        named = [{"sev": i["sev"], "surface": surface, "msg": i["msg"]} for i in issues]
+        return {**out, **found, "verdict": _verdict(named), "issues": named}
+
+    tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}_{surface}.mp4")
+    if not _fetch_master(url, tmp):
+        return done([{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}], num_frames=0)
+    vw, vh, dur = _probe_dims(tmp)
+    if not (vw and vh):
+        # An error page or a truncated download saved under .mp4 has no video stream. Say so; never
+        # let it reach extraction and come back as zero frames.
+        return done([{"sev": "BLOCKER", "msg": f"NOT A VIDEO: the fetched artifact has no video stream ({url})"}],
+                    num_frames=0)
+    issues: list[dict[str, str]] = []
+    # PROBE — invariant A: authored clip orientation must match the render target.
+    if vh > vw and any(a in ("16:9", "16x9", "1.78") for a in clip_aspects):
+        issues.append({"sev": "BLOCKER", "msg": (
+            f"ORIENTATION MISMATCH (=> CUT): video {vw}x{vh} (vertical) but clips authored "
+            f"{clip_aspects} -> 16:9 visuals crop-filled into 9:16, edges CUT")})
+    # OBSERVE: emit frames for the independent vision/adversary step.
+    sdir = os.path.join(fdir, surface)
+    frames = _extract_frames(tmp, sdir)
+    issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
+    return done(issues, dims=[vw, vh], duration=dur, frames_dir=sdir, num_frames=len(frames))
+
+
+def _captioned_video(vis: dict[str, Any], d: dict[str, Any]) -> tuple[str, str]:
+    """The captioned MP4's URL and the field it was read from, or ``("", "")`` when the job carries none.
+
+    ``visual.video_burned_url`` first: the export downloads it. Else ``outputs.clips[0].clip_url``, unless it is the
+    watch render itself: a born-short's clip promotion falls back to ``video_url`` when no burn landed, and that file
+    has no captions burned in."""
+    burned = str(vis.get("video_burned_url") or "").strip()
+    if burned:
+        return burned, "visual.video_burned_url"
+    clips = (d.get("outputs") or {}).get("clips") or []
+    first = clips[0] if clips and isinstance(clips[0], dict) else {}
+    clip_url = str(first.get("clip_url") or "").strip()
+    if clip_url and clip_url != str(vis.get("video_url") or "").strip():
+        return clip_url, "outputs.clips[0].clip_url"
+    return "", ""
+
+
+def _caption_burn_expected(vis: dict[str, Any]) -> str:
+    """Why this job should carry a captioned MP4, or ``""`` when nothing on its doc says so.
+
+    ``visual.video_caption_burn`` names the burn arm that produced the captioned master (kinetic, karaoke or vtt),
+    and the producer writes it only when a burn landed. So a burn that failed every arm leaves no stamp, and the
+    VTT is the other witness: every mux runs the burn with ``burn_captions=True`` and burns whenever
+    ``visual.captions_vtt`` is non-empty (workers ``video_assembler.assemble_episode_video``)."""
+    stamp = str(vis.get("video_caption_burn") or "").strip()
+    if stamp:
+        return f"visual.video_caption_burn={stamp}"
+    if str(vis.get("captions_vtt") or "").strip():
+        return "visual.captions_vtt is set, and every mux burns a captioned MP4 from it"
+    return ""
+
+
+def _missing_captioned(vis: dict[str, Any]) -> dict[str, Any]:
+    """The captioned surface of a job that carries no captioned MP4: a MAJOR when caption burning was on, else
+    ``ABSENT`` with nothing to grade."""
+    why = _caption_burn_expected(vis)
+    if not why:
+        return {"url": "", "source": "", "verdict": "ABSENT", "issues": [],
+                "why": "no captioned MP4, and nothing on the doc says a caption burn ran"}
+    issues = [{"sev": "MAJOR", "surface": CAPTIONED, "msg": (
+        f"CAPTIONED VIDEO MISSING: caption burning is on ({why}) but the job carries no captioned MP4 "
+        "(visual.video_burned_url is empty and outputs.clips[0].clip_url is empty or the uncaptioned watch video): "
+        "the file a creator downloads and posts has no captions")}]
+    return {"url": "", "source": "", "verdict": _verdict(issues), "issues": issues}
 
 
 def _verdict(issues: list[dict[str, str]]) -> str:
@@ -655,10 +754,13 @@ def _adversary_brief(persona: str | None, *, audio_only: bool = False) -> str:
     An AUDIO-ONLY job (no video by design) gets the listening brief: it has no frames, and "read every
     frame" would send its reviewer to an empty directory.
     """
-    base = ("Run the ADVERSARY: a fresh vision agent Reads every frame in frames_dir, told to "
-            "REFUTE 'ship-ready' vs the spec (on-topic? text cut? coherent?). Verdict is final "
-            "only after that + the receipt in .claude/acceptance/.")
-    observe = ("YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in `frames_dir` — "
+    base = ("Run the ADVERSARY: a fresh vision agent Reads every frame in each surface's directory under "
+            "frames_dir (watch/: the video the player streams; captioned/: the captioned MP4 a creator "
+            "downloads and posts, when it is its own file), told to REFUTE 'ship-ready' vs the spec "
+            "(on-topic? text cut? coherent? every spoken line captioned, one caption layer, no caption over "
+            "a label?). Verdict is final only after that + the receipt in .claude/acceptance/.")
+    observe = ("YOU ARE REVIEWING THE DELIVERED VIDEO, not a script. Read EVERY frame in every surface "
+               "directory under `frames_dir` (`watch/`, and `captioned/` when the captioned MP4 is its own file) — "
                "they are sampled across the FULL duration at fps=1/3, so judge the whole piece and never "
                "one hero frame. Defects first, verdict last. Refute 'ship-ready' by default; a review "
                "that agrees to be agreeable is a failed review. Name the exact frame and the exact thing "
