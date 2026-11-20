@@ -33,20 +33,22 @@ pytestmark = pytest.mark.skipif(
 _WATCH = "https://synthetic.invalid/visuals/synthetic/episode_video.mp4"
 _BURNED = "https://synthetic.invalid/visuals/synthetic/episode_video_captioned.mp4"
 _CLIP = "https://synthetic.invalid/visuals/synthetic/episode_video_captioned_clip.mp4"
+_AUDIOGRAM = "https://synthetic.invalid/podcasts/synthetic/synthetic/clip_0.mp4"
 _VTT = "WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nA synthetic caption.\n"
 _SECONDS = 12  # fps=1/3 extraction: four frames, enough for the gate's run rule
 
 #: A dark canvas with one card in the middle and, for the captioned variants, a caption bar. Gray rather than
 #: white keeps the clean frames clear of the gate's letterbox rule (middle vs top/bottom band brightness).
-_CANVAS = "color=c=0x303030:s=540x960:d={d}"
+_CANVAS = "color=c=0x303030:s={size}:d={d}"
 _CARD = "drawbox=x=190:y=420:w=160:h=120:color=0xb0b0b0:t=fill"
+_LANDSCAPE_CARD = "drawbox=x=400:y=210:w=160:h=120:color=0xb0b0b0:t=fill"
 _CAPTION_INSET = "drawbox=x=120:y=800:w=300:h=24:color=0xb0b0b0:t=fill"
 _CAPTION_ON_EDGE = "drawbox=x=60:y=940:w=420:h=20:color=0xb0b0b0:t=fill"
 
 
-def _video(path: Path, *filters: str) -> Path:
+def _video(path: Path, *filters: str, size: str = "540x960") -> Path:
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-                    "-i", _CANVAS.format(d=_SECONDS), "-vf", ",".join(filters),
+                    "-i", _CANVAS.format(size=size, d=_SECONDS), "-vf", ",".join(filters),
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)],
                    check=True, capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
     return path
@@ -59,6 +61,7 @@ def videos(tmp_path_factory) -> dict[str, Path]:
         "clean": _video(d / "clean.mp4", _CARD),
         "captioned_clean": _video(d / "captioned_clean.mp4", _CARD, _CAPTION_INSET),
         "captioned_on_edge": _video(d / "captioned_on_edge.mp4", _CARD, _CAPTION_ON_EDGE),
+        "landscape": _video(d / "landscape.mp4", _LANDSCAPE_CARD, size="960x540"),
     }
 
 
@@ -117,16 +120,13 @@ def test_the_captioned_video_is_graded_beside_the_watch_video(gate, monkeypatch,
     edge = [i for i in out["issues"] if "EDGE-CLIP" in i["msg"]]
     assert edge and all(i["surface"] == "captioned" for i in out["issues"]), out["issues"]
     assert any("(bottom)" in i["msg"] for i in edge), edge
-    # Each surface's frames in its own directory, and none loose beside them.
-    frames = tmp_path / "frames"
-    assert _pngs(frames / "watch") and _pngs(frames / "captioned") and not _pngs(frames), os.listdir(frames)
-    assert watch["frames_dir"] == str(frames / "watch") and captioned["frames_dir"] == str(frames / "captioned")
-    assert out["num_frames"] == watch["num_frames"] + captioned["num_frames"] == 2 * len(_pngs(frames / "watch"))
     assert out["dims"] == [540, 960] == watch["dims"] == captioned["dims"]
     assert "captioned/" in out["next"], "the adversary is not told where the captioned frames are"
 
 
 def test_the_shareable_clip_is_the_captioned_video_when_no_burned_url_is_set(gate, monkeypatch, tmp_path, videos):
+    """A born-short's clip promotion stamps ``source: episode_video_short`` on the clip it points at the short's
+    master (workers ``stages/visuals/worker.py`` ``_maybe_promote_short_video_to_clip``)."""
     clip = {"clip_url": _CLIP, "source": "episode_video_short"}
     out, fetched = _run(gate, monkeypatch, tmp_path, _doc(video_url=_WATCH, outputs={"clips": [clip]}),
                         {_WATCH: videos["clean"], _CLIP: videos["captioned_on_edge"]})
@@ -166,7 +166,7 @@ def test_the_verdict_is_the_worse_of_the_two_surfaces(gate, monkeypatch, tmp_pat
 ])
 def test_a_missing_captioned_video_is_major_when_the_caption_burn_was_on(gate, monkeypatch, tmp_path, videos,
                                                                        burn, clip_url):
-    outputs = {"clips": [{"clip_url": clip_url}]} if clip_url else {}
+    outputs = {"clips": [{"clip_url": clip_url, "source": "episode_video_short"}]} if clip_url else {}
     out, fetched = _run(gate, monkeypatch, tmp_path, _doc(video_url=_WATCH, outputs=outputs, **burn),
                         {_WATCH: videos["clean"]})
     assert fetched == [_WATCH], fetched
@@ -184,6 +184,33 @@ def test_no_captioned_video_and_no_burn_is_absent_not_a_defect(gate, monkeypatch
     assert fetched == [_WATCH]
     assert out["surfaces"]["captioned"]["verdict"] == "ABSENT" and out["issues"] == [], out
     assert out["verdict"] == "PASS_DETERMINISTIC"
+
+
+def _social_clip() -> dict:
+    """``outputs.clips[0]`` as the social-clips writer leaves it on an episode: a scored excerpt from mid-episode,
+    rendered as a vertical audiogram, with no ``source`` (workers ``stages/combined/social_clips.py``)."""
+    return {"start_ms": 30000, "end_ms": 60000, "score": 0.8, "hook": "a synthetic hook",
+            "caption": "a synthetic caption", "start_segment": 3, "end_segment": 6, "clip_url": _AUDIOGRAM}
+
+
+@pytest.mark.parametrize("burn,expect_captioned,expect_overall", [
+    ({"captions_vtt": _VTT}, "REVIEW", "REVIEW"),  # the burn ran and left no captioned MP4: that is the finding
+    ({}, "ABSENT", "PASS_DETERMINISTIC"),  # nothing says a burn ran, so nothing is missing
+])
+def test_a_social_audiogram_is_never_graded_as_the_captioned_video(gate, monkeypatch, tmp_path, videos, burn,
+                                                                   expect_captioned, expect_overall):
+    """An episode's ``outputs.clips[0].clip_url`` is the social audiogram, not a captioned copy of the episode: a
+    vertical excerpt that starts mid-episode. Graded as the captioned video, it read as a 16:9 episode cut into 9:16
+    (a false BLOCKER), and it hid the real finding when the burn had left no captioned MP4."""
+    landscape = [{"start_ms": 0, "duration_ms": _SECONDS * 1000, "modality": "diagram", "aspect_ratio": "16:9"}]
+    doc = _doc(video_url=_WATCH, clips=landscape, outputs={"clips": [_social_clip()]}, **burn)
+    out, fetched = _run(gate, monkeypatch, tmp_path, doc, {_WATCH: videos["landscape"], _AUDIOGRAM: videos["clean"]})
+    assert fetched == [_WATCH], f"the social audiogram was fetched as the captioned video: {fetched}"
+    watch, captioned = out["surfaces"]["watch"], out["surfaces"]["captioned"]
+    assert watch["verdict"] == "PASS_DETERMINISTIC" and watch["dims"] == [960, 540], watch
+    assert captioned["verdict"] == expect_captioned and captioned["url"] == "", captioned
+    assert not any("ORIENTATION MISMATCH" in i["msg"] for i in out["issues"]), out["issues"]
+    assert out["verdict"] == expect_overall, out["issues"]
 
 
 # ---- one file, and re-runs ------------------------------------------------------------------------------------
@@ -213,3 +240,63 @@ def test_a_rerun_never_grades_the_last_runs_frames(gate, monkeypatch, tmp_path, 
     assert "f_00099.png" not in _pngs(stale), _pngs(stale)
     assert out["surfaces"]["captioned"]["num_frames"] == len(_pngs(stale)) == out["surfaces"]["watch"]["num_frames"]
     assert out["verdict"] == "PASS_DETERMINISTIC", out["issues"]
+
+
+def test_frames_dir_and_num_frames_still_mean_the_watch_videos_frames(gate, monkeypatch, tmp_path, videos):
+    """The top-level ``frames_dir`` and ``num_frames`` keep the meaning they had before the captioned surface was
+    graded: the watch video's frames, in that directory itself. The hero-user workflow reads every frame image there
+    and reports ``num_frames`` as the gate gives it. The captioned MP4's frames sit in ``captioned/`` beside them."""
+    out, _ = _run(gate, monkeypatch, tmp_path, _doc(video_url=_WATCH, video_burned_url=_BURNED),
+                  {_WATCH: videos["clean"], _BURNED: videos["captioned_clean"]})
+    frames = tmp_path / "frames"
+    watch, captioned = out["surfaces"]["watch"], out["surfaces"]["captioned"]
+    assert out["frames_dir"] == watch["frames_dir"] == str(frames), out
+    assert out["num_frames"] == watch["num_frames"] == len(_pngs(frames)) > 0, out
+    assert captioned["frames_dir"] == str(frames / "captioned"), captioned
+    assert captioned["num_frames"] == len(_pngs(frames / "captioned")) > 0, captioned
+    assert "captioned/" in out["next"], "the adversary is not told where the captioned frames are"
+
+
+def test_an_unfetchable_watch_video_leaves_no_frames_dir(gate, monkeypatch, tmp_path, videos):
+    """As before the captioned surface was graded, a watch video that cannot be fetched returns no ``frames_dir`` or
+    ``num_frames``: the hero-user workflow reads that as the not-fetchable exit, whatever the captioned MP4 shows."""
+    out, _ = _run(gate, monkeypatch, tmp_path, _doc(video_url=_WATCH, video_burned_url=_BURNED),
+                  {_BURNED: videos["captioned_clean"]})
+    assert out["verdict"] == "FAIL" and out["surfaces"]["watch"]["verdict"] == "FAIL", out
+    assert "frames_dir" not in out and "num_frames" not in out, out
+    assert out["surfaces"]["captioned"]["num_frames"] > 0, out["surfaces"]["captioned"]
+
+
+def test_the_captioned_master_is_not_left_in_the_temp_dir(gate, monkeypatch, tmp_path, videos):
+    """The captioned MP4 is fetched only to be probed and sampled; a batch of jobs must not leave one per job."""
+    out, _ = _run(gate, monkeypatch, tmp_path, _doc(video_url=_WATCH, video_burned_url=_BURNED),
+                  {_WATCH: videos["clean"], _BURNED: videos["captioned_clean"]})
+    assert out["surfaces"]["captioned"]["num_frames"] > 0, out["surfaces"]["captioned"]
+    assert not (tmp_path / f"ag_{out['job_id']}_captioned.mp4").exists(), os.listdir(tmp_path)
+
+
+#: Second runs into the frames directory a first run filled, one per way a surface goes ungraded or unextracted.
+_RERUNS = {
+    "captioned_missing": ({"video_url": _WATCH, "captions_vtt": _VTT}, {_WATCH: "clean"}),
+    "captioned_unfetchable": ({"video_url": _WATCH, "video_burned_url": _BURNED}, {_WATCH: "clean"}),
+    "captioned_is_the_watch_file": ({"video_burned_url": _BURNED}, {_BURNED: "captioned_clean"}),
+    "watch_unfetchable": ({"video_url": _WATCH, "video_burned_url": _BURNED}, {_BURNED: "captioned_clean"}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_RERUNS))
+def test_a_rerun_leaves_no_earlier_frames_in_either_surface(gate, monkeypatch, tmp_path, videos, case):
+    """``next`` sends the adversary to every frame in each surface's directory, so a surface this run did not extract
+    must hold none of an earlier run's frames: they would be judged as this job's."""
+    from PIL import Image
+
+    frames = tmp_path / "frames"
+    for d in (frames, frames / "captioned"):
+        d.mkdir(parents=True, exist_ok=True)
+        Image.new("L", (540, 960), 48).save(d / "f_00099.png")
+    visual, served = _RERUNS[case]
+    out, _ = _run(gate, monkeypatch, tmp_path, _doc(**visual), {url: videos[name] for url, name in served.items()})
+    for d in (frames, frames / "captioned"):
+        assert "f_00099.png" not in _pngs(d), f"{d} still holds the earlier run's frame: {_pngs(d)}"
+    captioned = out["surfaces"]["captioned"]
+    assert len(_pngs(frames / "captioned")) == int(captioned.get("num_frames") or 0), (case, captioned)
