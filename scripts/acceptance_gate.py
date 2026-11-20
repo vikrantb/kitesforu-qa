@@ -9,11 +9,11 @@ fresh-context vision agent run on the emitted frames + manifest.
 Proven: on the real broken job 85ec6fc9 (topic "systematic discrimination", rendered 1080x1920 with
 16:9-authored clips) this FAILS on exactly the two defects the founder caught in 30s.
 
-A delivered video is graded on BOTH surfaces a viewer can open, each with the same deterministic probes and its own
-frames (``<frames_dir>/watch``, ``<frames_dir>/captioned``): the watch video the player streams, and the captioned MP4 a
-creator downloads and posts (``visual.video_burned_url``, else ``outputs.clips[0].clip_url``). ``surfaces`` reports each
-one's verdict, every issue names its ``surface``, and the verdict is the worse of the two. A job whose caption burn was on
-and that carries no captioned MP4 is a MAJOR.
+A delivered video is graded on BOTH surfaces a viewer can open, each with the same deterministic probes and its
+own frames (``<frames_dir>/watch``, ``<frames_dir>/captioned``): the watch video the player streams, and the captioned
+MP4 a creator downloads and posts (``visual.video_burned_url``, else ``outputs.clips[0].clip_url``). ``surfaces``
+reports each one's verdict, every issue names its ``surface``, and the verdict is the worse of the two. A job whose
+caption burn was on and that carries no captioned MP4 is a MAJOR.
 
 A job that asked for no visuals (the producer's opted-out reason) is graded as the AUDIO its listener opens, and says
 ``audio_only: true``: it is never failed for a video it never asked for. Every other job with no video is NOT
@@ -426,8 +426,8 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     fdir = frames_dir or os.path.join(tempfile.gettempdir(), f"ag_frames_{job_id}")
     # PRODUCE + PROBE + OBSERVE every video a viewer of this job can open, each on its own: the watch video the
     # player streams and the captioned MP4 a creator downloads and posts. A defect in one is a defect in the job.
-    watch = _grade_surface(job_id, WATCH, url, "visual.video_url" if vis.get("video_url") else "visual.video_burned_url",
-                           clips, clip_aspects, fdir)
+    watch_source = "visual.video_url" if vis.get("video_url") else "visual.video_burned_url"
+    watch = _grade_surface(job_id, WATCH, url, watch_source, clips, clip_aspects, fdir)
     captioned_url, captioned_source = _captioned_video(vis, d)
     if captioned_url and captioned_url == str(url).strip():
         # One file serves both: graded once, and the captioned surface says which one it is.
@@ -482,7 +482,8 @@ def _grade_surface(job_id: str, surface: str, url: str, source: str, clips: list
         named = [{"sev": i["sev"], "surface": surface, "msg": i["msg"]} for i in issues]
         return {**out, **found, "verdict": _verdict(named), "issues": named}
 
-    tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}_{surface}.mp4")
+    # The watch master keeps the path it always had; the captioned one is its own file beside it.
+    tmp = os.path.join(tempfile.gettempdir(), f"ag_{job_id}.mp4" if surface == WATCH else f"ag_{job_id}_{surface}.mp4")
     if not _fetch_master(url, tmp):
         return done([{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}], num_frames=0)
     vw, vh, dur = _probe_dims(tmp)

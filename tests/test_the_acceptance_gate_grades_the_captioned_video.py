@@ -127,8 +127,8 @@ def test_the_captioned_video_is_graded_beside_the_watch_video(gate, monkeypatch,
 
 
 def test_the_shareable_clip_is_the_captioned_video_when_no_burned_url_is_set(gate, monkeypatch, tmp_path, videos):
-    out, fetched = _run(gate, monkeypatch, tmp_path,
-                        _doc(video_url=_WATCH, outputs={"clips": [{"clip_url": _CLIP, "source": "episode_video_short"}]}),
+    clip = {"clip_url": _CLIP, "source": "episode_video_short"}
+    out, fetched = _run(gate, monkeypatch, tmp_path, _doc(video_url=_WATCH, outputs={"clips": [clip]}),
                         {_WATCH: videos["clean"], _CLIP: videos["captioned_on_edge"]})
     assert fetched == [_WATCH, _CLIP], fetched
     captioned = out["surfaces"]["captioned"]

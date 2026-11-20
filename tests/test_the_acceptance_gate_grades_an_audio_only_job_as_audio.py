@@ -357,7 +357,7 @@ def test_a_failed_download_never_grades_the_last_runs_master(gate, tmp_path, mon
         "topic": "t", "visual": {"status": "done", "video_status": "ready", "video_url": url}})
     out = gate.run_gate(job)
     assert out["verdict"] == "FAIL", out
-    assert out["issues"] == [{"sev": "BLOCKER", "msg": f"artifact not fetchable: {url}"}], out
+    assert out["issues"] == [{"sev": "BLOCKER", "surface": "watch", "msg": f"artifact not fetchable: {url}"}], out
     assert not (tmp_path / f"ag_{job}.mp4").exists(), "the previous run's master survived the failed fetch"
 
 
