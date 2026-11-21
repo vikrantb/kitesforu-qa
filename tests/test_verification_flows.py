@@ -38,6 +38,7 @@ from test_create_verification_job import _IMAGES, DEAD, Harness  # noqa: E402
 API_REPO = Path(os.environ.get("KFU_API_REPO") or "/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-api")
 COURSE_WORKERS_REPO = Path(os.environ.get("KFU_COURSE_WORKERS_REPO")
                            or "/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-course-workers")
+FRONTEND_REPO = Path(os.environ.get("KFU_FRONTEND_REPO") or API_REPO.parent / "kitesforu-frontend")
 
 #: The stub: the trigger (a POST to ``*/generate``) answers from STUB_TRIGGER_*, every other POST from STUB_POST_*,
 #: and each GET from the status sequence, as the harness's own stub does.
@@ -97,7 +98,7 @@ CLASS_ID = "cls_done_1"
 
 EXPECTED_CLASS_BODY = (
     '{"topic": "pipeline verification", "subject": "General", "grade_level": "Grade 5", "total_lessons": 3, '
-    '"lesson_duration_min": 0.167, "questions_per_lesson": 3, "style": "Explainer", "language": "en-US", '
+    '"lesson_duration_min": 5.0, "questions_per_lesson": 3, "style": "Explainer", "language": "en-US", '
     '"generation_mode": "autopilot", "audience_type": "k12"}'
 )
 EXPECTED_WRITEUP_BODY = '{"topic": "pipeline verification", "formats_requested": ["linkedin_post"]}'
@@ -251,8 +252,9 @@ print(json.dumps({
 
 def test_the_bodies_sit_on_the_floors_of_the_apis_own_request_models(harness, workers_src):
     """The api's CreateClassRequest and CreateWriteupRequest accept each body, declare every key it sends (both drop an
-    undeclared key without an error) and have no tier field; the class sits on each of its model floors, and one below
-    is refused. So "the smallest request the api accepts" is the models' own bounds, read from them."""
+    undeclared key without an error) and have no tier field; the class sits on its lesson-count and question floors,
+    and one below each floor is refused. Its lesson length sits on the shortest a user can pick, at or above the model's
+    floor: the smallest class a user can make."""
     py = _workers_python()
     if not py:
         pytest.skip("no kitesforu-workers venv to import kitesforu_schemas from (set KFU_WORKERS_PYTHON): "
@@ -267,7 +269,10 @@ def test_the_bodies_sit_on_the_floors_of_the_apis_own_request_models(harness, wo
     sent = json.loads(cls)
     assert got["class_undeclared"] == [] and got["writeup_undeclared"] == [], got
     assert got["class_tier_field"] is False and got["writeup_tier_field"] is False, got
-    assert {n: sent[n] for n in got["floors"]} == got["floors"], got
+    floors = dict(got["floors"])
+    api_lesson_floor = floors.pop("lesson_duration_min")
+    assert {n: sent[n] for n in floors} == floors, got
+    assert sent["lesson_duration_min"] == verification_flows.CLASS_SMALLEST_LESSON_MIN >= api_lesson_floor, got
     assert set(got["below_floor_rejected"].values()) == {True} and got["no_format_rejected"] is True, got
     assert verification_flows.WRITEUP_FORMAT in got["formats"], got
 
@@ -351,7 +356,7 @@ WORKER_DOORS = {
                                                        '"lesson_duration_min": settings.lesson_duration_min if',
                                                        '"audience_type": settings.audience_type if settings')},
         "runs": [(), ("--topic", "binary search trees", "--style", "Interview", "--language", "fr-FR",
-                      "--duration", "1.0"), ("--topic", "abc"), ("--topic", "ab ")],
+                      "--duration", "8.0"), ("--topic", "abc"), ("--topic", "ab ")],
         # The class 289730a95 sent, and a topic the api takes and the initiator does not. The initiator counts a
         # topic as sent, spaces included, so "ab " runs where "ab" does not.
         "refused": [({"grade_level": None, "audience_type": None}, "grade_level is required for K-12 classes"),
@@ -437,7 +442,8 @@ def test_the_class_llm_bound_is_the_codes_own():
 
 def test_a_class_is_priced_as_its_lessons_and_its_llm_calls_and_names_the_cover():
     body = json.loads(EXPECTED_CLASS_BODY)
-    lesson = verification_job.estimate(verification_job.implied_episode_body(0.167, "medium"), images=_IMAGES)
+    lesson = verification_job.estimate(verification_job.implied_episode_body(
+        verification_flows.CLASS_SMALLEST_LESSON_MIN, "medium"), images=_IMAGES)
     est = verification_flows.class_estimate(body, images=_IMAGES)
     # 1 syllabus + 4 quiz calls: at the backup's medians, and with every output at 4000 tokens and the input at the
     # backup's maxima (939 and 1552 tokens), at gpt-4o's $2.50 in and $10.00 out per 1M tokens.
@@ -527,7 +533,8 @@ def test_an_estimate_with_an_unpriced_term_has_no_total_and_says_why(estimate):
     assert estimate.detail and any("not priced" in d for d in estimate.detail), estimate.detail
 
 
-@pytest.mark.parametrize("flow_src,flow,reason", [("class", "class", "tier=medium paid_stills=4 est=unknown "),
+@pytest.mark.parametrize("flow_src,flow,reason", [("class", "class", "tier=medium duration=5.0min paid_stills=4 "
+                                                                       "est=unknown "),
                                                   ("writeup", "writeup", "tier=medium est=unknown "),
                                                   ("video-export", "video-export", "est=unknown "),
                                                   ("scorm-export", "scorm-export", "est=unknown ")],
@@ -651,7 +658,7 @@ def test_every_flag_that_takes_a_value_is_guarded():
 #: Per flow, each value flag it takes: a value that is not its default, and the body key that carries it.
 FLAG_IN_BODY = {
     "class": {"--topic": ("binary search trees", "topic", "binary search trees"),
-              "--duration": ("1.0", "lesson_duration_min", 1.0),
+              "--duration": ("8.0", "lesson_duration_min", 8.0),
               "--style": ("Interview", "style", "Interview"),
               "--language": ("fr-FR", "language", "fr-FR")},
     "writeup": {"--topic": ("binary search trees", "topic", "binary search trees")},
@@ -676,7 +683,8 @@ def test_the_flags_a_flow_takes_are_the_ones_its_body_carries():
     assert set(takes) == set(FLOWS), takes
     for flow, listed in takes.items():
         mode_flag = FLOWS[flow]["args"][0]
-        assert set(listed.split()) - {mode_flag} == set(FLAG_IN_BODY.get(flow) or {}), (flow, listed)
+        switches = {verification_flows.LESSONS_NO_USER_CAN_MAKE_FLAG} if flow == "class" else set()
+        assert set(listed.split()) - {mode_flag} - switches == set(FLAG_IN_BODY.get(flow) or {}), (flow, listed)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -887,3 +895,66 @@ def test_the_cost_changelog_records_the_four_flows():
                    "scripts/create_verification_job.sh",
                    "scripts/verification_flows.py", "medium", "not priced", "Pricing-page implication"):
         assert needle in entry, needle
+
+
+
+# ---------------------------------------------------------------------------------------------
+# A class is one a user could make: its lessons are no shorter than the form's shortest
+# ---------------------------------------------------------------------------------------------
+
+def _form_lesson_lengths(audience: str) -> List[float]:
+    """The lesson lengths the class form offers ``audience``, from kitesforu-frontend origin/main."""
+    src = _origin_main_file(FRONTEND_REPO, "hooks/useClassForm.ts")
+    const = {"k12": "K12_DURATION_OPTIONS"}[audience]
+    block = re.search(rf"export const {const}\s*=\s*\[(.*?)\]", src, flags=re.S)
+    assert block, f"{const} is not in hooks/useClassForm.ts"
+    values = [float(v) for v in re.findall(r"value:\s*([0-9.]+)", block.group(1))]
+    assert values, f"{const} lists no values"
+    return values
+
+
+def test_the_default_lesson_is_the_shortest_the_class_form_offers():
+    """The mirror: the class this script makes (a K-12 class) defaults to the least lesson length its form offers."""
+    assert verification_flows.CLASS_AUDIENCE == "k12"
+    assert verification_flows.CLASS_SMALLEST_LESSON_MIN == min(_form_lesson_lengths("k12"))
+
+
+def _priced_offline(monkeypatch) -> None:
+    monkeypatch.setattr(verification_flows.vj, "episode_stills_quote", lambda _src: _IMAGES)
+
+
+def test_a_class_with_no_duration_is_made_at_the_shortest_a_user_can_pick(monkeypatch):
+    _priced_offline(monkeypatch)
+    out = verification_flows.plan("class", topic="pipeline verification", duration="", style="Explainer",
+                                  language="en-US", target_id="", workers_src="",
+                                  catalog_label="")
+    assert json.loads(out["payload"])["lesson_duration_min"] == verification_flows.CLASS_SMALLEST_LESSON_MIN
+    assert "LESSONS NO USER CAN MAKE" not in out["summary"]
+
+
+@pytest.mark.parametrize("duration", ["0.167", "2.0", "4.99"])
+def test_a_lesson_shorter_than_any_a_user_can_pick_is_refused_by_name(duration):
+    with pytest.raises(ValueError, match=r"no user can make.*--class-lessons-no-user-can-make"):
+        verification_flows.plan("class", topic="pipeline verification", duration=duration, style="Explainer",
+                                language="en-US", target_id="", workers_src="", catalog_label="")
+
+
+def test_the_override_makes_the_short_class_and_says_so_loudly(monkeypatch):
+    _priced_offline(monkeypatch)
+    out = verification_flows.plan("class", topic="pipeline verification", duration="0.167", style="Explainer",
+                                  language="en-US", target_id="", workers_src="",
+                                  catalog_label="", lessons_no_user_can_make=True)
+    assert json.loads(out["payload"])["lesson_duration_min"] == 0.167
+    assert out["summary"].startswith("LESSONS NO USER CAN MAKE (--class-lessons-no-user-can-make"), out["summary"]
+
+
+@pytest.mark.parametrize("flow_src", ["class"], indirect=True)
+def test_the_script_refuses_a_short_class_and_sends_nothing_unless_named(harness, flow_src):
+    refused = harness.run(*FLOWS["class"]["args"], "--duration", "0.167", "--dry-run", env=env_for("class", flow_src))
+    assert refused.returncode == 1 and "--class-lessons-no-user-can-make" in refused.stderr, refused.stderr
+    assert harness.calls() == [] and refused.stdout == ""
+    named = harness.run(*FLOWS["class"]["args"], "--duration", "0.167", "--class-lessons-no-user-can-make",
+                        "--dry-run", env=env_for("class", flow_src))
+    assert named.returncode == 0, named.stderr
+    assert json.loads(named.stdout)["lesson_duration_min"] == 0.167
+    assert "LESSONS NO USER CAN MAKE" in named.stderr, named.stderr

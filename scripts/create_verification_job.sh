@@ -25,10 +25,12 @@
 #     but a user_… id: each episode is created on the owner's behalf, and the creation gate is expected to refuse
 #     an owner Clerk has no email for (the key's own identity, any test_… id). It prices
 #     through the workers tree, as a purchase does.
-#   ./create_verification_job.sh --class --on-behalf-of user_…  # the smallest CLASS the api accepts (POST /v1/classes:
+#   ./create_verification_job.sh --class --on-behalf-of user_…  # the smallest CLASS a user can make (POST /v1/classes:
 #     a K-12 class at Grade 5, 3 lessons x --duration, 3 questions each, autopilot), then its one trigger, POST
 #     /v1/classes/<id>/curriculum/generate: in autopilot the syllabus worker starts the lessons itself. It takes
-#     --topic --duration --style --language, the owner flags and --dry-run. Each lesson runs at medium (the class door
+#     --topic --duration --style --language, the owner flags and --dry-run. Its lessons default to the shortest a user
+#     can pick (5 min, the K-12 form's least; verification_flows.CLASS_SMALLEST_LESSON_MIN), and a shorter --duration
+#     is refused unless the run names --class-lessons-no-user-can-make. Each lesson runs at medium (the class door
 #     stores no tier) and is priced as a course episode is, through the workers tree, and the syllabus and quiz LLM
 #     calls from their measurements and the code's caps; the cover's calls are NOT priced, so it needs the ACK. Like
 #     --course, it refuses any owner but a user_… id: the orchestrator creates each lesson on the owner's behalf.
@@ -175,6 +177,8 @@ MOTION_CLIPS="0"    # --motion-clips N (0-3): PURCHASED paid video clips, sent a
                     # the clip ranking, the figure rule and first_heroes all act. Before this flag no
                     # verification job could reach it (2026-09-11, workers #3116).
 DRY_RUN="false"     # --dry-run: print the POST URL, headers, body and estimate, then exit 0 before any request.
+DURATION_GIVEN="false"  # --duration named: a class's lesson length is otherwise the shortest a user can pick
+LESSONS_NO_USER_CAN_MAKE="false"  # --class-lessons-no-user-can-make: allow class lessons shorter than any a user can pick
 PAID_STILLS="on"    # --paid-stills on|off: with --motion-clips, buy paid stills too (on) or clips only
                     # (off). How many, and why, is decided beside the body: verification_job.py.
 PAID_STILLS_GIVEN="false"  # set when --paid-stills is passed explicitly (validated below)
@@ -210,7 +214,7 @@ while [[ $# -gt 0 ]]; do
   [[ "$1" == --* ]] && GIVEN+=("$1")
   case "$1" in
     --topic)    require_value "$@"; TOPIC="$2"; shift 2 ;;
-    --duration) require_value "$@"; DURATION="$2"; shift 2 ;;
+    --duration) require_value "$@"; DURATION="$2"; DURATION_GIVEN="true"; shift 2 ;;
     --tier)     require_value "$@"; TIER="$2"; shift 2 ;;
     --style)    require_value "$@"; STYLE="$2"; shift 2 ;;
     --language) require_value "$@"; LANGUAGE="$2"; shift 2 ;;
@@ -241,6 +245,7 @@ while [[ $# -gt 0 ]]; do
     --motion-clips) require_value "$@"; MOTION_CLIPS="$2"; shift 2 ;;  # 0-3 purchased Veo clips — T4, needs the ACK
     --paid-stills)  require_value "$@"; PAID_STILLS="$2"; PAID_STILLS_GIVEN="true"; shift 2 ;;  # on|off — requires --motion-clips 1-3
     --dry-run)  DRY_RUN="true"; shift ;;
+    --class-lessons-no-user-can-make) LESSONS_NO_USER_CAN_MAKE="true"; shift ;;
     --course)   set_mode course --course; shift ;;
     --class)    set_mode class --class; shift ;;
     --writeup)  set_mode writeup --writeup; shift ;;
@@ -311,7 +316,7 @@ fi
 # medium), and an export sends no field of its own.
 _takes=""
 case "$MODE" in
-  class)        _takes="--class --topic --duration --style --language"
+  class)        _takes="--class --topic --duration --style --language --class-lessons-no-user-can-make"
                 _carries="the topic, the lesson duration, the style, the language and the owner" ;;
   writeup)      _takes="--writeup --topic"
                 _carries="the topic and the owner" ;;
@@ -424,9 +429,14 @@ if [[ "$MODE" == "course" ]]; then
     "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
     || { echo "Refusing: the course request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 elif [[ -n "$FLOW" ]]; then
+  # A class's lesson length is the plan's to default: the shortest a user can pick, unless --duration names one.
+  _flow_duration="$DURATION"
+  [[ "$FLOW" == "class" && "$DURATION_GIVEN" != "true" ]] && _flow_duration=""
+  _flow_extra=()
+  [[ "$LESSONS_NO_USER_CAN_MAKE" == "true" ]] && _flow_extra+=("--lessons-no-user-can-make")
   PLAN=$("$PLAN_PY" "$HERE/verification_flows.py" plan "--flow=$FLOW" \
-    "--topic=$TOPIC" "--duration=$DURATION" "--style=$STYLE" "--language=$LANGUAGE" "--target-id=$TARGET_ID" \
-    "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
+    "--topic=$TOPIC" "--duration=$_flow_duration" "--style=$STYLE" "--language=$LANGUAGE" "--target-id=$TARGET_ID" \
+    "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL" ${_flow_extra[@]+"${_flow_extra[@]}"}) \
     || { echo "Refusing: the $MODE_FLAG request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 else
   PLAN=$("$PLAN_PY" "$HERE/verification_job.py" plan \
