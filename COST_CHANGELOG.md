@@ -2,6 +2,22 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-11-18 — the verification job can make a Smart Create request in a user's own words (`--request`: ~$0.04-2.21 a run at low, 1 min)
+
+**Files:** `scripts/create_verification_job.sh`, `scripts/verification_flows.py`, `tests/test_verification_flows.py`,
+this entry.
+
+**What each run buys.** `--request "<words>"` is `POST /v1/create/intake/gated` (the gated intake: one planner LLM call
+on the api, a fraction of a cent, not priced here) and `POST /v1/create/execute` on that session, which makes one job.
+The job is priced as an orchestrated episode at the asked tier and length, with the paid stills an episode may buy
+(`verification_job.implied_episode_body`), and with the born-short term when `--short` is given: ~$0.04-2.21 at low
+for 1 minute, the high end a dollar ceiling at the dearest image row. Every request needs the ACK (the implied paid
+stills alone trigger it). Measured on the 2026-11-18 baseline: four low 1-min 9:16 runs booked $0.036, $0.190,
+$0.237 and $0.039 (each job's own `costs.*`). Executing a preview session also runs the planner again at execute
+(`materialize_full_plan`), a second unpriced call. The other modes send the bytes they sent before.
+
+**Pricing-page implication:** none (a verification tool; it buys what a user's request would buy).
+
 ## 2026-11-07 — the verification job can create the smallest class, writeup, course video export and SCORM export (`--class`: ~$0.55-6.42 a run at medium; `--writeup`: ~$0.008-0.14; each plus its cover's unpriced calls; `--course-video-export` and `--scorm-export`: unpriced; every run ACK-gated; $0 change on every other run)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_flows.py` (new), `scripts/verification_job.py`,

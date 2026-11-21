@@ -169,6 +169,7 @@ WAIT="false"
 ON_BEHALF_OF=""
 ON_BEHALF_OF_EMAIL=""   # --on-behalf-of-email: the ADDRESS (the api reads it from its own header)
 SHORT="false"       # born-short: short_video=true → 9:16, single-voice, intro/outro suppressed
+REQUEST_TEXT=""     # --request: the words a user would type into Smart Create
 CONTENT_RATING=""   # optional maturity dial: g|pg|pg_13|r (exercises ENABLE_CONTENT_MATURITY end-to-end)
 MOTION_CLIPS="0"    # --motion-clips N (0-3): PURCHASED paid video clips, sent as visual_options.motion_clips.
                     # The ONLY way to exercise the purchased-motion arm (`paid_opt_in` in veo_hero), where
@@ -244,6 +245,7 @@ while [[ $# -gt 0 ]]; do
     --course)   set_mode course --course; shift ;;
     --class)    set_mode class --class; shift ;;
     --writeup)  set_mode writeup --writeup; shift ;;
+    --request)  require_value "$@"; set_mode request --request; REQUEST_TEXT="$2"; shift 2 ;;  # a Smart Create request in a user's own words
     # The id is the next word unless that word is a flag: `--course-video-export --dry-run` must never read
     # --dry-run as the id and send the POST the dry run was meant to rehearse. A missing id is refused at the plan.
     --course-video-export|--scorm-export)
@@ -266,7 +268,7 @@ while [[ $# -gt 0 ]]; do
 done
 # A class, writeup or export is one of verification_flows.py's flows; a podcast and a course are not.
 FLOW=""
-case "$MODE" in class|writeup|video-export|scorm-export) FLOW="$MODE" ;; esac
+case "$MODE" in class|writeup|video-export|scorm-export|request) FLOW="$MODE" ;; esac
 
 # ---- Duration: a number of minutes, or nothing below means anything ------------------------
 # A non-numeric value used to reach the clip warning first ("for a 0s episode") and die later at the
@@ -319,6 +321,8 @@ case "$MODE" in
                 _carries="the course id and the owner" ;;
   scorm-export) _takes="--scorm-export"
                 _carries="the class id and the owner" ;;
+  request)      _takes="--request --duration --tier --short --wait"
+                _carries="the words, the target length, the tier, the 9:16 switch and the owner" ;;
 esac
 if [[ -n "$_takes" ]]; then
   _takes="$_takes --on-behalf-of --on-behalf-of-email --dry-run"
@@ -406,7 +410,7 @@ if [[ "$MOTION_CLIPS" != "0" ]]; then
   ensure_workers_tree "price the clips this job buys" \
     || { echo "Refusing the purchase: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
-elif [[ "$MODE" == "course" || "$MODE" == "class" ]]; then
+elif [[ "$MODE" == "course" || "$MODE" == "class" || "$MODE" == "request" ]]; then
   ensure_workers_tree "price the paid stills each episode may buy" \
     || { echo "Refusing the $MODE: it cannot be priced. Nothing was sent." >&2; exit 1; }
   PLAN_PY="$WORKERS_PY"
@@ -426,6 +430,7 @@ if [[ "$MODE" == "course" ]]; then
 elif [[ -n "$FLOW" ]]; then
   PLAN=$("$PLAN_PY" "$HERE/verification_flows.py" plan "--flow=$FLOW" \
     "--topic=$TOPIC" "--duration=$DURATION" "--style=$STYLE" "--language=$LANGUAGE" "--target-id=$TARGET_ID" \
+    "--request=${REQUEST_TEXT:-}" "--tier=$TIER" "--short=$SHORT" \
     "--workers-src=$WORKERS_SRC_FOR_PLAN" "--catalog-label=$CATALOG_LABEL") \
     || { echo "Refusing: the $MODE_FLAG request could not be built and priced (reason above). Nothing was sent." >&2; exit 1; }
 else
@@ -452,6 +457,10 @@ REASON=$(plan_field ack_reason)
 # A flow's doors come from its plan, beside its body: where it is POSTed, the reply key naming what it made, the
 # trigger that starts a draft's generation (and the phrase its reply carries when it did), and the read route.
 TRIGGER_PATH=""
+RESULT_KEY=""      # a flow whose TRIGGER makes the thing (a request's execute) names it under this reply key
+READBACK="yes"     # a request whose execute made a course, class or writeup is not read back as a podcast job
+TRIGGER_BODY=""    # the trigger's JSON body, "{id}" standing for what the create answered ('' = no body)
+TRIGGER_SENT=""
 if [[ -n "$FLOW" ]]; then
   NOUN=$(plan_field noun)
   CREATE_PATH=$(plan_field create_path)
@@ -459,6 +468,8 @@ if [[ -n "$FLOW" ]]; then
   TRIGGER_PATH=$(plan_field trigger_path)
   STARTED=$(plan_field started)
   READ_PATH=$(plan_field read_path)
+  RESULT_KEY=$(plan_field result_key)
+  TRIGGER_BODY=$(plan_field trigger_body)
 fi
 print_est_detail() { [[ -n "$EST_DETAIL" ]] && while IFS= read -r _l; do echo "    $_l" >&2; done <<< "$EST_DETAIL"; return 0; }
 
@@ -581,7 +592,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
     done
     [[ -z "$PAYLOAD" ]] && echo "  (no body)"
     if [[ -n "$TRIGGER_PATH" ]]; then
-      echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (no body; the same headers minus Content-Type)"
+      if [[ -n "$TRIGGER_BODY" ]]; then
+        echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (the same headers) with ${TRIGGER_BODY//"{id}"/<$ID_KEY>}"
+      else
+        echo "then POST $(route_for "$TRIGGER_PATH" "<$ID_KEY>")   (no body; the same headers minus Content-Type)"
+      fi
     fi
   } >&2
   # The BODY alone goes to stdout, so `--dry-run 2>/dev/null | jq .` works. Every banner above is
@@ -638,7 +653,8 @@ POST_STATE="created"
 STATUS_URL="$API_BASE/v1/$STATUS_ROUTE/$JOB_ID/status"
 [[ -n "$FLOW" ]] && STATUS_URL=$(route_for "$READ_PATH" "$JOB_ID")
 echo "${ID_KEYS[0]}=$JOB_ID  (est $EST)"
-echo "status: $STATUS_URL"
+# A request's create answers a session, not a job: its status URL is printed once the execute names the job.
+[[ -z "$RESULT_KEY" ]] && echo "status: $STATUS_URL"
 # An export already ready for this exact set of lessons answers 200 with its read body: nothing new was queued.
 if [[ "$FLOW" == "video-export" && "$HTTP_CODE" == "200" ]]; then
   echo "  already ready for this exact set of lessons: nothing was queued, and the stored export is the one to grade" >&2
@@ -667,20 +683,65 @@ fi
 # started: exit 8, which never invites a re-run.
 if [[ -n "$TRIGGER_PATH" ]]; then
   TRIGGER_URL=$(route_for "$TRIGGER_PATH" "$JOB_ID")
-  TRIGGER_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$TRIGGER_URL" "${HDR_ARGS[@]}" \
+  TRIGGER_ARGS=("${HDR_ARGS[@]}")
+  if [[ -n "$TRIGGER_BODY" ]]; then
+    TRIGGER_SENT="${TRIGGER_BODY//"{id}"/$JOB_ID}"
+    TRIGGER_ARGS=("${POST_HDR_ARGS[@]}" -d "$TRIGGER_SENT")
+  fi
+  TRIGGER_OUT=$(curl -sS --connect-timeout 15 --max-time 120 -X POST "$TRIGGER_URL" "${TRIGGER_ARGS[@]}" \
     -w $'\n%{http_code}') || {
     _rc=$?
     _how="curl exit $_rc"; (( _rc == 28 )) && _how="timed out, curl exit 28"
     echo "The $NOUN WAS created, but its generation trigger failed at the transport level ($_how): its generation MAY" >&2
-    echo "have started. Read $STATUS_URL before re-running." >&2
+    if [[ -n "$RESULT_KEY" ]]; then
+      echo "have made a job. No job was named, so list the owner's newest jobs before re-running (session $JOB_ID)." >&2
+    else
+      echo "have started. Read $STATUS_URL before re-running." >&2
+    fi
     finish 8
   }
   TRIGGER_CODE="${TRIGGER_OUT##*$'\n'}"
   TRIGGER_RESP="${TRIGGER_OUT%$'\n'*}"
-  _started=$(printf '%s' "$TRIGGER_RESP" | python3 -c '
+  if [[ -n "$RESULT_KEY" ]]; then
+    # The trigger made the thing: started means it named it, and from here on the run follows THAT id.
+    # The execute names what it made (content_id) and its kind (content_type). A soft refusal answers 200 with an
+    # empty id and content_type "refused" (or a refusal_message) before anything is made: nothing ran, nothing charged.
+    read -r _made _made_type _refused < <(printf '%s' "$TRIGGER_RESP" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+made, kind = str(d.get(sys.argv[1]) or ""), str(d.get("content_type") or "")
+refused = "yes" if (kind == "refused" or (not made and d.get("refusal_message"))) else "no"
+print(made or "-", kind or "-", refused)' "$RESULT_KEY" 2>/dev/null) || { _made="-"; _made_type="-"; _refused="no"; }
+    [[ "$_made" == "-" ]] && _made=""
+    _started="no"
+    if [[ "$TRIGGER_CODE" =~ ^2[0-9][0-9]$ && "$_refused" == "yes" ]]; then
+      echo "The api REFUSED the $NOUN at execute (HTTP $TRIGGER_CODE, a soft refusal): nothing was made and nothing was" >&2
+      echo "charged. Response:" >&2
+      echo "$TRIGGER_RESP" >&2
+      finish 5
+    fi
+    if [[ -n "$_made" ]]; then
+      _started="yes"
+      echo "  the $NOUN (session $JOB_ID) made $RESULT_KEY=$_made" >&2
+      JOB_ID="$_made"
+      # The execute routes by what the plan became: a course, class or writeup is read on its own route, and only a
+      # podcast job is read back against the request (verification_flows check_stored).
+      case "$_made_type" in
+        course)  STATUS_URL="$API_BASE/v1/courses/$JOB_ID/status"; READBACK="no" ;;
+        class)   STATUS_URL="$API_BASE/v1/classes/$JOB_ID"; READBACK="no" ;;
+        writeup) STATUS_URL="$API_BASE/v1/writeups/$JOB_ID"; READBACK="no" ;;
+        *)       STATUS_URL=$(route_for "$READ_PATH" "$JOB_ID"); READBACK="yes" ;;
+      esac
+      echo "$RESULT_KEY=$JOB_ID"
+      echo "status: $STATUS_URL"
+      [[ "$READBACK" == "no" ]] && echo "  the execute made a $_made_type, not a podcast job: it is not read back against the request" >&2
+    fi
+  else
+    _started=$(printf '%s' "$TRIGGER_RESP" | python3 -c '
 import json, sys
 message = str(json.load(sys.stdin).get("message") or "")
 print("yes" if sys.argv[1] in message.lower() else "no")' "$STARTED" 2>/dev/null) || _started="no"
+  fi
   if [[ "$TRIGGER_CODE" =~ ^2[0-9][0-9]$ && "$_started" == "yes" ]]; then
     echo "  the $NOUN's generation started (POST $TRIGGER_URL, HTTP $TRIGGER_CODE)" >&2
   elif [[ "$TRIGGER_CODE" =~ ^4[0-9][0-9]$ ]]; then
@@ -690,7 +751,11 @@ print("yes" if sys.argv[1] in message.lower() else "no")' "$STARTED" 2>/dev/null
     finish 5
   else
     echo "The $NOUN WAS created, but its generation trigger answered HTTP ${TRIGGER_CODE:-none} without saying it started:" >&2
-    echo "its generation MAY have started. Read $STATUS_URL before re-running. Response:" >&2
+    if [[ -n "$RESULT_KEY" ]]; then
+      echo "it named no job, so a job MAY exist: list the owner's newest jobs before re-running (session $JOB_ID). Response:" >&2
+    else
+      echo "its generation MAY have started. Read $STATUS_URL before re-running. Response:" >&2
+    fi
     echo "$TRIGGER_RESP" >&2
     finish 8
   fi
@@ -700,13 +765,14 @@ fi
 # The same three reads as a T4's, on the flow's own read route (the status URL printed above), compared with the body
 # sent by verification_flows.py check-stored: 6 = it stored other than was sent, 7 = it could not be read. In both the
 # class, writeup or export WAS created.
-if [[ -n "$FLOW" ]]; then
+if [[ -n "$FLOW" && "$READBACK" == "yes" ]]; then
   _readback="unread"
   DIFFERS=""
   for _attempt in 1 2 3; do
     _snap=$(curl -sS --connect-timeout 10 --max-time 20 "$STATUS_URL" "${HDR_ARGS[@]}" 2>/dev/null) || _snap=""
     if DIFFERS=$(printf '%s' "$_snap" | python3 "$HERE/verification_flows.py" check-stored "--flow=$FLOW" \
-                   "--requested=$PAYLOAD" "--created-id=$JOB_ID" "--target-id=$TARGET_ID" --snapshot - 2>/dev/null); then
+                   "--requested=$PAYLOAD" "--created-id=$JOB_ID" "--target-id=$TARGET_ID" \
+                   "--trigger-sent=$TRIGGER_SENT" --snapshot - 2>/dev/null); then
       _readback="read"
       break
     fi

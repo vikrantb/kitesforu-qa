@@ -39,7 +39,7 @@ API_REPO = Path(os.environ.get("KFU_API_REPO") or "/Users/vikrantbhosale/gitproj
 COURSE_WORKERS_REPO = Path(os.environ.get("KFU_COURSE_WORKERS_REPO")
                            or "/Users/vikrantbhosale/gitprojects/kitesforu/kitesforu-course-workers")
 
-#: The stub: the trigger (a POST to ``*/generate``) answers from STUB_TRIGGER_*, every other POST from STUB_POST_*,
+#: The stub: the trigger (a POST to ``*/generate`` or a request's ``*/create/execute``) answers from STUB_TRIGGER_*, every other POST from STUB_POST_*,
 #: and each GET from the status sequence, as the harness's own stub does.
 FLOW_CURL_STUB = r"""#!/bin/bash
 { printf 'curl'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "$STUB_LOG"
@@ -50,7 +50,7 @@ for a in "$@"; do
   [[ "$a" == *"%{http_code}"* ]] && w=1
 done
 if [[ -n "$post" ]]; then
-  p=STUB_POST; [[ "$url" == */generate ]] && p=STUB_TRIGGER
+  p=STUB_POST; [[ "$url" == */generate || "$url" == */create/execute ]] && p=STUB_TRIGGER
   ex="${p}_EXIT"; dl="${p}_DELAY"; rs="${p}_RESPONSE"; hc="${p}_HTTP"
   [[ -n "${!ex:-}" ]] && exit "${!ex}"
   [[ -n "${!dl:-}" ]] && /bin/sleep "${!dl}"
@@ -145,6 +145,17 @@ def export_stored(status: str = "pending", export_id: Optional[str] = "course_ex
                        "stale": False})
 
 
+REQUEST_WORDS = "A warm one-minute short about how bread rises, told like a grandparent in the kitchen"
+SESSION_ANSWERED = json.dumps({"session_id": "sess_test_1", "understanding": [], "questions": [], "can_add_detail": True})
+EXECUTED = json.dumps({"content_id": "job_req_1", "content_type": "podcast", "redirect_url": "/watch/job_req_1"})
+
+
+def request_stored(duration: float = 0.167, tier: str = "low", job_id: str = "job_req_1") -> str:
+    """``GET /v1/podcasts/<id>/status`` for the job the execute made: the stored request echoed as ``inputs``."""
+    return json.dumps({"job_id": job_id, "status": "queued", "quality_tier": tier,
+                       "inputs": {"duration_min": duration, "quality_tier": tier}})
+
+
 #: Per flow: the arguments that choose it, the replies of a run that goes well, its id line and its status URL.
 FLOWS: Dict[str, dict] = {
     "class": {"args": ("--class", *OWNER), "noun": "class",
@@ -167,14 +178,22 @@ FLOWS: Dict[str, dict] = {
                      "stored": scorm_stored, "id_line": "package_id=pkg_test_1",
                      "create": f"{DEAD}/v1/classes/{CLASS_ID}/export/scorm", "trigger": None,
                      "status": f"{DEAD}/v1/scorm/packages/pkg_test_1"},
+    "request": {"args": ("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low"),
+                "noun": "Smart Create request",
+                "env": {"STUB_POST_RESPONSE": SESSION_ANSWERED, "STUB_TRIGGER_RESPONSE": EXECUTED},
+                # The create answers a SESSION, printed whatever happens next; the job is named once execute makes it.
+                "stored": request_stored, "id_line": "session_id=sess_test_1",
+                "create": f"{DEAD}/v1/create/intake/gated", "trigger": f"{DEAD}/v1/create/execute",
+                "status": f"{DEAD}/v1/podcasts/job_req_1/status"},
 }
-TRIGGERED = ("class", "writeup")
+TRIGGERED = ("class", "writeup", "request")
 
 
 def env_for(flow: str, workers_src: Optional[str], **extra: str) -> Dict[str, str]:
-    """A class prices its lessons through the workers tree; a writeup and an export read no repo, and prove it."""
-    if flow == "class":
-        assert workers_src, "a class is priced through the workers tree"
+    """A class and a request price their episodes through the workers tree; a writeup and an export read no repo, and
+    prove it."""
+    if flow in ("class", "request"):
+        assert workers_src, "a class or a request is priced through the workers tree"
         tree = {"WORKERS_SRC": workers_src}
     else:
         tree = {"KFU_WORKERS_REPO": "/nonexistent"}
@@ -184,7 +203,7 @@ def env_for(flow: str, workers_src: Optional[str], **extra: str) -> Dict[str, st
 @pytest.fixture
 def flow_src(request):
     """The workers tree only the class needs: the other flows run without one."""
-    return request.getfixturevalue("workers_src") if request.param == "class" else None
+    return request.getfixturevalue("workers_src") if request.param in ("class", "request") else None
 
 
 def run_flow(harness: Harness, flow: str, src: Optional[str], *extra: str, stored: Optional[List[str]] = None,
@@ -599,7 +618,8 @@ def test_an_id_that_is_not_one_path_segment_is_refused(flow, target_id):
 #: guard, pinned above).
 VALUE_FLAGS = {
     "podcast": ((), ("--topic", "--duration", "--tier", "--style", "--language", "--format", "--content-rating",
-                     "--motion-clips", "--paid-stills", "--source-writeup", "--on-behalf-of", "--on-behalf-of-email")),
+                     "--motion-clips", "--paid-stills", "--source-writeup", "--on-behalf-of", "--on-behalf-of-email",
+                     "--request")),
     "course": (("--course", *OWNER), ("--topic", "--duration", "--tier", "--style", "--language", "--on-behalf-of",
                                       "--on-behalf-of-email")),
     "class": (FLOWS["class"]["args"], ("--topic", "--duration", "--style", "--language", "--on-behalf-of",
@@ -607,6 +627,7 @@ VALUE_FLAGS = {
     "writeup": (FLOWS["writeup"]["args"], ("--topic", "--on-behalf-of", "--on-behalf-of-email")),
     "video-export": (FLOWS["video-export"]["args"], ("--on-behalf-of", "--on-behalf-of-email")),
     "scorm-export": (FLOWS["scorm-export"]["args"], ("--on-behalf-of", "--on-behalf-of-email")),
+    "request": (FLOWS["request"]["args"], ("--duration", "--tier", "--on-behalf-of", "--on-behalf-of-email")),
 }
 
 
@@ -655,6 +676,14 @@ FLAG_IN_BODY = {
               "--style": ("Interview", "style", "Interview"),
               "--language": ("fr-FR", "language", "fr-FR")},
     "writeup": {"--topic": ("binary search trees", "topic", "binary search trees")},
+    "request": {"--duration": ("1.0", "target_duration_min", 1.0)},
+}
+
+#: Per flow, each flag it takes that its CREATE body does not carry, and where it goes instead. A request's tier rides
+#: the execute (the second POST), its 9:16 switch is a body key with no value, and --wait follows the job it makes.
+CARRIED_ELSEWHERE = {
+    "request": {"--tier": "the execute body", "--short": "short_video, a switch with no value",
+                "--wait": "follows the job the execute names"},
 }
 
 
@@ -676,7 +705,8 @@ def test_the_flags_a_flow_takes_are_the_ones_its_body_carries():
     assert set(takes) == set(FLOWS), takes
     for flow, listed in takes.items():
         mode_flag = FLOWS[flow]["args"][0]
-        assert set(listed.split()) - {mode_flag} == set(FLAG_IN_BODY.get(flow) or {}), (flow, listed)
+        assert set(listed.split()) - {mode_flag} == (set(FLAG_IN_BODY.get(flow) or {})
+                                                     | set(CARRIED_ELSEWHERE.get(flow) or {})), (flow, listed)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -696,7 +726,8 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
     assert headers(create) == ["Authorization: Bearer dummy-test-key", "X-On-Behalf-Of: user_abc123",
                                "X-On-Behalf-Of-Email: ops team@example.com", "Content-Type: application/json"]
     body = {"class": EXPECTED_CLASS_BODY, "writeup": EXPECTED_WRITEUP_BODY, "video-export": None,
-            "scorm-export": "{}"}[flow]
+            "scorm-export": "{}",
+            "request": json.dumps({"idea": REQUEST_WORDS, "target_duration_min": 0.167})}[flow]
     if body is None:
         assert "-d" not in create, "the video export's route declares no body"
     else:
@@ -705,8 +736,16 @@ def test_a_flow_that_goes_well_posts_triggers_reads_back_and_exits_0(harness, fl
         assert len(sent) == 1, "an export has no trigger"
     else:
         trigger = sent[1]
-        assert len(sent) == 2 and url_of(trigger) == FLOWS[flow]["trigger"] and "-d" not in trigger
-        assert headers(trigger) == headers(create)[:-1], "the trigger carries the create's headers minus Content-Type"
+        assert len(sent) == 2 and url_of(trigger) == FLOWS[flow]["trigger"]
+        if flow == "request":
+            # The execute carries the session the intake answered and the tier, and names the job the run follows.
+            assert json.loads(trigger[trigger.index("-d") + 1]) == {"session_id": "sess_test_1",
+                                                                     "canvas_session_id": "sess_test_1", "quality_tier": "low"}
+            assert headers(trigger) == headers(create), "the execute is a JSON POST, as the create is"
+            assert "content_id=job_req_1" in r.stdout
+        else:
+            assert "-d" not in trigger
+            assert headers(trigger) == headers(create)[:-1], "the trigger carries the create's headers minus Content-Type"
     gets = [c for c in harness.calls("curl") if "POST" not in c]
     assert len(gets) == 1 and url_of(gets[0]) == FLOWS[flow]["status"], gets
 
@@ -760,6 +799,9 @@ def test_the_trigger_is_classified_by_what_it_says_about_the_generation(harness,
                                                                          needle):
     harness.fresh_ack()
     r = run_flow(harness, flow, flow_src, STUB_TRIGGER_HTTP=http, STUB_TRIGGER_RESPONSE=reply)
+    if flow == "request" and needle == "its generation MAY have started":
+        # A request's trigger is the execute, which MAKES the job: it says a job may exist, and names the session.
+        needle = "a job MAY exist"
     assert r.returncode == rc and needle in r.stderr, (r.returncode, r.stderr)
     assert FLOWS[flow]["id_line"] in r.stdout, "the draft WAS created, so its id is printed"
     assert harness.gets() == 0, "a trigger that did not start was read back as if it had"
@@ -887,3 +929,171 @@ def test_the_cost_changelog_records_the_four_flows():
                    "scripts/create_verification_job.sh",
                    "scripts/verification_flows.py", "medium", "not priced", "Pricing-page implication"):
         assert needle in entry, needle
+
+
+# ---------------------------------------------------------------------------------------------
+# --request: a Smart Create request in a user's own words (synthetic words; this repo is public)
+# ---------------------------------------------------------------------------------------------
+
+def run_request(harness: Harness, workers_src: str, *extra: str, stored: Optional[List[str]] = None,
+                **env: str) -> subprocess.CompletedProcess:
+    harness.fresh_ack()
+    harness.statuses(stored if stored is not None else [request_stored()])
+    return harness.run("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low", *extra,
+                       env={"STUB_POST_RESPONSE": SESSION_ANSWERED, "STUB_TRIGGER_RESPONSE": EXECUTED,
+                            "WORKERS_SRC": workers_src, **env})
+
+
+def body_of(call: List[str]) -> str:
+    return call[call.index("-d") + 1]
+
+
+def test_a_request_sends_the_users_words_to_intake_then_executes_the_session_and_follows_the_job(harness, workers_src):
+    r = run_request(harness, workers_src, "--short")
+    assert r.returncode == 0, r.stderr
+    sent = posts(harness)
+    assert [url_of(c) for c in sent] == [f"{DEAD}/v1/create/intake/gated", f"{DEAD}/v1/create/execute"]
+    assert json.loads(body_of(sent[0])) == {"idea": REQUEST_WORDS, "target_duration_min": 0.167,
+                                            "short_video": True}
+    # The canvas's execute: the session (also as canvas_session_id), the tier, and for a short the switch and its platform.
+    assert json.loads(body_of(sent[1])) == {"session_id": "sess_test_1", "canvas_session_id": "sess_test_1",
+                                            "quality_tier": "low", "short_video": True,
+                                            "content_spec": {"platforms": ["tiktok"]}}
+    # From the execute on, the run follows the JOB, never the session.
+    assert "content_id=job_req_1" in r.stdout
+    assert f"status: {DEAD}/v1/podcasts/job_req_1/status" in r.stdout
+    assert "sess_test_1/status" not in r.stdout
+    reads = [url_of(c) for c in harness.calls("curl") if "POST" not in c]
+    assert reads == [f"{DEAD}/v1/podcasts/job_req_1/status"]
+    assert "read back: the api stored the Smart Create request as sent" in r.stderr
+
+
+def test_a_request_without_short_sends_no_short_switch(harness, workers_src):
+    r = run_request(harness, workers_src)
+    assert r.returncode == 0, r.stderr
+    assert "short_video" not in json.loads(body_of(posts(harness)[0]))
+    execute = json.loads(body_of(posts(harness)[1]))
+    assert "short_video" not in execute and "content_spec" not in execute and "wants_visuals" not in execute
+
+
+def test_an_execute_that_names_no_job_is_not_called_started(harness, workers_src):
+    # A 200 that names no job and refuses nothing (no content_id, no refusal_message): a job MAY exist.
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=json.dumps({"message": "accepted"}))
+    assert r.returncode == 8, r.stderr
+    assert "a job MAY exist" in r.stderr
+
+
+def test_an_execute_the_api_refuses_is_exit_5(harness, workers_src):
+    r = run_request(harness, workers_src, STUB_TRIGGER_HTTP="403",
+                    STUB_TRIGGER_RESPONSE=json.dumps({"detail": "creation gate"}))
+    assert r.returncode == 5, r.stderr
+
+
+def test_a_stored_tier_or_length_other_than_asked_is_exit_6(harness, workers_src):
+    r = run_request(harness, workers_src, stored=[request_stored(tier="medium")])
+    assert r.returncode == 6, r.stderr
+    assert "quality_tier: requested low, stored \"medium\"" in r.stderr
+    harness2_stored = [request_stored(duration=1.0)]
+    r = run_request(harness, workers_src, stored=harness2_stored)
+    assert r.returncode == 6 and "duration_min: requested 0.167, stored 1.0" in r.stderr
+
+
+@pytest.mark.parametrize("flag", [("--visuals",), ("--motion-clips", "1"), ("--style", "Storytelling"),
+                                  ("--topic", "something else")])
+def test_a_request_refuses_a_flag_its_request_cannot_carry(harness, workers_src, flag):
+    harness.fresh_ack()
+    r = harness.run("--request", REQUEST_WORDS, *flag, env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 1 and "Nothing was sent" in r.stderr, r.stderr
+    assert posts(harness) == []
+
+
+def test_request_words_are_refused_when_empty_or_over_the_door_limit():
+    with pytest.raises(ValueError):
+        verification_flows.build_request_body(text="   ", duration="1.0", short=True)
+    with pytest.raises(ValueError):
+        verification_flows.build_request_body(text="x" * (verification_flows.REQUEST_TEXT_MAX + 1), duration="1.0",
+                                              short=False)
+    body = verification_flows.build_request_body(text="  keep my words  ", duration="1", short=False)
+    assert body == {"idea": "keep my words", "target_duration_min": 1.0}
+
+
+def test_the_request_read_back_refuses_another_job():
+    with pytest.raises(verification_flows.UnreadableSnapshot):
+        verification_flows.check_stored("request", {"target_duration_min": 0.167}, json.loads(request_stored(job_id="other")),
+                                        created_id="job_req_1", trigger_sent={"quality_tier": "low"})
+
+
+
+def test_a_request_dry_run_shows_the_execute_body_and_sends_nothing(harness, workers_src):
+    r = harness.run("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low", "--dry-run",
+                    env={"WORKERS_SRC": workers_src})
+    assert r.returncode == 0, r.stderr
+    assert posts(harness) == []
+    out = r.stdout + r.stderr   # the rehearsal prints its POST lines on stderr and the body on stdout
+    assert f'then POST {DEAD}/v1/create/execute   (the same headers) with {{"session_id": "<session_id>", "canvas_session_id": "<session_id>", "quality_tier": "low"}}' in out
+    assert "no body" not in out
+
+
+def _model_fields(source: str, model: str) -> Dict[str, bool]:
+    """``{field: required}`` of one pydantic model in ``source``: a field is required when its default is ``...``."""
+    body = source.split(f"class {model}(BaseModel):", 1)[1]
+    body = body.split("\nclass ", 1)[0]
+    out: Dict[str, bool] = {}
+    for m in re.finditer(r"^    ([a-z_]+): [^=\n]+(?:= (.*))?$", body, flags=re.M):
+        default = m.group(2)
+        # Required: no default at all (``x: str``), or a Field whose first argument is ``...``.
+        out[m.group(1)] = default is None or default.lstrip().startswith(("Field(...", "Field(\n        ..."))
+    return out
+
+
+def test_the_request_bodies_match_the_api_models_on_main():
+    """The two bodies a request sends against the api's own models on origin/main: every key is a declared field, and
+    every required field is sent. Round 0 sent `initial_text` (the plain intake's key) to the gated intake, which
+    requires `idea`, and every unit test still passed because they pinned the body this module wrote."""
+    src = _origin_main_file(API_REPO, "src/api/routes/smart_create.py")
+    gated = _model_fields(src, "GatedIntakeRequest")
+    sent = verification_flows.build_request_body(text="words", duration="1.0", short=True)
+    assert set(sent) <= set(gated), (sorted(sent), sorted(gated))
+    assert {f for f, req in gated.items() if req} <= set(sent), gated
+    execute = _model_fields(src, "ExecuteRequest")
+    trig = json.loads(verification_flows.request_trigger_body("low", short=True))
+    assert set(trig) <= set(execute), (sorted(trig), sorted(execute))
+
+
+def test_a_soft_refusal_at_execute_is_exit_5_and_makes_nothing(harness, workers_src):
+    refused = json.dumps({"content_id": "", "content_type": "refused", "redirect_url": "",
+                          "refusal_message": "That request can't be made.", "refusal_reason": "policy"})
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=refused)
+    assert r.returncode == 5, r.stderr
+    assert "soft refusal" in r.stderr and "MAY" not in r.stderr
+    assert [c for c in harness.calls("curl") if "POST" not in c] == [], "a refusal reads nothing back"
+
+
+def test_an_execute_that_makes_a_course_is_followed_on_the_course_route_and_not_read_back(harness, workers_src):
+    course = json.dumps({"content_id": "course_req_1", "content_type": "course", "redirect_url": "/courses/course_req_1"})
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=course)
+    assert r.returncode == 0, r.stderr
+    assert f"status: {DEAD}/v1/courses/course_req_1/status" in r.stdout
+    assert "/v1/podcasts/" not in r.stdout
+    assert "not read back" in r.stderr
+
+
+def test_a_messages_before_the_job_is_named_never_point_at_a_session_as_a_job(harness, workers_src):
+    r = run_request(harness, workers_src, STUB_TRIGGER_RESPONSE=json.dumps({"message": "queued"}))
+    assert r.returncode == 8, r.stderr
+    assert "/v1/podcasts/sess_test_1" not in r.stdout + r.stderr
+    assert "session sess_test_1" in r.stderr
+
+
+def test_a_short_request_is_priced_with_the_born_short_term(harness, workers_src):
+    """The plan prices a --short request with the born-short term, as a --short podcast is priced; without --short it
+    carries none. Through the script's rehearsal, which prices with the workers interpreter."""
+    outs = {}
+    for flag in ((), ("--short",)):
+        harness.fresh_ack()
+        r = harness.run("--request", REQUEST_WORDS, "--duration", "0.167", "--tier", "low", *flag, "--dry-run",
+                        env={"WORKERS_SRC": workers_src})
+        assert r.returncode == 0, r.stderr
+        outs[bool(flag)] = r.stdout + r.stderr
+    assert "born-short" in outs[True]
+    assert "born-short" not in outs[False]
