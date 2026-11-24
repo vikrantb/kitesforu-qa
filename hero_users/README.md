@@ -33,6 +33,19 @@ On ANY user-facing change, the relevant hero(es) auto-verify as an extra assuran
 | ANY artifact with numbers/charts| add **Marcus** | — (atomic-claim + chart-arithmetic checker) |
 | ANY narrated artifact           | add **Aarav**  | — (audio-only + end-decay + voice/gender) |
 
+## TYPICAL USERS — ordinary people beside the expert critics
+The seven heroes above are demanding experts. Typical users (`harshness: typical`) are ordinary people with a real
+reason to use the product, judging "did this do what I expected, was it interesting, would I finish it, would I share
+it" (founder 2026-11-24). The workflow adds them with `typical: true`; they watch or listen once as themselves and name
+the second they would stop.
+
+| Surface | Typical user |
+|---|---|
+| Social short (9:16) | **Rosa** (bakery owner posting for her shop) |
+| Audio / Car-Mode / podcast | **Dev** (commuter learning by ear) |
+| Episode | **Dev**, **Walter** (curious history retiree) |
+| Story (Bedtime) | **Grace** (parent at bedtime) |
+
 ## TRUST / ANTI-SYCOPHANCY protocol (baked into the workflow)
 1. **Producer-critic separation + family diversity** — the critic is a SEPARATE agent from a DIFFERENT
    model family; the panel is a jury of 3 disjoint families (out-correlates one big judge, ~7x cheaper).
