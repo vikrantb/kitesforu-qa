@@ -24,13 +24,15 @@ from typing import Any
 
 import numpy as np
 
+# The share of the WHOLE frame a step must span to count as a seam rather than a cut: edge_band's own, so a step
+# this module skips as a seam is one edge_band reports as a band.
+from kitesforu_qa.edge_band import SEAM_SPAN
+
 #: The step, in grey levels, that a faint edge clears. The cut frosted-glass card measured 14 to 20; a slide's
 #: background grid measured under 6.
 FAINT_STEP = 12.0
 #: The share of the margin a line must step across to count as a straight edge running into the frame edge.
 LINE_SPAN = 0.8
-#: The share of the WHOLE frame a step must span to count as a seam rather than a cut.
-SEAM_SPAN = 0.9
 #: The margin, as a share of the frame side: the gate's own 3%.
 MARGIN = 0.03
 #: Lines either side of a seam that a scaled frame blurs into it.

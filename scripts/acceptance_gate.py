@@ -382,8 +382,8 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     # finding is MAJOR (REVIEW, with the times for the adversary), not a BLOCKER.
     runs = _runs(clipped, min_len=2)
     if runs:
-        spans = ", ".join(f"{a * _FRAME_INTERVAL_MS // 1000}-{(b + 1) * _FRAME_INTERVAL_MS // 1000}s "
-                          f"({'/'.join(sorted(e))})" for a, b, e in runs)
+        spans = ", ".join(f"{_window(a).split('-')[0]}-{_window(b).split('-')[1]} ({'/'.join(sorted(e))})"
+                          for a, b, e in runs)
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP RUN: content held at the same frame edge on consecutive frames at {spans} "
             f"({len(runs)} run(s), {sum(b - a + 1 for a, b, _ in runs)} frame(s)): cut off-frame "
@@ -588,8 +588,9 @@ def _grade_surface(job_id: str, surface: str, url: str, source: str, clips: list
 
 
 #: How far a video's length may land from the ask: the founder's rule, the ask ±20%. It mirrors the producer's own
-#: ``workers.common.ask_ledger.LENGTH_TOLERANCE`` (pinned in ``tests/test_qa_mirrors_match_production.py``), so the
-#: gate and the job's ask ledger agree on what was delivered.
+#: ``workers.common.ask_ledger.LENGTH_TOLERANCE`` (pinned in ``tests/test_qa_mirrors_match_production.py``). The
+#: tolerance is shared, the measure is not: the gate reads the master's container duration (what the viewer gets),
+#: the ledger the segment timeline's last end, so the two can differ by the tail.
 LENGTH_TOLERANCE = 0.2
 
 
@@ -605,8 +606,11 @@ def _asked_seconds(d: dict[str, Any]) -> float | None:
 def _length_issues(duration: float, asked_s: float | None) -> list[dict[str, str]]:
     """The video's length against the ask. Under Layer 0's floor (``hero_users/RUBRIC.md`` G0.5, the ratio the
     audio grade applies) is a BLOCKER; outside the ask ±:data:`LENGTH_TOLERANCE` is a MAJOR."""
-    if not asked_s or duration <= 0:
+    if not asked_s:
         return []
+    if duration <= 0:
+        return [{"sev": "MAJOR", "msg": (
+            f"LENGTH UNJUDGED: the doc asks for {asked_s:.0f}s but ffprobe read no duration from the video")}]
     from kitesforu_qa.harness.checks.audio import DURATION_REQUEST_MIN_RATIO
 
     off = (duration - asked_s) / asked_s

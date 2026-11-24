@@ -195,6 +195,16 @@ def test_a_faint_card_inside_the_frame_texture_and_a_band_seam_are_not_cuts():
     assert faint_cut_edges(_gray(_canvas_band())) == frozenset(), "a full-width seam belongs to the band probe"
 
 
+@pytest.mark.parametrize("x0", [40, 20])  # the card spans 0.926 and 0.963 of the width
+def test_a_wide_faint_card_cut_by_the_frame_is_reported_by_one_probe(x0):
+    """Between the faint probe's old seam span (0.90) and the band probe's (0.97), a wide card cut at the edge was
+    a seam to one probe and not a band to the other: neither reported it. One seam span closes that gap."""
+    from kitesforu_qa.edge_band import edge_bands
+
+    im = _gray(_frosted_card(x0, 150, 600, 400))
+    assert "bottom" in faint_cut_edges(im) or "bottom" in edge_bands(im), (faint_cut_edges(im), edge_bands(im))
+
+
 def test_a_cut_on_the_last_frame_is_found_alone(gate, frames):
     issues = gate._pixel_invariants([frames["card_inside"]] * 10 + [frames["card_cut"]])
     end = _tagged(issues, "EDGE-CLIP AT THE END")
@@ -305,13 +315,23 @@ def test_a_video_is_held_to_the_ask_plus_or_minus_twenty_percent(gate, duration,
         assert issues[0]["msg"].startswith(f"LENGTH: {duration:.1f}s against a 60s ask"), issues
 
 
+def test_a_video_with_no_measured_length_is_unjudged_never_passed(gate):
+    issues = gate._length_issues(0.0, 60.0)
+    assert [i["sev"] for i in issues] == ["MAJOR"] and issues[0]["msg"].startswith("LENGTH UNJUDGED"), issues
+    assert gate._length_issues(0.0, None) == []
+
+
 @pytest.mark.parametrize("inputs,asked", [
     ({"duration_min": 1.0}, 60.0), ({"duration_min": 0.6}, 36.0), ({}, None), ({"duration_min": 0}, None),
     ({"duration_min": True}, None), ({"duration_min": "1"}, None), (None, None)])
 def test_the_ask_is_inputs_duration_min(gate, inputs, asked):
     assert gate._asked_seconds({"inputs": inputs}) == asked
-    assert gate._length_issues(74.93, gate._asked_seconds({"inputs": inputs})) == ([] if asked is None else
-                                                                                 gate._length_issues(74.93, asked))
+    issues = gate._length_issues(74.93, gate._asked_seconds({"inputs": inputs}))
+    if asked is None:
+        assert issues == [], issues
+    else:  # 74.93 s is +25% on a 60 s ask and +108% on a 36 s ask: both outside ±20%
+        assert [i["sev"] for i in issues] == ["MAJOR"], issues
+        assert issues[0]["msg"].startswith(f"LENGTH: 74.9s against a {asked:.0f}s ask"), issues
 
 
 @needs_ffmpeg
