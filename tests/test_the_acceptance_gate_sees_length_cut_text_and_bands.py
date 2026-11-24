@@ -195,14 +195,15 @@ def test_a_faint_card_inside_the_frame_texture_and_a_band_seam_are_not_cuts():
     assert faint_cut_edges(_gray(_canvas_band())) == frozenset(), "a full-width seam belongs to the band probe"
 
 
-@pytest.mark.parametrize("x0", [40, 20])  # the card spans 0.926 and 0.963 of the width
-def test_a_wide_faint_card_cut_by_the_frame_is_reported_by_one_probe(x0):
-    """Between the faint probe's old seam span (0.90) and the band probe's (0.97), a wide card cut at the edge was
-    a seam to one probe and not a band to the other: neither reported it. One seam span closes that gap."""
+@pytest.mark.parametrize("box", [(40, 150, 600, 400), (20, 150, 600, 400), (430, 30, 600, 400), (430, 10, 600, 400)])
+def test_a_wide_or_tall_faint_card_cut_by_the_frame_is_cut_on_both_edges(box):
+    """A card spanning 0.90-0.97 of the frame was a seam to the faint probe (0.90) and not a band to the band probe
+    (0.97), so the edge it is cut on across that span went unreported. One seam span closes that gap."""
     from kitesforu_qa.edge_band import edge_bands
 
-    im = _gray(_frosted_card(x0, 150, 600, 400))
-    assert "bottom" in faint_cut_edges(im) or "bottom" in edge_bands(im), (faint_cut_edges(im), edge_bands(im))
+    im = _gray(_frosted_card(*box))
+    assert edge_bands(im) == {}, "premise: not a band"
+    assert faint_cut_edges(im) == frozenset({"right", "bottom"})
 
 
 def test_a_cut_on_the_last_frame_is_found_alone(gate, frames):
