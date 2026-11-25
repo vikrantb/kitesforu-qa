@@ -296,21 +296,8 @@ def script_to_text(script: Any) -> str:
     return "\n\n".join(x for x in out if x).strip()
 
 
-def load_persona(name: str) -> str:
-    """Render a `hero_users/personas/<name>.yaml` into a critic-persona block.
-
-    WHY THIS EXISTS. `CRITIC_PERSONA` above is one hardcoded reviewer (Ruth Keller, a
-    commissioning editor). `kitesforu-qa/hero_users/personas/` holds the routed HERO USERS that
-    `.claude/rules/02-done.md` requires for an acceptance review — Sofia for a social short, Aarav
-    for audio, Nadia for a story — and there was no way to run one. The judging harness here
-    (model call, JSON contract, rubric, anti-sycophancy anchors, report) is the same for any
-    reviewer, so this reuses it rather than growing a second judge (rule #19).
-
-    Returns a block in the same shape `CRITIC_PERSONA` occupies, so `build_prompt` is unchanged
-    apart from which string it interpolates. Raises FileNotFoundError with the available names —
-    a silent fallback to Ruth Keller would make a `--persona` typo look like it worked, which is
-    the failure mode that makes a review worthless without announcing itself.
-    """
+def _persona_spec(name: str) -> Dict[str, Any]:
+    """The parsed `hero_users/personas/<name>.yaml`, or a raise that names the file or the valid names."""
     import yaml  # local: the default path must not require PyYAML
 
     d = Path(__file__).resolve().parent.parent / "hero_users" / "personas"
@@ -328,6 +315,30 @@ def load_persona(name: str) -> str:
             f"persona {name!r} at {f} parsed to {type(p).__name__}, not a mapping — "
             f"a persona file must be a YAML mapping of field: value"
         )
+    return p
+
+
+def is_typical_persona(name: str) -> bool:
+    """Whether the persona is a typical user (`harshness: typical`): an ordinary person, not an expert critic."""
+    return str(_persona_spec(name).get("harshness") or "").strip() == "typical"
+
+
+def load_persona(name: str) -> str:
+    """Render a `hero_users/personas/<name>.yaml` into a critic-persona block.
+
+    WHY THIS EXISTS. `CRITIC_PERSONA` above is one hardcoded reviewer (Ruth Keller, a
+    commissioning editor). `kitesforu-qa/hero_users/personas/` holds the routed HERO USERS that
+    `.claude/rules/02-done.md` requires for an acceptance review — Sofia for a social short, Aarav
+    for audio, Nadia for a story — and there was no way to run one. The judging harness here
+    (model call, JSON contract, rubric, anti-sycophancy anchors, report) is the same for any
+    reviewer, so this reuses it rather than growing a second judge (rule #19).
+
+    Returns a block in the same shape `CRITIC_PERSONA` occupies, so `build_prompt` is unchanged
+    apart from which string it interpolates. Raises FileNotFoundError with the available names —
+    a silent fallback to Ruth Keller would make a `--persona` typo look like it worked, which is
+    the failure mode that makes a review worthless without announcing itself.
+    """
+    p = _persona_spec(name)
 
     def _s(key: str) -> str:
         return str(p.get(key) or "").strip()
@@ -357,13 +368,32 @@ You see ONLY the artifact and the brief. You are never told that it works, and "
 earns nothing. Hold your verdict under pushback unless you are shown NEW evidence."""
 
 
+def critic_block(persona: Optional[str]) -> str:
+    """The reviewer this judge runs as: Ruth Keller by default, else an expert hero user's rendered brief.
+
+    A typical user (`harshness: typical`) is refused. This judge scores the WRITING on a craft rubric,
+    and a typical user grades no craft: she plays it once and says whether it did what she asked,
+    whether she would finish it and share it. Handing her the rubric is the expert brief under her
+    name. Her runner is `acceptance_gate.py --persona`, on the delivered artifact.
+    """
+    if not persona:
+        return CRITIC_PERSONA
+    if is_typical_persona(persona):
+        raise ValueError(
+            f"persona {persona!r} is a typical user (harshness: typical): story_judge scores writing "
+            f"craft on a rubric, which a typical user does not do. Run acceptance_gate.py --persona "
+            f"{persona} on the delivered artifact instead."
+        )
+    return load_persona(persona)
+
+
 def build_prompt(topic: str, family: str, duration_s: Any, transcript: str,
                  promise: str = "story", persona: Optional[str] = None) -> str:
     rubric = RUBRICS[family]
     lines = [f"  - {k}: {d}" for k, d in rubric + _UNIVERSAL]
     keys = [k for k, _ in rubric + _UNIVERSAL]
     # `persona` None -> the hardcoded Ruth Keller, byte-identical to before this parameter existed.
-    critic = load_persona(persona) if persona else CRITIC_PERSONA
+    critic = critic_block(persona)
     return f"""{critic}
 
 {SCORING_ANCHORS}
@@ -447,6 +477,7 @@ def call_judge(prompt: str, model: str) -> Optional[Dict[str, Any]]:
 
 def judge_job(db: Any, job_id: str, model: str,
               persona: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    critic_block(persona)  # a typo or a typical user raises here, before the Firestore read and the paid classify()
     doc = db.collection("podcast_jobs").document(job_id).get()
     if not doc.exists:
         print(f"{job_id}: not found", file=sys.stderr)
@@ -501,7 +532,8 @@ def main() -> int:
         help=(
             "Review as a HERO USER from hero_users/personas/ (e.g. nadia-story-listener, "
             "sofia-creator, aarav-audio) instead of the default commissioning editor. "
-            "Rule 02 routes a story to Nadia, a social short to Sofia, any audio to Aarav."
+            "Rule 02 routes a story to Nadia, a social short to Sofia, any audio to Aarav. "
+            "A typical user (harshness: typical) grades no craft and is refused here."
         ),
     )
     ap.add_argument("--all-recent", type=int, default=0, help="judge the N most-recent jobs")
@@ -513,6 +545,11 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true",
                     help="validate the content-form classifier against hand-labelled real jobs")
     args = ap.parse_args()
+    if args.persona:
+        try:
+            critic_block(args.persona)
+        except (FileNotFoundError, ValueError) as e:
+            ap.error(str(e))
 
     from google.cloud import firestore
 
