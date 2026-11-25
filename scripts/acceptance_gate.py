@@ -940,6 +940,11 @@ def _adversary_brief(persona: str | None, *, audio_only: bool = False) -> str:
     return f"{brief}\n\n{_surface_note(persona, audio_only=audio_only)}{observe}{base}"
 
 
+#: A typical user's verdict is a person's reaction, not the gate's: the spec check still runs beside it.
+_SPEC_CHECK_BESIDE = ("A typical user never closes the gate alone: the gate's own SPEC CHECK still runs beside "
+                      "her, as a separate agent and not as her, against the spec ")
+
+
 def _typical_user_brief(*, audio_only: bool) -> tuple[str, str]:
     """The observe line and the run line for a typical user (`harshness: typical`).
 
@@ -958,7 +963,8 @@ def _typical_user_brief(*, audio_only: bool) -> tuple[str, str]:
         base = ("Run the TYPICAL USER: a fresh agent, as the person above, LISTENS to the master at audio_url ONCE, "
                 "start to finish, with local tools only ($0: ffmpeg, a local whisper with word timestamps; never a "
                 "paid transcription API), and answers stopped_at_s, would_finish and would_share. The job has no "
-                "video by design: there are no frames. Verdict is final only after that + the receipt in "
+                "video by design: there are no frames. " + _SPEC_CHECK_BESIDE + "(on-topic? audible to the last "
+                "word? paced? pronounced right?). Verdict is final only after both + the receipt in "
                 ".claude/acceptance/.")
         return observe, base
     observe = ("YOU ARE AN ORDINARY PERSON, NOT A CRITIC, and this is the DELIVERED VIDEO: the frames in `frames_dir` "
@@ -970,7 +976,9 @@ def _typical_user_brief(*, audio_only: bool) -> tuple[str, str]:
                "you, with its frame, before any verdict.\n\n")
     base = ("Run the TYPICAL USER: a fresh vision agent, as the person above, watches the frames in frames_dir (and "
             "frames_dir/captioned/, when it is its own file) ONCE, in order, and answers stopped_at_s, would_finish "
-            "and would_share. Verdict is final only after that + the receipt in .claude/acceptance/.")
+            "and would_share. " + _SPEC_CHECK_BESIDE + "(on-topic? text cut? coherent? every spoken line captioned, "
+            "one caption layer, no caption over a label?). Verdict is final only after both + the receipt in "
+            ".claude/acceptance/.")
     return observe, base
 
 

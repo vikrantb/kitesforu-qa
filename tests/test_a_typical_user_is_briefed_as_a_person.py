@@ -47,7 +47,8 @@ def test_a_typical_user_gets_the_ordinary_person_brief(name: str, audio_only: bo
     leaked = [w for w in _EXPERT_ONLY if w in b]
     assert not leaked, f"{name} was handed the expert's brief: {leaked}"
     for w in ("ORDINARY PERSON, NOT A CRITIC", "ONCE", "stopped_at_s", "would_finish", "would_share",
-              "Run the TYPICAL USER"):
+              "Run the TYPICAL USER", "SPEC CHECK still runs beside", "on-topic?", "pronounced right?" if audio_only
+              else "text cut?", "Verdict is final only after both"):
         assert w in b, f"{name}: {w!r} missing from the typical brief"
     assert story_judge.load_persona(name) in b, "the persona's own block did not reach the brief"
     if audio_only:
