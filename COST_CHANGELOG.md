@@ -2,6 +2,14 @@
 
 Per Tenet 7 (cost transparency): every change affecting per-unit cost is documented here.
 
+## 2026-11-22 — the acceptance gate holds a video to its ask and reads cut text, one-sided bands and faint end crops ($0)
+
+**Files:** `scripts/acceptance_gate.py`, `src/kitesforu_qa/edge_band.py`, `src/kitesforu_qa/faint_edge_cut.py`,
+`src/kitesforu_qa/truncated_text.py`, `src/kitesforu_qa/harness/checks/visual.py`, two test files, this entry.
+COST-NEUTRAL because every new probe reads what the gate already fetched (the master's ffprobe duration, the job doc's
+`inputs.duration_min`, the extracted frames) with local CPU only: numpy and the tesseract binary the harness already
+runs. No provider call and no job. Pricing-page implication: none.
+
 ## 2026-11-07 — the verification job can create the smallest class, writeup, course video export and SCORM export (`--class`: ~$0.55-6.42 a run at medium; `--writeup`: ~$0.008-0.14; each plus its cover's unpriced calls; `--course-video-export` and `--scorm-export`: unpriced; every run ACK-gated; $0 change on every other run)
 
 **Files:** `scripts/create_verification_job.sh`, `scripts/verification_flows.py` (new), `scripts/verification_job.py`,

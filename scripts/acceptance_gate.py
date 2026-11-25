@@ -196,7 +196,13 @@ def _clip_at(clips: list[dict] | None, ts_ms: int) -> dict | None:
     None is returned for BOTH "no clips supplied" and "no clip covers this timestamp", and both
     mean the same thing to the caller: keep checking. Absence must never be read as permission
     to skip a check — that is how a gate silently turns itself off.
+
+    The one timestamp a clip covers without spanning it is the TAIL: at or after the end of the
+    last clip, the master holds that clip's last frame through the rest of the audio (workers
+    ``video_assembler``'s tail hold: a freeze, or a slow motion tail over the same frame). So the
+    tail is the last clip. A gap BETWEEN clips stays unknown.
     """
+    last: tuple[int, dict] | None = None
     for c in clips or []:
         try:
             start = int(c.get("start_ms") or 0)
@@ -205,7 +211,9 @@ def _clip_at(clips: list[dict] | None, ts_ms: int) -> dict | None:
             continue
         if dur > 0 and start <= ts_ms < start + dur:
             return c
-    return None
+        if dur > 0 and (last is None or start + dur > last[0]):
+            last = (start + dur, c)
+    return last[1] if last is not None and ts_ms >= last[0] else None
 
 
 def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> list[dict]:
@@ -238,11 +246,27 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     `modality is None` occurs on real clips. It is treated as UNKNOWN and still checked — reading
     absence as "photo" would silently disable the gate on exactly the jobs whose records are
     incomplete.
+
+    ── A BAND IS FLAT AND SEAMED, ON ANY SIDE; ONE FRAME OF IT IS A FINDING ──────────────────────
+    `kitesforu_qa.edge_band` finds it (its docstring holds the measurement). The rule it replaced
+    asked for a uniform DARK band at the top AND the bottom on half the frames, so a lighter canvas
+    band along one edge for 4 s could not fire, and a dark full-frame card read as a letterbox.
+    Bands on both opposite sides of half the frames keep the LETTERBOX message; a band anywhere
+    else, on even one frame, is an EDGE BAND: frames are 3 s apart, so a 4 s band shows on one.
+
+    ── A FAINT STRAIGHT EDGE CUT BY THE FRAME COUNTS, AND THE LAST FRAME NEEDS NO PARTNER ─────────
+    `kitesforu_qa.faint_edge_cut` adds the frosted-glass card the 28-level step cannot see. And a
+    cut on the LAST frame is a finding by itself: the run rule wants two frames to tell a
+    held cut from motion, but nothing follows the last frame, and a push-in that ends an episode on
+    a cropped card is held to the end.
     """
     issues: list[dict] = []
     try:
         import numpy as np
         from PIL import Image
+
+        from kitesforu_qa.edge_band import edge_bands
+        from kitesforu_qa.faint_edge_cut import faint_cut_edges
     except ImportError as exc:
         # LOUD, never an empty list. Returning no issues here made the gate say PASS_DETERMINISTIC
         # without looking at a single pixel: the 2026-10-11 frame census ran in a venv that had
@@ -267,19 +291,19 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     edge_checked = 0          # frames the EDGE-CLIP rule actually ran on (footage is skipped)
     edge_skipped_photo = 0
     clipped: list[tuple[int, frozenset]] = []  # (frame index, clipped edges), in order, for the RUN rule
+    banded: list[tuple[int, dict[str, float]]] = []  # (frame index, {side: thickness}) for the EDGE BAND rule
     for idx, fp in inspected:
         try:
             im = np.asarray(Image.open(fp).convert("L"), dtype=float)
         except Exception:  # noqa: BLE001 — a bad frame is skipped, never fatal
             continue
         readable += 1
-        h = im.shape[0]
-        band = max(1, int(h * 0.10))
-        top, bot, mid = im[:band], im[-band:], im[band:-band]
-        # B: uniform dark band top AND bottom, clearly darker than the middle => letterbox.
-        if mid.size and (mid.mean() - max(top.mean(), bot.mean())) > 16 \
-                and top.std() < 9 and bot.std() < 9:
-            letterbox += 1
+        # B: a flat band behind a full-width seam, on any side (see the docstring).
+        bands = edge_bands(im)
+        if bands:
+            banded.append((idx, bands))
+            if {"top", "bottom"} <= bands.keys() or {"left", "right"} <= bands.keys():
+                letterbox += 1
         # C: content CUT OFF by the frame edge.
         #
         # This used to count BRIGHT pixels in the edge columns (`im[:, :3] >= 200`). Brightness
@@ -320,6 +344,7 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             edges = frozenset(e for e, hit in (
                 ("left", _vsteps(im[:, :mw]) >= 12), ("right", _vsteps(im[:, -mw:]) >= 12),
                 ("top", _hsteps(im[:mh, :]) >= 12), ("bottom", _hsteps(im[-mh:, :]) >= 12)) if hit)
+            edges |= faint_cut_edges(im)
             if edges:
                 edge_clip += 1
                 clipped.append((idx, edges))
@@ -328,8 +353,14 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
             f"NO FRAMES INSPECTED: none of the {len(frames)} extracted frame(s) could be read")}]
     if letterbox >= max(2, readable // 2):
         issues.append({"sev": "MAJOR", "msg": (
-            f"LETTERBOX: {letterbox}/{readable} frames show a persistent dark band — content "
-            "not filling the vertical frame (authored for the wrong aspect)")})
+            f"LETTERBOX: {letterbox}/{readable} frames show a persistent band on two opposite edges — "
+            "content not filling the frame (authored for the wrong aspect)")})
+    elif banded:
+        spans = ", ".join(f"{_window(i)} ({'/'.join(f'{s} {t:.0%}' for s, t in sorted(b.items()))})"
+                          for i, b in banded)
+        issues.append({"sev": "MAJOR", "msg": (
+            f"EDGE BAND: {len(banded)}/{readable} frame(s) show a flat band behind a full-width seam at {spans}: "
+            "the picture does not fill the frame there (exposed canvas, a shifted slide, or a bar)")})
     # THE DENOMINATOR IS WHAT WAS CHECKED, not what was sampled. Dividing by the full sample
     # after skipping photos would make a photo-heavy job progressively harder to flag — the gate
     # would quietly weaken on exactly the jobs where the skip applies, which is the opposite of
@@ -351,13 +382,25 @@ def _pixel_invariants(frames: list[str], clips: list[dict] | None = None) -> lis
     # finding is MAJOR (REVIEW, with the times for the adversary), not a BLOCKER.
     runs = _runs(clipped, min_len=2)
     if runs:
-        spans = ", ".join(f"{a * _FRAME_INTERVAL_MS // 1000}-{(b + 1) * _FRAME_INTERVAL_MS // 1000}s "
-                          f"({'/'.join(sorted(e))})" for a, b, e in runs)
+        spans = ", ".join(f"{_window(a).split('-')[0]}-{_window(b).split('-')[1]} ({'/'.join(sorted(e))})"
+                          for a, b, e in runs)
         issues.append({"sev": "MAJOR", "msg": (
             f"EDGE-CLIP RUN: content held at the same frame edge on consecutive frames at {spans} "
             f"({len(runs)} run(s), {sum(b - a + 1 for a, b, _ in runs)} frame(s)): cut off-frame "
             "or inside the 3% margin")})
+    # The last frame, when it clips and no run already holds it: the episode ends on it.
+    last = len(frames) - 1
+    if clipped and clipped[-1][0] == last and not any(a <= last <= b for a, b, _ in runs):
+        issues.append({"sev": "MAJOR", "msg": (
+            f"EDGE-CLIP AT THE END: the last frame ({_window(last)}) has content at the "
+            f"{'/'.join(sorted(clipped[-1][1]))} edge(s), and the episode ends on it: cut off-frame or inside "
+            "the 3% margin")})
     return issues
+
+
+def _window(i: int) -> str:
+    """Frame i's sampling window, as the issues name it: ``"72-75s"``."""
+    return f"{i * _FRAME_INTERVAL_MS // 1000}-{(i + 1) * _FRAME_INTERVAL_MS // 1000}s"
 
 
 def _runs(clipped: list[tuple[int, frozenset]], min_len: int = 2) -> list[tuple[int, int, frozenset]]:
@@ -440,14 +483,16 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     # PRODUCE + PROBE + OBSERVE every video a viewer of this job can open, each on its own: the watch video the
     # player streams and the captioned MP4 a creator downloads and posts. A defect in one is a defect in the job.
     watch_source = "visual.video_url" if vis.get("video_url") else "visual.video_burned_url"
-    watch = _grade_surface(job_id, WATCH, url, watch_source, clips, clip_aspects, fdir)
+    asked_s = _asked_seconds(d)
+    watch = _grade_surface(job_id, WATCH, url, watch_source, clips, clip_aspects, fdir, asked_s)
     captioned_url, captioned_source = _captioned_video(vis, d)
     if captioned_url and captioned_url == str(url).strip():
         # One file serves both: graded once, and the captioned surface says which one it is.
         captioned = {"url": captioned_url, "source": captioned_source, "same_file_as": WATCH,
                      "verdict": watch["verdict"], "issues": []}
     elif captioned_url:
-        captioned = _grade_surface(job_id, CAPTIONED, captioned_url, captioned_source, clips, clip_aspects, fdir)
+        captioned = _grade_surface(job_id, CAPTIONED, captioned_url, captioned_source, clips, clip_aspects, fdir,
+                                   asked_s)
     else:
         captioned = _missing_captioned(vis)
     surfaces = {WATCH: watch, CAPTIONED: captioned}
@@ -474,7 +519,7 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
     watch_frames = ({"frames_dir": watch["frames_dir"], "num_frames": watch["num_frames"]}
                     if watch.get("frames_dir") else {})
     return {"job_id": job_id, "topic": topic, "dims": watch.get("dims"), "duration": watch.get("duration"),
-            "clip_aspects": clip_aspects, "verdict": _verdict(issues), "issues": issues,
+            "asked_s": asked_s, "clip_aspects": clip_aspects, "verdict": _verdict(issues), "issues": issues,
             "surfaces": surfaces, **watch_frames,
             "persona": persona or None,
             "next": _adversary_brief(persona)}
@@ -501,10 +546,11 @@ def _surface_frames_dir(fdir: str, surface: str) -> str:
 
 
 def _grade_surface(job_id: str, surface: str, url: str, source: str, clips: list[dict], clip_aspects: list[str],
-                   fdir: str) -> dict[str, Any]:
-    """Fetch one surface's video and run every deterministic probe on it: fetchable, a video stream, the authored
-    orientation against its own dimensions (invariant A), and the pixel invariants on its own frames (B + C), which
-    land in ``_surface_frames_dir(fdir, surface)``. Every issue carries ``surface``."""
+                   fdir: str, asked_s: float | None = None) -> dict[str, Any]:
+    """Fetch one surface's video and run every deterministic probe on it: fetchable, a video stream, its length
+    against the ask (``asked_s``), the authored orientation against its own dimensions (invariant A), the pixel
+    invariants on its own frames (B + C) and the text cut short on them, the frames landing in
+    ``_surface_frames_dir(fdir, surface)``. Every issue carries ``surface``."""
     out: dict[str, Any] = {"url": url, "source": source}
 
     def done(issues: list[dict[str, str]], **found: Any) -> dict[str, Any]:
@@ -523,7 +569,7 @@ def _grade_surface(job_id: str, surface: str, url: str, source: str, clips: list
             # let it reach extraction and come back as zero frames.
             return done([{"sev": "BLOCKER", "msg": f"NOT A VIDEO: the fetched artifact has no video stream ({url})"}],
                         num_frames=0)
-        issues: list[dict[str, str]] = []
+        issues: list[dict[str, str]] = _length_issues(dur, asked_s)
         # PROBE — invariant A: authored clip orientation must match the render target.
         if vh > vw and any(a in ("16:9", "16x9", "1.78") for a in clip_aspects):
             issues.append({"sev": "BLOCKER", "msg": (
@@ -533,11 +579,77 @@ def _grade_surface(job_id: str, surface: str, url: str, source: str, clips: list
         sdir = _surface_frames_dir(fdir, surface)
         frames = _extract_frames(tmp, sdir)
         issues.extend(_pixel_invariants(frames, clips))  # invariants B + C on the real frames
+        issues.extend(_truncated_text_issues(frames))
         return done(issues, dims=[vw, vh], duration=dur, frames_dir=sdir, num_frames=len(frames))
     finally:
         if surface != WATCH:
             with contextlib.suppress(FileNotFoundError):
                 os.remove(tmp)
+
+
+#: How far a video's length may land from the ask: the founder's rule, the ask ±20%. It mirrors the producer's own
+#: ``workers.common.ask_ledger.LENGTH_TOLERANCE`` (pinned in ``tests/test_qa_mirrors_match_production.py``). The
+#: tolerance is shared, the measure is not: the gate reads the master's container duration (what the viewer gets),
+#: the ledger the segment timeline's last end, so the two can differ by the tail.
+LENGTH_TOLERANCE = 0.2
+
+
+def _asked_seconds(d: dict[str, Any]) -> float | None:
+    """The length the user asked for, in seconds: ``inputs.duration_min``, the field the producer's ask ledger
+    reads. None when the doc carries none (an older job): the length is then not judged, and ``asked_s`` says so."""
+    asked = (d.get("inputs") or {}).get("duration_min")
+    if isinstance(asked, bool) or not isinstance(asked, (int, float)) or asked <= 0:
+        return None
+    return float(asked) * 60.0
+
+
+def _length_issues(duration: float, asked_s: float | None) -> list[dict[str, str]]:
+    """The video's length against the ask. Under Layer 0's floor (``hero_users/RUBRIC.md`` G0.5, the ratio the
+    audio grade applies) is a BLOCKER; outside the ask ±:data:`LENGTH_TOLERANCE` is a MAJOR."""
+    if not asked_s:
+        return []
+    if duration <= 0:
+        return [{"sev": "MAJOR", "msg": (
+            f"LENGTH UNJUDGED: the doc asks for {asked_s:.0f}s but ffprobe read no duration from the video")}]
+    from kitesforu_qa.harness.checks.audio import DURATION_REQUEST_MIN_RATIO
+
+    off = (duration - asked_s) / asked_s
+    said = f"{duration:.1f}s against a {asked_s:.0f}s ask ({off:+.0%})"
+    if duration < DURATION_REQUEST_MIN_RATIO * asked_s:
+        return [{"sev": "BLOCKER", "msg": (
+            f"LENGTH: {said}, under Layer 0's floor of {DURATION_REQUEST_MIN_RATIO:.0%} of the ask")}]
+    if abs(off) > LENGTH_TOLERANCE:
+        return [{"sev": "MAJOR", "msg": f"LENGTH: {said}, outside the ask ±{LENGTH_TOLERANCE:.0%}"}]
+    return []
+
+
+#: At most this many cut words are named in the issue; the count covers them all.
+_CUT_WORDS_NAMED = 12
+
+
+def _truncated_text_issues(frames: list[str]) -> list[dict[str, str]]:
+    """Words that end in an ellipsis on the frames (``kitesforu_qa.truncated_text``), as one MAJOR naming each
+    word and when it first shows; a MAJOR too when OCR read none of the frames, so a gate that could not read the
+    text never passes it."""
+    if not frames:
+        return []  # no frames is already a BLOCKER from the pixel invariants
+    from kitesforu_qa.truncated_text import read_cut_words, summarise
+
+    found = summarise(read_cut_words(frames))
+    if not found["read"]:
+        return [{"sev": "MAJOR", "msg": (
+            f"TRUNCATED-TEXT PROBE DID NOT RUN: OCR read none of the {len(frames)} frame(s) (is the tesseract "
+            "binary installed? docker/Dockerfile installs it), so text cut short is unchecked")}]
+    words = found["words"]
+    if not words:
+        return []
+    shown = ", ".join(f"{w['shown']!r} at {_window(w['frames'][0])}" for w in words[:_CUT_WORDS_NAMED])
+    more = f" and {len(words) - _CUT_WORDS_NAMED} more" if len(words) > _CUT_WORDS_NAMED else ""
+    frames_hit = len({i for w in words for i in w["frames"]})
+    return [{"sev": "MAJOR", "msg": (
+        f"TRUNCATED TEXT: {len(words)} distinct word(s) end in an ellipsis on {frames_hit}/{found['read']} "
+        f"frame(s) read: {shown}{more}. A renderer cut the text to fit its box, unless the ellipsis is authored: "
+        "confirm on the frame")}]
 
 
 def _captioned_video(vis: dict[str, Any], d: dict[str, Any]) -> tuple[str, str]:

@@ -26,8 +26,8 @@ _QA = Path(__file__).resolve().parents[1]
 _GATE = _QA / "scripts" / "acceptance_gate.py"
 
 pytestmark = pytest.mark.skipif(
-    not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
-    reason="ffmpeg/ffprobe required to synthesize the videos",
+    not (shutil.which("ffmpeg") and shutil.which("ffprobe") and shutil.which("tesseract")),
+    reason="ffmpeg/ffprobe synthesize the videos; the gate reads their text with tesseract before it passes them",
 )
 
 _WATCH = "https://synthetic.invalid/visuals/synthetic/episode_video.mp4"

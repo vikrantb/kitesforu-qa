@@ -638,3 +638,14 @@ def test_the_census_scripts_import_no_private_ledger_name():
             if isinstance(node, ast.ImportFrom) and node.module == "workers.stages.visuals.image_cost_ledger":
                 private = [a.name for a in node.names if a.name.startswith("_")]
                 assert not private, f"{script} imports {private} from image_cost_ledger"
+
+
+# ── the acceptance gate's length rule ─────────────────────────────────────────────────────────────
+def test_the_gate_holds_a_video_to_the_tolerance_the_ask_ledger_marks_delivered():
+    """The gate's LENGTH probe and the job's own ask ledger (``workers.common.ask_ledger``, which marks the length
+    layer delivered within ``LENGTH_TOLERANCE`` of ``inputs.duration_min``) use one tolerance: a drifted copy would
+    pass at L0 a video the job's ledger calls missed, or the reverse. They measure the length differently (the
+    container against the segment timeline), so only the tolerance is pinned."""
+    import acceptance_gate
+
+    assert acceptance_gate.LENGTH_TOLERANCE == need("workers.common.ask_ledger", "LENGTH_TOLERANCE")

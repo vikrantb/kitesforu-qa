@@ -1121,7 +1121,9 @@ def _ocr_words(img) -> list[tuple[str, int, int, int, int]]:
     os.close(fd)
     try:
         img.save(png)
-        r = subprocess.run(["tesseract", png, "stdout", "tsv"], capture_output=True, text=True, timeout=60)
+        # No stdin: the acceptance gate reads frames with this too, and a shell loop feeds it job ids on stdin.
+        r = subprocess.run(["tesseract", png, "stdout", "tsv"], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL)
     finally:
         try:
             os.unlink(png)
