@@ -75,6 +75,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_DIR = REPO_ROOT / "scratch" / "reports" / "drift"
@@ -314,6 +315,25 @@ def extract_job_features(doc: dict) -> dict | None:
     }
 
 
+def _has_a_read_source(fmt_content: dict) -> bool:
+    """Whether a generated format lists a source with a web address. A name with none is one the
+    research model recalled, which a writeup no longer lists, so its absence is no collapse."""
+    sources = fmt_content.get("sources")
+    if not isinstance(sources, list):
+        return False
+    for src in sources:
+        url = src.get("url") if isinstance(src, dict) else None
+        if not isinstance(url, str):
+            continue
+        try:
+            parts = urlsplit(url.strip())
+        except ValueError:  # a malformed host; the next source may still be a page
+            continue
+        if parts.scheme in ("http", "https") and parts.netloc:
+            return True
+    return False
+
+
 def extract_writeup_features(doc: dict) -> dict | None:
     """One writeups doc (projected or full) → a drift row. None = no created_at."""
     created = parse_ts(doc.get("created_at"))
@@ -335,7 +355,7 @@ def extract_writeup_features(doc: dict) -> dict | None:
                 figures_total += len(figs)
         flags["figures_present"] = figures_total > 0
         flags["seo_present"] = any(f.get("seo") for f in formats)
-        flags["sources_present"] = any(f.get("sources") for f in formats)
+        flags["read_sources_present"] = any(_has_a_read_source(f) for f in formats)
         numerics["figures_count"] = float(figures_total)
         credits = _float_or_none(doc.get("credits_used"))
         flags["credits_recorded"] = bool(credits and credits > 0)
