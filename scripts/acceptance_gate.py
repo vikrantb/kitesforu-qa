@@ -820,9 +820,46 @@ def _adversary_brief(persona: str | None, *, audio_only: bool = False) -> str:
     if not persona:
         return base
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from story_judge import load_persona
+    from story_judge import is_typical_persona, load_persona
 
-    return f"{load_persona(persona)}\n\n{_surface_note(persona, audio_only=audio_only)}{observe}{base}"
+    brief = load_persona(persona)
+    if is_typical_persona(persona):
+        observe, base = _typical_user_brief(audio_only=audio_only)
+    return f"{brief}\n\n{_surface_note(persona, audio_only=audio_only)}{observe}{base}"
+
+
+def _typical_user_brief(*, audio_only: bool) -> tuple[str, str]:
+    """The observe line and the run line for a typical user (`harshness: typical`).
+
+    A typical user is an ordinary person with a real reason to use the product, not a critic: she
+    meets the artifact once, as she would on her phone or in her car, and says when she would have
+    stopped, whether she would finish it and whether she would share it. The expert's refute-by-default
+    frame would make her an expert under another name.
+    """
+    if audio_only:
+        observe = ("YOU ARE AN ORDINARY PERSON, NOT A CRITIC, and this is the DELIVERED AUDIO: the job has no video "
+                   "by design. Listen to the master at `audio_url` ONCE, start to finish, as you would in your car "
+                   "or at home, with `transcript` beside it. Note the second you would have switched it off "
+                   "(stopped_at_s; null if you would finish). Then say plainly, in your own words: did it do what "
+                   "you asked for, was it interesting, would you finish it (would_finish), would you share it "
+                   "(would_share)? You owe it nothing. Name what lost you, with its timestamp, before any verdict.\n\n")
+        base = ("Run the TYPICAL USER: a fresh agent, as the person above, LISTENS to the master at audio_url ONCE, "
+                "start to finish, with local tools only ($0: ffmpeg, a local whisper with word timestamps; never a "
+                "paid transcription API), and answers stopped_at_s, would_finish and would_share. The job has no "
+                "video by design: there are no frames. Verdict is final only after that + the receipt in "
+                ".claude/acceptance/.")
+        return observe, base
+    observe = ("YOU ARE AN ORDINARY PERSON, NOT A CRITIC, and this is the DELIVERED VIDEO: the frames in `frames_dir` "
+               "(the video the player streams) and in `frames_dir/captioned/` (the captioned MP4, when it is its own "
+               "file) are it, sampled across its full length. Watch it ONCE, in order, start to finish, as you would "
+               "on your phone. Note the second you would have scrolled away (stopped_at_s; null if you would "
+               "finish). Then say plainly, in your own words: did it do what you asked for, was it interesting, would "
+               "you finish it (would_finish), would you share it (would_share)? You owe it nothing. Name what lost "
+               "you, with its frame, before any verdict.\n\n")
+    base = ("Run the TYPICAL USER: a fresh vision agent, as the person above, watches the frames in frames_dir (and "
+            "frames_dir/captioned/, when it is its own file) ONCE, in order, and answers stopped_at_s, would_finish "
+            "and would_share. Verdict is final only after that + the receipt in .claude/acceptance/.")
+    return observe, base
 
 
 def main() -> int:
@@ -833,7 +870,9 @@ def main() -> int:
         "--persona", default="",
         help=("Review as a HERO USER from hero_users/personas/ (nadia-story-listener, "
               "sofia-creator, aarav-audio, elena-ld, maya-student, marcus-technical, "
-              "priya-jobseeker). Rule 02 routes story->Nadia, social-short->Sofia, audio->Aarav. "
+              "priya-jobseeker; or a typical user: rosa-bakery-owner, dev-commuter, grace-bedtime-parent, "
+              "walter-history-retiree). Rule 02 routes story->Nadia, social-short->Sofia, audio->Aarav. A typical "
+              "user (harshness: typical) gets the ordinary-person brief, never the refute one. "
               "Omitted = the generic adversary brief alone."),
     )
     a = ap.parse_args()

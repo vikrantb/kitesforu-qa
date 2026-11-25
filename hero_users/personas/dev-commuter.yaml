@@ -4,7 +4,7 @@
 # specialist; Dev is a native-speaking driver who only asks "did I learn the thing before I parked".
 # His ask, in his own words:
 #   "explain how interest rates affect my mortgage, 15 minutes, for my drive"
-# Use case: Car-Mode brainstorm session (or an audio-only episode played in Car-Mode).
+# Use case: an audio-only episode played in Car-Mode (a live Car-Mode session is not a job artifact the gate can fetch).
 name: Dev
 archetype: Commuter learning hands-free (typical user, not a critic)
 surface: audio
@@ -58,4 +58,4 @@ register: |
   "It told me to look at a chart. I'm on the highway."
   "Eight facts, zero examples. What does it do to MY payment?"
   "It went quiet for ages — I thought the app had crashed."
-  "Good one. I could explain it to my wife — that's the test."
+  "Good one. I could explain it to my partner — that's the test."

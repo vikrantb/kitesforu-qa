@@ -9,8 +9,9 @@ finds no fault**. This is the QA-repo home for the personas + rubric; the standi
 Full design: `kitesforu-docs/proposals/hero-user-verification-system-2026-07-15/`.
 
 ## Layers
-1. **Personas** (`personas/*.yaml`) — 7 grounded heroes, each = home_domain × error_class × verdict_question,
-   with anti-sycophancy knobs + a `known_bad_fixture` it MUST reject (rubber-stamp calibration).
+1. **Personas** (`personas/*.yaml`) — 7 expert heroes (`harshness: high`) and 4 typical users (`harshness: typical`),
+   each = home_domain × error_class × verdict_question, with anti-sycophancy knobs + a `known_bad_fixture` it MUST
+   reject (rubber-stamp calibration).
 2. **Rubric** (`RUBRIC.md`) — layered: L0 deterministic $0 gates (reuse acceptance_gate) → L1 hard content
    gates (relevance/factual/chart/no-garbled — GATES, not out-votable weights) → L2 8-axis scorecard →
    per-persona verdicts.
@@ -37,14 +38,18 @@ On ANY user-facing change, the relevant hero(es) auto-verify as an extra assuran
 The seven heroes above are demanding experts. Typical users (`harshness: typical`) are ordinary people with a real
 reason to use the product, judging "did this do what I expected, was it interesting, would I finish it, would I share
 it" (founder 2026-11-24). The workflow adds them with `typical: true`; they watch or listen once as themselves and name
-the second they would stop.
+the second they would stop. The persona runners read `harshness`: `acceptance_gate.py --persona` gives a typical user
+the ordinary-person brief, never the refute one, and `story_judge.py` (a craft rubric) refuses one.
+
+The surface column is the workflow's `surface` argument. A typical user with `surface: audio` judges by ear, so on an
+audio-only job the workflow keeps them and drops the experts who judge frames.
 
 | Surface | Typical user |
 |---|---|
-| Social short (9:16) | **Rosa** (bakery owner posting for her shop) |
-| Audio / Car-Mode / podcast | **Dev** (commuter learning by ear) |
-| Episode | **Dev**, **Walter** (curious history retiree) |
-| Story (Bedtime) | **Grace** (parent at bedtime) |
+| `social-short` (9:16) | **Rosa** (bakery owner posting for her shop; watches) |
+| `audio` (podcast, an audio episode played in Car-Mode) | **Dev** (commuter learning by ear) |
+| `episode` | **Dev**, **Walter** (curious history retiree); both listen |
+| `story` (a Bedtime episode; experts Nadia and Aarav) | **Grace** (parent at bedtime; listens) |
 
 ## TRUST / ANTI-SYCOPHANCY protocol (baked into the workflow)
 1. **Producer-critic separation + family diversity** — the critic is a SEPARATE agent from a DIFFERENT

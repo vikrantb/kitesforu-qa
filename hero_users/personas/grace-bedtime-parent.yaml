@@ -8,9 +8,9 @@
 # Use case: story / Bedtime style, audio-only episode.
 name: Grace
 archetype: Parent at bedtime (typical user, not a critic)
-surface: audio                 # audio-only episode; the workflow's audio route must list this slug (today only aarav-audio)
+surface: audio                 # an audio-only bedtime episode: she judges by ear (workflow surface `story`)
 model_family_must_differ_from_generator: true
-harshness: typical             # an ordinary user: judges "did it do what I asked", not craft; the workflow must not hand her the expert REFUTE preamble
+harshness: typical             # an ordinary user: judges "did it do what I asked", not craft
 person: third
 pushback_resistance: true
 cold: true

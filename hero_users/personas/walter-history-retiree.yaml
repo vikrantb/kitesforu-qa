@@ -4,7 +4,7 @@
 # Walter is a curious generalist who has read popular history for decades and asks "was it a good
 # yarn, and did it treat me like an adult". His ask, in his own words:
 #   "tell me the story of how the Panama Canal got built, about 10 minutes, I like the people more than the dates"
-# Use case: long-form story-driven history/documentary episode.
+# Use case: long-form story-driven history/documentary episode, judged by ear (workflow surface `episode`).
 name: Walter
 archetype: Retiree, history-curious listener (typical user, not a critic)
 surface: audio
