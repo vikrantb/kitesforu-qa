@@ -92,7 +92,7 @@ class Doors:
 # ---------------------------------------------------------------------------------------------
 
 #: The fewest lessons and quiz questions ``CreateClassRequest`` accepts: ``total_lessons`` and
-#: ``questions_per_lesson`` are both ``Field(ge=3)``. Its ``lesson_duration_min`` floor is 10 s, the script's default.
+#: ``questions_per_lesson`` are both ``Field(ge=3)``.
 CLASS_LESSONS = 3
 CLASS_QUESTIONS_PER_LESSON = 3
 #: ``subject`` is required (``min_length=1``) and reaches the curriculum prompt. Synthetic, like the default topic.
@@ -103,6 +103,14 @@ CLASS_SUBJECT = "General"
 #: Grade 5 is one of the grades the K-12 form offers (kitesforu-frontend ``hooks/useClassForm.ts`` GRADE_LEVELS).
 CLASS_AUDIENCE = "k12"
 CLASS_GRADE_LEVEL = "Grade 5"
+
+#: The shortest lesson a user can give this class: the smallest of the K-12 form's lesson lengths (kitesforu-frontend
+#: ``hooks/useClassForm.ts`` ``K12_DURATION_OPTIONS``; pinned equal by the tests). It is the default lesson length, and
+#: a shorter one is refused unless the run names :data:`LESSONS_NO_USER_CAN_MAKE_FLAG`. The api's own floor is 10 s, and a
+#: class of 10-second lessons is a shape no user can create: every verdict on its lessons judges that shape.
+CLASS_SMALLEST_LESSON_MIN = 5.0
+#: The override that makes a class of lessons shorter than any a user can pick, by name.
+LESSONS_NO_USER_CAN_MAKE_FLAG = "--class-lessons-no-user-can-make"
 
 CLASS_DOORS = Doors(noun="class", create="/v1/classes", id_key="class_id", read="/v1/classes/{id}",
                     trigger="/v1/classes/{id}/curriculum/generate", started="curriculum generation started")
@@ -146,6 +154,20 @@ def class_llm_usd(quizzes: int) -> Tuple[float, float, float]:
     return (SYLLABUS_CALL.median_usd + quizzes * QUIZ_CALL.median_usd,
             SYLLABUS_CALL.max_usd + quizzes * QUIZ_CALL.max_usd,
             capped_call_usd(SYLLABUS_CALL.max_input_tokens) + quizzes * capped_call_usd(QUIZ_CALL.max_input_tokens))
+
+
+def class_lesson_minutes(duration: str, *, lessons_no_user_can_make: bool = False) -> float:
+    """The lesson length a class is created with: ``duration`` when the run names one, else
+    :data:`CLASS_SMALLEST_LESSON_MIN`. A length shorter than any a user can pick is refused unless the run names
+    :data:`LESSONS_NO_USER_CAN_MAKE_FLAG`."""
+    minutes = float(duration) if str(duration or "").strip() else CLASS_SMALLEST_LESSON_MIN
+    if minutes < CLASS_SMALLEST_LESSON_MIN and not lessons_no_user_can_make:
+        raise ValueError(
+            f"a {minutes:g}-minute class lesson is one no user can make: the shortest lesson the {CLASS_AUDIENCE} class "
+            f"form offers is {CLASS_SMALLEST_LESSON_MIN:g} minutes, so every verdict on such a class judges a shape no "
+            f"user creates. Leave --duration out for {CLASS_SMALLEST_LESSON_MIN:g}, or name "
+            f"{LESSONS_NO_USER_CAN_MAKE_FLAG} to make it anyway")
+    return minutes
 
 
 def build_class_body(*, topic: str, duration: str, style: str, language: str) -> Dict[str, Any]:
@@ -313,19 +335,23 @@ def scorm_estimate() -> vj.Estimate:
 # ---------------------------------------------------------------------------------------------
 
 def plan(flow: str, *, topic: str, duration: str, style: str, language: str, target_id: str,
-         workers_src: str, catalog_label: str) -> Dict[str, Any]:
+         workers_src: str, catalog_label: str, lessons_no_user_can_make: bool = False) -> Dict[str, Any]:
     """The flow's plan in the shape ``verification_job.py plan`` emits, plus its doors. As there, the estimate and
     the ACK decision read the serialized payload, the same string curl sends, never the dict it came from."""
     if flow in _FIRST_STAGE:
         refuse_a_topic_the_worker_refuses(flow, topic)
     if flow == "class":
-        payload = json.dumps(build_class_body(topic=topic, duration=duration, style=style, language=language))
+        minutes = class_lesson_minutes(duration, lessons_no_user_can_make=lessons_no_user_can_make)
+        payload = json.dumps(build_class_body(topic=topic, duration=str(minutes), style=style, language=language))
         sent = json.loads(payload)
         est = class_estimate(sent, images=vj.episode_stills_quote(workers_src))
         needs_ack, reason = class_ack_decision(sent)
         doors = CLASS_DOORS
         summary = (f"{sent['total_lessons']} audio lessons x {sent['lesson_duration_min']:g}min at {LESSON_TIER}, "
                    f"{class_quiz_calls(sent)} quizzes")
+        if minutes < CLASS_SMALLEST_LESSON_MIN:
+            summary = (f"LESSONS NO USER CAN MAKE ({LESSONS_NO_USER_CAN_MAKE_FLAG}: under the "
+                       f"{CLASS_SMALLEST_LESSON_MIN:g}-minute shortest a user can pick): {summary}")
     elif flow == "writeup":
         payload = json.dumps(build_writeup_body(topic=topic))
         sent = json.loads(payload)
@@ -428,6 +454,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--flow", required=True, choices=FLOWS)
     for name in ("--topic", "--duration", "--style", "--language"):
         p.add_argument(name, required=True)
+    p.add_argument("--lessons-no-user-can-make", action="store_true",
+                   help="a class: allow lessons shorter than any a user can pick")
     p.add_argument("--target-id", default="", help="the course or class an export acts on")
     p.add_argument("--workers-src", default="")
     p.add_argument("--catalog-label", default="")
@@ -442,7 +470,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             out = plan(args.flow, topic=args.topic, duration=args.duration, style=args.style,
                        language=args.language, target_id=args.target_id, workers_src=args.workers_src,
-                       catalog_label=args.catalog_label)
+                       catalog_label=args.catalog_label, lessons_no_user_can_make=args.lessons_no_user_can_make)
         except (vj.PricingUnavailable, ValueError) as exc:
             print(f"cannot plan this {args.flow}: {exc}", file=sys.stderr)
             return 1
