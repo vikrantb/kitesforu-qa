@@ -127,6 +127,19 @@ def test_a_job_that_asked_for_no_visuals_is_graded_as_its_audio(gate, monkeypatc
     assert out["next"].startswith("Run the ADVERSARY: a fresh agent LISTENS"), out["next"]
 
 
+def test_an_audio_master_that_says_words_its_script_never_had_is_reviewed(gate, monkeypatch, tmp_path,
+                                                                          producer_reasons, producer_opted_out):
+    """The audio grade reads the producer's pronunciation counts too: a clean master with an invented clause is a
+    MAJOR (REVIEW), never a pass."""
+    doc = _doc({"video_skip_reason": producer_opted_out})
+    doc["stages"] = {"job-audio": {"qa": {"pronunciation": {
+        "enabled": True, "skipped": False, "insertions": 13, "word_count_reference": 62}}}}
+    out, _ = _run(gate, monkeypatch, doc, master=_master(tmp_path / "master.wav"), reasons=producer_reasons,
+                  opted_out=producer_opted_out)
+    assert out["verdict"] == "REVIEW", out["issues"]
+    assert [i["msg"][:22] for i in out["issues"]] == ["SPOKEN, NOT WRITTEN: t"], out["issues"]
+
+
 def test_a_reason_that_says_only_no_video_is_coming_is_never_graded_as_audio(gate, monkeypatch, tmp_path,
                                                                             producer_reasons, producer_opted_out):
     """Every by-design reason but the opted-out one: the producer never re-renders it, but stamps it on jobs that
