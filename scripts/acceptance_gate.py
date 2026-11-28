@@ -511,6 +511,7 @@ def _grade(job_id: str, d: dict[str, Any], frames_dir: str | None, persona: str 
         issues.append({"sev": "MAJOR", "surface": "job", "msg": (
             f"OFF-TOPIC RISK: {len(veo)} abstract Veo video_hero clips on EDUCATIONAL content "
             f"('{topic[:48]}') -> prefer meaningful diagrams")})
+    issues.extend(_spoken_not_written_issues(d))
 
     # The verdict is over every issue, so it is the worse of the two surfaces (and the job's own). `dims`,
     # `duration`, `frames_dir` and `num_frames` stay the watch video's, as they were before the captioned surface
@@ -601,6 +602,31 @@ def _asked_seconds(d: dict[str, Any]) -> float | None:
     if isinstance(asked, bool) or not isinstance(asked, (int, float)) or asked <= 0:
         return None
     return float(asked) * 60.0
+
+
+#: Words the master says that its script does not, as the producer's pronunciation check heard them
+#: (``stages["job-audio"].qa.pronunciation``). A TTS request split mid-sentence can make the model finish the sentence
+#: in words nobody wrote, and no caption or fact check sees them; speech recognition adds a stray word or three to a
+#: clean take. So a finding needs both a count and a share of the script.
+SPOKEN_EXTRA_MIN_WORDS = 5
+SPOKEN_EXTRA_MIN_SHARE = 0.04
+
+
+def _spoken_not_written_issues(d: dict[str, Any]) -> list[dict[str, str]]:
+    """A MAJOR when the master says words its script does not, at both floors; nothing when the check was skipped,
+    switched off, or left no counts."""
+    pron = (((d.get("stages") or {}).get("job-audio") or {}).get("qa") or {}).get("pronunciation")
+    if not isinstance(pron, dict) or pron.get("skipped") or pron.get("enabled") is False:
+        return []
+    try:
+        inserted, reference = int(pron.get("insertions") or 0), int(pron.get("word_count_reference") or 0)
+    except (TypeError, ValueError):
+        return []
+    if reference <= 0 or inserted < SPOKEN_EXTRA_MIN_WORDS or inserted / reference < SPOKEN_EXTRA_MIN_SHARE:
+        return []
+    return [{"sev": "MAJOR", "surface": "job", "msg": (
+        f"SPOKEN, NOT WRITTEN: the master says {inserted} words its script does not ({inserted / reference:.0%} of "
+        f"{reference}), as the pronunciation check heard them; no caption shows them and no fact check read them")}]
 
 
 def _length_issues(duration: float, asked_s: float | None) -> list[dict[str, str]]:
@@ -816,6 +842,7 @@ def _grade_audio(job_id: str, d: dict[str, Any], topic: str, no_video: str, fram
     if not transcript["words"]:
         issues.append({"sev": "MAJOR", "msg": (
             "NO TRANSCRIPT: the job carries no script dialogue, so nothing says what the master should say")})
+    issues.extend(_spoken_not_written_issues(d))
     return {**out, "duration": duration, "verdict": _verdict(issues), "issues": issues,
             "audio_checks": [{k: c[k] for k in ("check_id", "severity", "passed", "skipped", "evidence")}
                              for c in checks],
